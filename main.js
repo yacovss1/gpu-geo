@@ -225,6 +225,10 @@ async function main() {
     // Initialize renderer and camera
     const renderer = new MapRenderer(device, context, format);
     const camera = new Camera(canvas.width, canvas.height);
+    
+    // Start at world center [0, 0] (Greenwich/Equator)
+    camera.position = [0, 0];
+    
     renderer.createResources(canvas, camera);
 
     // Store loaded tiles
@@ -407,6 +411,16 @@ async function main() {
     async function frame() {
         // Update camera and transform matrices
         camera.updatePosition();
+        
+        // Debug: Track if camera position changes unexpectedly
+        if (!window._lastCameraPos) window._lastCameraPos = [...camera.position];
+        const posChanged = Math.abs(camera.position[0] - window._lastCameraPos[0]) > 0.01 || 
+                          Math.abs(camera.position[1] - window._lastCameraPos[1]) > 0.01;
+        if (posChanged && camera.zoom > 1.5) {
+            console.log('📹 Camera moved in frame loop to [' + camera.position[0].toFixed(3) + ', ' + camera.position[1].toFixed(3) + '] zoom=' + camera.zoom.toFixed(2));
+            window._lastCameraPos = [...camera.position];
+        }
+        
         const transformMatrix = camera.getMatrix();
         
         // Update transform matrices

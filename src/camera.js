@@ -6,23 +6,25 @@ export class Camera extends EventTarget {
         this.position = [0, 0];
         this.trueZoom = 1;
         this.maxFetchZoom = 6;    // Maximum zoom level for fetching tiles
-        this.maxZoom = 48;        // Increase from 24 to 48 for much higher zoom capability
-        this.minZoom = 1;
-        this.zoom = 1;
-        this.zoomFactor = 1.25;   // INCREASED from 1.1 to 1.25 for faster zooming
+        this.maxZoom = 22;        // Max zoom level (2^22 = ~4M scale, same as MapLibre)
+        this.minZoom = 0;         // Start at 0 for exponential zoom (2^0 = 1x scale)
+        this.zoom = 0;            // Start at zoom 0
+        this.zoomFactor = 5.0;   // *** EXTREME TEST VALUE *** Should zoom WAY faster
         this.viewportWidth = viewportWidth;
         this.viewportHeight = viewportHeight;
         this.velocity = [0, 0];
-        this.friction = 1.0;
+        this.friction = 0.92;  // Enable drift (was 1.0)
         this.velocityFactor = 0.5;
         this.zoomSpeed = 0.1;
         this.zoomEndTimeout = null;
         this.zoomEndDelay = 250;
-        this.mouseX = 0;
-        this.mouseY = 0;
         this._cachedMatrix = null;
         this._lastState = { pos: [...this.position], zoom: this.zoom };
-        this.mouseWorldPosition = [0, 0]; // Track mouse position in world coordinates
+        
+        // Store mouse position in NORMALIZED screen coordinates (0-1 range)
+        // This way it's independent of zoom level
+        this.mouseScreenX = 0.5; // Center of screen
+        this.mouseScreenY = 0.5;
         this.lastZoomDisplay = -1; // Track the last displayed zoom for debugging
 
         // Add a debug variable to track what's happening with zoom levels
@@ -31,19 +33,28 @@ export class Camera extends EventTarget {
             visual: 0,
             lastUpdate: Date.now()
         };
-
-        document.addEventListener('mousemove', (event) => this.updateMousePosition(event));
     }
 
-    updateMousePosition(event) {
-        const rect = event.target.getBoundingClientRect();
-        const mouseClipX = ((event.clientX - rect.left) / rect.width) * 2 - 1; // Convert to clip space
-        const mouseClipY = 1 - ((event.clientY - rect.top) / rect.height) * 2; // Convert to clip space (flip Y)
+    updateMousePosition(event, canvas = null) {
+        const target = canvas || event.target;
+        const rect = target.getBoundingClientRect();
+        // Store normalized screen position (0 to 1)
+        this.mouseScreenX = (event.clientX - rect.left) / rect.width;
+        this.mouseScreenY = (event.clientY - rect.top) / rect.height;
+        // console.log(`🖱️ Mouse updated: screen[${this.mouseScreenX.toFixed(3)}, ${this.mouseScreenY.toFixed(3)}]`);
+    }
 
-        // Convert mouse clip space position to world coordinates
+    // Convert current mouse screen position to world coordinates
+    getMouseWorldPosition() {
+        // Convert from screen (0-1) to clip space (-1 to 1)
+        const mouseClipX = this.mouseScreenX * 2 - 1;
+        const mouseClipY = 1 - this.mouseScreenY * 2; // Flip Y
+        
         const aspectRatio = this.viewportWidth / this.viewportHeight;
-        this.mouseWorldPosition[0] = this.position[0] + (mouseClipX / this.zoom) * aspectRatio;
-        this.mouseWorldPosition[1] = this.position[1] + (mouseClipY / this.zoom);
+        const worldX = this.position[0] + (mouseClipX / this.zoom) * aspectRatio;
+        const worldY = this.position[1] + (mouseClipY / this.zoom);
+        
+        return [worldX, worldY];
     }
 
     getMatrix() {
@@ -60,16 +71,19 @@ export class Camera extends EventTarget {
         // Store current zoom for debugging
         this._zoomDebug.raw = this.zoom;
         
-        // CRITICAL FIX: Use completely linear scaling with NO logarithmic compression
+        // Use exponential zoom like MapLibre: 2^zoom
         const aspectRatio = this.viewportWidth / this.viewportHeight;
         const matrix = mat4.create();
         
-        // Translate by negative camera position (centering)
-        mat4.translate(matrix, matrix, [-this.position[0], -this.position[1], 0]);
+        // CORRECT ORDER: Scale FIRST (will be applied last), then translate (will be applied first)
+        // This way: vertex -> translate by -camera -> scale by zoom
+        const effectiveZoom = Math.pow(2, this.zoom);
         
-        // FIXED: Use direct linear zoom with no compression at all
-        // This ensures that both features and textures scale at the same rate
-        const effectiveZoom = this.zoom;
+        // Apply the zoom scale FIRST in the matrix (but will be applied LAST to vertices)
+        mat4.scale(matrix, matrix, [effectiveZoom / aspectRatio, effectiveZoom, 1]);
+        
+        // Translate by negative camera position (this will be applied FIRST to vertices)
+        mat4.translate(matrix, matrix, [-this.position[0], -this.position[1], 0]);
         
         // Store the visual zoom for UI display
         this._visualZoom = effectiveZoom;
@@ -80,9 +94,6 @@ export class Camera extends EventTarget {
             console.log(`ZOOM DEBUG - Raw: ${this.zoom.toFixed(2)}, Visual: ${effectiveZoom.toFixed(2)}, Ratio: 1.0`);
             this.lastZoomDisplay = this.zoom;
         }
-        
-        // Apply the zoom scale directly
-        mat4.scale(matrix, matrix, [effectiveZoom / aspectRatio, effectiveZoom, 1]);
         
         this._cachedMatrix = matrix;
         this._lastState = { pos: [...this.position], zoom: this.zoom };
@@ -111,27 +122,22 @@ export class Camera extends EventTarget {
     }
 
     pan(dx, dy) {
-        // MODIFIED: Reduce panning speed at higher zoom levels
-        // Apply a reducing factor that scales inversely with zoom
+        // Pan speed should be inversely proportional to zoom scale
+        // At higher zooms, you're more "zoomed in" so same pixel movement = smaller world movement
         
-        // Start with base velocity factor
-        let panSpeed = this.velocityFactor;
+        // Calculate the effective zoom scale (2^zoom)
+        const effectiveZoom = Math.pow(2, this.zoom);
         
-        // Apply speed reduction based on zoom level
-        if (this.zoom > 4) {
-            // Progressively reduce speed at higher zoom levels
-            // At zoom 4+, start reducing speed, at zoom 10+ reduce to 1/3
-            const reductionFactor = 1.0 / Math.max(1, this.zoom / 4);
-            panSpeed *= Math.min(1.0, Math.max(0.33, reductionFactor * 1.5));
-        }
+        // Base pan speed inversely proportional to zoom
+        const panSpeed = this.velocityFactor / effectiveZoom;
         
-        // Apply the pan with the new speed calculation
+        // Apply the pan
         this.position[0] -= dx * panSpeed;
         this.position[1] += dy * panSpeed; 
         
         this.clampPosition();
         
-        // Also reduce momentum/velocity at higher zoom levels
+        // Also set velocity for momentum
         this.velocity[0] = dx * panSpeed;
         this.velocity[1] = -dy * panSpeed;
         
@@ -140,6 +146,9 @@ export class Camera extends EventTarget {
     }
 
     updatePosition() {
+        const hadVelocity = Math.abs(this.velocity[0]) > 0.01 || Math.abs(this.velocity[1]) > 0.01;
+        const posBefore = [...this.position];
+        
         this.position[0] -= this.velocity[0];
         this.position[1] -= this.velocity[1];  // Keep negative since velocity is now negative
         this.velocity[0] *= this.friction;
@@ -147,94 +156,131 @@ export class Camera extends EventTarget {
         this.clampPosition();
         if (Math.abs(this.velocity[0]) < 0.01) this.velocity[0] = 0;
         if (Math.abs(this.velocity[1]) < 0.01) this.velocity[1] = 0;
+        
+        // Debug if position changed
+        if (hadVelocity && (this.position[0] !== posBefore[0] || this.position[1] !== posBefore[1])) {
+            console.log('⚡ updatePosition moved camera from', posBefore[0].toFixed(3), posBefore[1].toFixed(3), 
+                       'to', this.position[0].toFixed(3), this.position[1].toFixed(3),
+                       'velocity:', this.velocity[0].toFixed(3), this.velocity[1].toFixed(3));
+        }
     }
     
     zoomIn(factor = null) {
+        // console.log('🔍 ZOOM IN CALLED');
         const prevZoom = this.zoom;
-        
-        // FIXED: Use a more aggressive zoom factor and remove the adjustment that slows at high zoom
         const zoomFactor = factor || this.zoomFactor;
         
-        // NEW: Calculate next zoom with checks to prevent getting stuck at the limit
-        const nextZoom = prevZoom * zoomFactor;
-        
-        // Apply zoom with safeguards to prevent sticking at limit
-        if (nextZoom > this.maxZoom * 0.99) {
-            // If we're very close to max, set to exactly max to prevent floating point issues
-            this.zoom = this.maxZoom;
-        } else {
-            this.zoom = Math.min(this.maxZoom, nextZoom);
-        }
-        
-        // CRITICAL: Log every zoom step
-        console.log(`ZOOM: ${prevZoom.toFixed(2)} → ${this.zoom.toFixed(2)}`);
-
-        if (this.zoom !== prevZoom) {
-            // NEW: Add enhanced logging to track zoom behavior
-            console.log(
-                `ZOOM IN: ${prevZoom.toFixed(2)} → ${this.zoom.toFixed(2)} ` +
-                `[factor: ${zoomFactor.toFixed(2)}, max: ${this.maxZoom}]`
-            );
-        
-            // Adjust position to zoom toward the mouse pointer
+        if (this.zoom < this.maxZoom) {
+            // Get mouse position in clip space (-1 to 1)
+            const mouseClipX = this.mouseScreenX * 2 - 1;
+            const mouseClipY = this.mouseScreenY * 2 - 1;  // Screen Y already goes down, clip Y goes down too
             const aspectRatio = this.viewportWidth / this.viewportHeight;
-            const dx = (this.mouseWorldPosition[0] - this.position[0]) * (1 - prevZoom / this.zoom);
-            const dy = (this.mouseWorldPosition[1] - this.position[1]) * (1 - prevZoom / this.zoom);
-            this.position[0] += dx;
-            this.position[1] += dy;
+            
+            console.log('� ZOOM:', prevZoom.toFixed(2), '→', (prevZoom * zoomFactor).toFixed(2), 'at mouse[' + this.mouseScreenX.toFixed(2) + ', ' + this.mouseScreenY.toFixed(2) + ']');
+            /*
+            console.log('�📍 Mouse screen:', this.mouseScreenX.toFixed(3), this.mouseScreenY.toFixed(3));
+            console.log('📍 Mouse clip:', mouseClipX.toFixed(3), mouseClipY.toFixed(3));
+            console.log('📐 Aspect:', aspectRatio.toFixed(3), 'Viewport:', this.viewportWidth + 'x' + this.viewportHeight);
+            console.log('Camera BEFORE: pos[' + this.position[0].toFixed(3) + ', ' + this.position[1].toFixed(3) + '] zoom=' + prevZoom.toFixed(2));
+            
+            // TEST: What offset does the mouse represent?
+            const offsetX = mouseClipX / prevZoom;
+            const offsetY = mouseClipY / prevZoom;
+            console.log('🧮 Mouse offset from camera (world units):', offsetX.toFixed(3), offsetY.toFixed(3));
+            */
+            
+            // Calculate effective zoom scales (2^zoom)
+            const prevEffectiveZoom = Math.pow(2, prevZoom);
+            
+            // Calculate the point in world space that is under the mouse BEFORE zoom
+            // World space is in Mercator projection (same as tiles)
+            // MUST account for aspect ratio because matrix scales X by (zoom/aspectRatio)
+            const worldX = this.position[0] + (mouseClipX * aspectRatio) / prevEffectiveZoom;
+            const worldY = this.position[1] + mouseClipY / prevEffectiveZoom;
+            
+            // Apply zoom (increment zoom level by 1 for each zoom in)
+            this.zoom = Math.min(this.maxZoom, prevZoom + 1);
+            const nextEffectiveZoom = Math.pow(2, this.zoom);
+            
+            // Move camera so that worldX,worldY is still under the mouse AFTER zoom
+            this.position[0] = worldX - (mouseClipX * aspectRatio) / nextEffectiveZoom;
+            this.position[1] = worldY - mouseClipY / nextEffectiveZoom;
+            
+            console.log('📍 Camera moved to [' + this.position[0].toFixed(3) + ', ' + this.position[1].toFixed(3) + ']');
+            /*
+            console.log('🎯 World point:', worldX.toFixed(3), worldY.toFixed(3));
+            console.log('Camera AFTER: pos[' + this.position[0].toFixed(3) + ', ' + this.position[1].toFixed(3) + '] zoom=' + this.zoom.toFixed(2));
+            
+            // Debug: Calculate where the world point should appear on screen after zoom
+            const screenAfterX = ((worldX - this.position[0]) * this.zoom / aspectRatio + 1) / 2;
+            const screenAfterY = (1 - (worldY - this.position[1]) * this.zoom) / 2;
+            console.log('🖼️ World point should render at screen:', screenAfterX.toFixed(3), screenAfterY.toFixed(3));
+            console.log('   Expected mouse:', this.mouseScreenX.toFixed(3), this.mouseScreenY.toFixed(3));
+            */
+            
+            const beforeClamp = [...this.position];
             this.clampPosition();
+            
+            if (this.position[0] !== beforeClamp[0] || this.position[1] !== beforeClamp[1]) {
+                console.log('⚠️ CLAMPED from:', beforeClamp[0].toFixed(3), beforeClamp[1].toFixed(3), 'to:', this.position[0].toFixed(3), this.position[1].toFixed(3));
+            }
+            
+            // CRITICAL: Stop any velocity/momentum during zoom
+            this.velocity[0] = 0;
+            this.velocity[1] = 0;
+            
             this.triggerEvent('zoom', { factor: zoomFactor });
-
-            // Always trigger zoomend on any zoom change
             this.scheduleZoomEnd();
-        } else if (this.zoom >= this.maxZoom) {
-            // Add a clear message when at max zoom
-            console.log(`AT MAX ZOOM: ${this.zoom.toFixed(2)} (limit: ${this.maxZoom})`);
         }
     }
 
     zoomOut(factor = null) {
         const prevZoom = this.zoom;
-        
-        // FIXED: Use a more aggressive zoom factor
         const zoomFactor = factor || this.zoomFactor;
         
-        this.zoom = Math.max(this.minZoom, this.zoom / zoomFactor);
-        
-        // CRITICAL: Log every zoom step
-        console.log(`ZOOM OUT: ${prevZoom.toFixed(2)} → ${this.zoom.toFixed(2)}`);
-
-        if (this.zoom !== prevZoom) {
-            // Adjust position to zoom toward the mouse pointer
+        if (this.zoom > this.minZoom) {
+            // Get mouse position in clip space (-1 to 1)
+            const mouseClipX = this.mouseScreenX * 2 - 1;
+            const mouseClipY = this.mouseScreenY * 2 - 1;  // Screen Y already goes down, clip Y goes down too
             const aspectRatio = this.viewportWidth / this.viewportHeight;
-            const dx = (this.mouseWorldPosition[0] - this.position[0]) * (1 - prevZoom / this.zoom);
-            const dy = (this.mouseWorldPosition[1] - this.position[1]) * (1 - prevZoom / this.zoom);
-            this.position[0] += dx;
-            this.position[1] += dy;
+            
+            // Calculate effective zoom scales (2^zoom)
+            const prevEffectiveZoom = Math.pow(2, prevZoom);
+            
+            // Calculate the point in world space that is under the mouse BEFORE zoom
+            const worldX = this.position[0] + (mouseClipX * aspectRatio) / prevEffectiveZoom;
+            const worldY = this.position[1] + mouseClipY / prevEffectiveZoom;
+            
+            // Apply zoom (decrement zoom level by 1 for each zoom out)
+            this.zoom = Math.max(this.minZoom, prevZoom - 1);
+            const nextEffectiveZoom = Math.pow(2, this.zoom);
+            
+            // Move camera so that worldX,worldY is still under the mouse AFTER zoom
+            this.position[0] = worldX - (mouseClipX * aspectRatio) / nextEffectiveZoom;
+            this.position[1] = worldY - mouseClipY / nextEffectiveZoom;
+            
+            // CRITICAL: Stop any velocity/momentum during zoom
+            this.velocity[0] = 0;
+            this.velocity[1] = 0;
+            
             this.clampPosition();
             this.triggerEvent('zoom', { factor: zoomFactor });
-
-            // Always trigger zoomend on any zoom change
-            this.scheduleZoomEnd(this.zoom);
+            this.scheduleZoomEnd();
         }
     }
 
     clampPosition() {
-        const halfViewportWidth = this.viewportWidth / (2 * this.zoom);
-        const halfViewportHeight = this.viewportHeight / (2 * this.zoom);
-        const worldScale = 1000;
+        // Define world bounds (these are in world coordinates, not screen)
         const worldBounds = {
-            minX: -1 * worldScale,
-            maxX: 1 * worldScale,
-            minY: -1 * worldScale,
-            maxY: 1 * worldScale
+            minX: -2,
+            maxX: 2,
+            minY: -2,
+            maxY: 2
         };
-        const minX = worldBounds.minX / halfViewportWidth;
-        const maxX = worldBounds.maxX / halfViewportWidth;
-        const minY = worldBounds.minY / halfViewportHeight;
-        const maxY = worldBounds.maxY / halfViewportHeight;
-        this.position[0] = Math.max(minX, Math.min(maxX, this.position[0]));
-        this.position[1] = Math.max(minY, Math.min(maxY, this.position[1]));
+        
+        // Clamp camera position to stay within world bounds
+        this.position[0] = Math.max(worldBounds.minX, Math.min(worldBounds.maxX, this.position[0]));
+        this.position[1] = Math.max(worldBounds.minY, Math.min(worldBounds.maxY, this.position[1]));
     }
 
     scheduleZoomEnd() {
@@ -262,8 +308,12 @@ export class Camera extends EventTarget {
 
     getViewport() {
         // Calculate the viewport extents in world coordinates
-        const halfWidth = this.viewportWidth / 2 / this.zoom;
-        const halfHeight = this.viewportHeight / 2 / this.zoom;
+        const aspectRatio = this.viewportWidth / this.viewportHeight;
+        
+        // The viewport size in world space is determined by zoom
+        // But we need to account for aspect ratio in X direction since matrix scales X by (zoom / aspectRatio)
+        const halfWidth = (this.viewportWidth / 2) / (this.zoom / aspectRatio);
+        const halfHeight = (this.viewportHeight / 2) / this.zoom;
         
         // Get raw viewport coordinates
         const rawViewport = {

@@ -13,6 +13,10 @@ export function setupEventListeners(canvas, camera, device, hiddenTexture, tileB
     canvas.addEventListener('wheel', (event) => {
         event.preventDefault();  // Prevent page scrolling
         
+        // CRITICAL FIX: Update mouse world position BEFORE zooming
+        // Pass canvas explicitly to ensure correct bounding rect
+        camera.updateMousePosition(event, canvas);
+        
         // Use a smoother zoom factor that varies with zoom level
         // Lower zoom factor at higher zoom levels for more control
         const baseZoomFactor = 1.3;  
@@ -74,9 +78,14 @@ export function setupEventListeners(canvas, camera, device, hiddenTexture, tileB
 
     // Pan the camera on mouse move
     canvas.addEventListener('mousemove', (event) => {
+        // CRITICAL FIX: Always update mouse world position for accurate zoom-to-mouse
+        camera.updateMousePosition(event, canvas);
+        
         if (isPanning) {
-            const dx = (event.clientX - lastX) / canvas.clientWidth * camera.zoom;
-            const dy = (lastY - event.clientY) / canvas.clientHeight * camera.zoom;
+            // Calculate effective zoom (2^zoom) for proper pan scaling
+            const effectiveZoom = Math.pow(2, camera.zoom);
+            const dx = (event.clientX - lastX) / canvas.clientWidth * effectiveZoom;
+            const dy = (lastY - event.clientY) / canvas.clientHeight * effectiveZoom;
             camera.pan(dx, dy);
             lastX = event.clientX;
             lastY = event.clientY;

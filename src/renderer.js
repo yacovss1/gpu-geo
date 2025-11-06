@@ -347,6 +347,12 @@ export class MapRenderer {
     
     // Fix the updateCameraTransform method to properly handle zoom levels
     updateCameraTransform(matrix) {
+        // Debug only on significant changes
+        if (!this._lastMatrix || Math.abs(matrix[0] - this._lastMatrix[0]) > 0.1 || Math.abs(matrix[12] - this._lastMatrix[12]) > 0.05) {
+            // console.log('🎬 Matrix sent to GPU: translate[' + matrix[12].toFixed(3) + ', ' + matrix[13].toFixed(3) + '] scale[' + matrix[0].toFixed(3) + ', ' + matrix[5].toFixed(3) + ']');
+            this._lastMatrix = Array.from(matrix);
+        }
+        
         // FIXED: Ensure we're using a plain array for logging
         const matrixArray = Array.from(matrix);
         

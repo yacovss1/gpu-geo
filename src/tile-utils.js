@@ -46,6 +46,14 @@ export function getVisibleTiles(camera, fetchZoom) {
     const topLeftTile = worldToTile(paddedViewport.left, paddedViewport.top, fetchZoom);
     const bottomRightTile = worldToTile(paddedViewport.right, paddedViewport.bottom, fetchZoom);
     
+    // Debug viewport bounds
+    if (Math.random() < 0.1) { // Only log 10% of the time
+        console.log('🗺️ Viewport:', 'left=' + paddedViewport.left.toFixed(3), 'right=' + paddedViewport.right.toFixed(3), 
+                   'top=' + paddedViewport.top.toFixed(3), 'bottom=' + paddedViewport.bottom.toFixed(3));
+        console.log('🗺️ Tiles:', 'topLeft=[' + topLeftTile[0].toFixed(1) + ',' + topLeftTile[1].toFixed(1) + ']',
+                   'bottomRight=[' + bottomRightTile[0].toFixed(1) + ',' + bottomRightTile[1].toFixed(1) + ']');
+    }
+    
     // IMPROVED: Much larger padding for tiles to prevent truncation
     const padding = overzoomPadding; // Use overzoom padding
     
