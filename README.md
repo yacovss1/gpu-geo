@@ -1,6 +1,6 @@
-# WebGPU Map Renderer
+# gpu-geo
 
-> A high-performance, GPU-accelerated web mapping engine built from scratch with WebGPU compute shaders.
+> GPU-accelerated geographic rendering engine. Built from scratch with WebGPU compute shaders for parallel coordinate transformation and experimental cloth-physics triangulation.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![WebGPU](https://img.shields.io/badge/WebGPU-Enabled-brightgreen.svg)](https://www.w3.org/TR/webgpu/)
@@ -39,8 +39,8 @@ Check browser compatibility: https://caniuse.com/webgpu
 
 ```bash
 # Clone the repository
-git clone https://github.com/YOUR-USERNAME/webgpu-map-renderer.git
-cd webgpu-map-renderer
+git clone https://github.com/YOUR-USERNAME/gpu-geo.git
+cd gpu-geo
 
 # Install dependencies
 npm install
@@ -116,14 +116,22 @@ Preliminary benchmarks show **2-5x faster** coordinate transformation for datase
 
 ## 🛣️ Roadmap
 
+### Current Focus
 - [ ] Fix zoom-to-mouse positioning
 - [ ] Add proper tile request prioritization
-- [ ] Implement text/label rendering
-- [ ] Add Web Worker for GeoJSON parsing
 - [ ] Complete TypeScript migration
-- [ ] Add automated tests
+- [ ] Add Web Worker for GeoJSON parsing
+
+### Experimental Research
+- [ ] 🔬 **GPU cloth-physics triangulation** - Replace CPU-based Earcut with GPU spring simulation
+- [ ] Animated polygon triangulation
+- [ ] Adaptive mesh refinement using physics
+
+### Future Enhancements
+- [ ] Text/label rendering
 - [ ] Support custom tile sources
 - [ ] Mobile optimization
+- [ ] Automated tests
 
 See [`docs/`](docs/) for detailed architectural analysis and implementation guides.
 

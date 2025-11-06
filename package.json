@@ -1,17 +1,17 @@
 {
-  "name": "webgpu-map-renderer",
+  "name": "gpu-geo",
   "version": "0.1.0",
-  "description": "High-performance web mapping engine with GPU-accelerated coordinate transformation using WebGPU compute shaders",
+  "description": "GPU-accelerated geographic rendering engine using WebGPU compute shaders for coordinate transformation and future cloth-physics triangulation",
   "main": "dist/index.js",
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/YOUR-USERNAME/webgpu-map-renderer.git"
+    "url": "git+https://github.com/YOUR-USERNAME/gpu-geo.git"
   },
   "bugs": {
-    "url": "https://github.com/YOUR-USERNAME/webgpu-map-renderer/issues"
+    "url": "https://github.com/YOUR-USERNAME/gpu-geo/issues"
   },
-  "homepage": "https://github.com/YOUR-USERNAME/webgpu-map-renderer#readme",
+  "homepage": "https://github.com/YOUR-USERNAME/gpu-geo#readme",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",

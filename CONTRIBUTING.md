@@ -1,4 +1,4 @@
-# Contributing to WebGPU Map Renderer
+# Contributing to gpu-geo
 
 Thank you for your interest in contributing! This document provides guidelines and information for contributors.
 
@@ -7,8 +7,8 @@ Thank you for your interest in contributing! This document provides guidelines a
 1. **Fork the repository** on GitHub
 2. **Clone your fork** locally:
    ```bash
-   git clone https://github.com/YOUR-USERNAME/webgpu-map-renderer.git
-   cd webgpu-map-renderer
+   git clone https://github.com/YOUR-USERNAME/gpu-geo.git
+   cd gpu-geo
    ```
 3. **Install dependencies**:
    ```bash

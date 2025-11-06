@@ -18,8 +18,8 @@ git commit -m "Initial commit: WebGPU Map Renderer"
 ## 2️⃣ Create GitHub Repository
 
 1. Go to https://github.com/new
-2. Repository name: `webgpu-map-renderer`
-3. Description: "High-performance web mapping engine with GPU-accelerated coordinate transformation"
+2. Repository name: `gpu-geo`
+3. Description: "GPU-accelerated geographic rendering with WebGPU compute shaders"
 4. **Public** repository (for open source)
 5. **Don't** initialize with README (we already have one)
 6. Click "Create repository"
@@ -28,7 +28,7 @@ git commit -m "Initial commit: WebGPU Map Renderer"
 
 ```powershell
 # Add remote (replace YOUR-USERNAME with your GitHub username)
-git remote add origin https://github.com/YOUR-USERNAME/webgpu-map-renderer.git
+git remote add origin https://github.com/YOUR-USERNAME/gpu-geo.git
 
 # Push to GitHub
 git branch -M main
@@ -41,7 +41,7 @@ git push -u origin main
 2. Navigate to **Pages** (left sidebar)
 3. Source: **GitHub Actions**
 4. The site will automatically deploy when you push to `main`
-5. Your live demo will be at: `https://YOUR-USERNAME.github.io/webgpu-map-renderer/`
+5. Your live demo will be at: `https://YOUR-USERNAME.github.io/gpu-geo/`
 
 ## 5️⃣ Update Package.json
 
