@@ -7,7 +7,6 @@ import { setupEventListeners } from './src/events.js';
 import { getVisibleTiles } from './src/tile-utils.js'; 
 import { createMarkerPipeline } from './src/markerPipeline.js';
 import { createAccumulatorPipeline, createCenterPipeline } from './src/markerCompute.js';
-import {WebGPUTranslationLayer} from './src/core/translation/WebGPUTranslationLayer.ts';
 
 // Define constants at file scope to ensure they're available everywhere
 // Expanded to accommodate compound IDs (feature ID + polygon ID)

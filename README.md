@@ -1,53 +1,61 @@
 # gpu-geo
 
-> GPU-accelerated geographic rendering engine. Built from scratch with WebGPU compute shaders for parallel coordinate transformation and experimental cloth-physics triangulation.
+> WebGPU-accelerated vector map renderer with real-time coordinate transformation and zoom-to-mouse controls.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![WebGPU](https://img.shields.io/badge/WebGPU-Enabled-brightgreen.svg)](https://www.w3.org/TR/webgpu/)
 
-## 🚀 Features
+## ✨ Features
 
-- **🎮 GPU-Accelerated Coordinate Transformation** - Leverage WebGPU compute shaders for massive parallel processing of geographic coordinates
-- **🎯 Efficient Feature Picking** - Hidden buffer technique for fast, pixel-perfect feature identification
-- **📊 Real-time Performance Monitoring** - Built-in FPS and render time tracking
-- **🗺️ Vector Tile Support** - Render MapLibre/Mapbox vector tiles up to zoom level 48
-- **🎨 Custom Rendering Pipeline** - Full control over the rendering stack with WebGPU
-- **📦 TypeScript Support** - Gradual migration to TypeScript for better type safety
+- **🎮 GPU Compute Shaders** - Parallel coordinate transformation (10,000+ coords in <10ms)
+- **🔍 Zoom-to-Mouse** - Smooth exponential zoom (2^zoom) toward cursor position
+- **🗺️ Vector Tiles** - MapLibre tiles with overzooming (fetch zoom 6, visual zoom 22)
+- **🎯 Feature Picking** - Hidden buffer technique for pixel-perfect click detection
+- **📊 Dual Render Pass** - Edge detection shader for crisp borders
+- **⚡ High Performance** - 60fps with hundreds of features, tile caching, matrix caching
 
-## 🎯 Why This Project?
-
-Most web mapping libraries rely on WebGL and CPU-based coordinate transformations. This project explores using **WebGPU compute shaders** to:
-- Offload coordinate transformation to the GPU
-- Process thousands of coordinates in parallel
-- Achieve better performance for large, complex geometries
-
-## 📸 Demo
-
-> **Live Demo Coming Soon** - Will be deployed to GitHub Pages
-
-## 🛠️ Prerequisites
-
-- **Node.js** 18+ 
-- **Modern Browser** with WebGPU support:
-  - Chrome/Edge 113+
-  - Safari Technology Preview (with WebGPU enabled)
-  - Firefox Nightly (with `dom.webgpu.enabled` flag)
-
-Check browser compatibility: https://caniuse.com/webgpu
-
-## 🚀 Quick Start
+## � Quick Start
 
 ```bash
-# Clone the repository
-git clone https://github.com/YOUR-USERNAME/gpu-geo.git
-cd gpu-geo
-
 # Install dependencies
 npm install
 
 # Start development server
 npm run dev
 ```
+
+Visit `http://localhost:3000` - Use mouse wheel to zoom, drag to pan.
+
+## 📚 Documentation
+
+- **[Architecture](./docs/ARCHITECTURE.md)** - System design and rendering pipeline
+- **[Camera](./docs/CAMERA.md)** - Zoom, pan, and viewport management
+- **[Coordinates](./docs/COORDINATES.md)** - How coordinates flow through the system
+- **[Performance](./docs/PERFORMANCE.md)** - GPU acceleration and optimization
+- **[API Reference](./docs/API.md)** - Core classes and methods
+
+## 🎯 How It Works
+
+**Rendering Pipeline**:
+```
+User Input → Camera → Matrix (2^zoom) → Viewport → Tiles → 
+VectorTile → GeoJSON → Mercator coords → GPU Transform → 
+Vertex Buffers → WebGPU Render → Screen
+```
+
+**Key Components**:
+- **Camera**: Exponential zoom system (2^zoom), zoom-to-mouse calculations
+- **Tiles**: Fetch from MapLibre demo server (zoom 0-6), overzoom for higher levels
+- **GPU**: Compute shader batch processes 1000+ coords in parallel
+- **Rendering**: Dual pass (hidden texture for feature IDs, visible for colors)
+
+## 🛠️ Prerequisites
+
+- **Node.js** 18+
+- **Browser** with WebGPU support:
+  - Chrome/Edge 113+
+  - Safari Technology Preview (experimental)
+  - Check: https://caniuse.com/webgpu
 
 Open `http://localhost:5173` in a WebGPU-compatible browser.
 
