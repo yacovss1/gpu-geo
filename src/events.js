@@ -1,0 +1,168 @@
+import { toggleCountryHighlight } from './utils.js';
+
+// At module scope, add a shared read buffer for click events. Note: Ensure its size (16) matches usage.
+let sharedReadBuffer = null;
+let bufferIsMapped = false; // Track buffer mapping state
+
+export function setupEventListeners(canvas, camera, device, hiddenTexture, tileBuffers, pickedIdBuffer) {
+    let isPanning = false;
+    let lastX = 0;
+    let lastY = 0;
+
+    // FIXED: Much more aggressive zooming
+    canvas.addEventListener('wheel', (event) => {
+        event.preventDefault();  // Prevent page scrolling
+        
+        // Use a smoother zoom factor that varies with zoom level
+        // Lower zoom factor at higher zoom levels for more control
+        const baseZoomFactor = 1.3;  
+        let wheelZoomFactor;
+        
+        if (camera.zoom > 15) {
+            wheelZoomFactor = 1.1;  // Finer control at high zoom
+        } else if (camera.zoom > 10) {
+            wheelZoomFactor = 1.2;  // Medium control at medium zoom
+        } else {
+            wheelZoomFactor = baseZoomFactor;  // Normal zooming at low zoom
+        }
+        
+        // Display current zoom level before zoom
+        const beforeZoom = camera.zoom;
+        
+        if (event.deltaY < 0) {
+            camera.zoomIn(wheelZoomFactor);
+        } else {
+            camera.zoomOut(wheelZoomFactor);
+        }
+        
+        // Add debug visualization to verify zoom is working
+        const zoomLevel = camera.zoom.toFixed(1);
+        const visualZoom = camera.getVisualZoom().toFixed(1);
+        console.log(`ZOOM: ${beforeZoom.toFixed(2)} → ${camera.zoom.toFixed(2)} (visual: ${visualZoom})`);
+        
+        // Create a temporary overlay showing the zoom level
+        const overlay = document.createElement('div');
+        overlay.textContent = `Zoom: ${camera.zoom.toFixed(2)}`;
+        overlay.style.position = 'absolute';
+        overlay.style.top = '10px';
+        overlay.style.left = '10px';
+        overlay.style.background = 'rgba(0,0,0,0.7)';
+        overlay.style.color = 'white';
+        overlay.style.padding = '5px 10px';
+        overlay.style.borderRadius = '5px';
+        overlay.style.fontSize = '16px';
+        document.body.appendChild(overlay);
+        
+        // Remove after 1.5 seconds
+        setTimeout(() => {
+            document.body.removeChild(overlay);
+        }, 1500);
+        
+    }, { passive: false });  // Important for preventDefault to work
+
+    // Start panning on mouse down
+    canvas.addEventListener('mousedown', (event) => {
+        isPanning = true;
+        lastX = event.clientX;
+        lastY = event.clientY;
+    });
+
+    // Stop panning on mouse up
+    canvas.addEventListener('mouseup', () => {
+        isPanning = false;
+    });
+
+    // Pan the camera on mouse move
+    canvas.addEventListener('mousemove', (event) => {
+        if (isPanning) {
+            const dx = (event.clientX - lastX) / canvas.clientWidth * camera.zoom;
+            const dy = (lastY - event.clientY) / canvas.clientHeight * camera.zoom;
+            camera.pan(dx, dy);
+            lastX = event.clientX;
+            lastY = event.clientY;
+        }
+    });
+
+    // Handle click events for feature picking
+    canvas.addEventListener('click', async (event) => {
+        if (isPanning) return;
+
+        // Don't proceed if buffer is already mapped
+        if (bufferIsMapped) {
+            console.warn("Previous buffer mapping still in progress, skipping click");
+            return;
+        }
+
+        const rect = canvas.getBoundingClientRect();
+        const pixelX = Math.floor((event.clientX - rect.left) * canvas.width / rect.width);
+        const pixelY = canvas.height - Math.floor((event.clientY - rect.top) * canvas.height / rect.height); // Flip Y
+
+        // Reuse shared read buffer
+        if (!sharedReadBuffer) {
+            sharedReadBuffer = device.createBuffer({
+                size: 16,
+                usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+            });
+        }
+
+        const commandEncoder = device.createCommandEncoder();
+        commandEncoder.copyTextureToBuffer(
+            {
+                texture: hiddenTexture,
+                origin: { x: pixelX, y: pixelY, z: 0 },
+                mipLevel: 0,
+                aspect: 'all'
+            },
+            {
+                buffer: sharedReadBuffer,
+                offset: 0,
+                bytesPerRow: 256,  // Must be 256-aligned
+                rowsPerImage: 1
+            },
+            { width: 1, height: 1, depthOrArrayLayers: 1 }
+        );
+
+        device.queue.submit([commandEncoder.finish()]);
+
+        try {
+            bufferIsMapped = true; // Set mapping flag
+            await sharedReadBuffer.mapAsync(GPUMapMode.READ);
+            
+            const data = new Uint8Array(sharedReadBuffer.getMappedRange());
+            
+            // Read from blue channel (index 2) since format is BGRA
+            const featureId = Math.round(data[2]);
+            
+            // Ignore clicks on ocean (where there's no feature)
+            if (!featureId) {
+                sharedReadBuffer.unmap();
+                bufferIsMapped = false; // Clear mapping flag
+                return;
+            }
+
+            const feature = tileBuffers.find(b => b.properties?.fid === featureId);
+            if (feature) {
+                // Write the raw value directly
+                device.queue.writeBuffer(pickedIdBuffer, 0, new Float32Array([featureId]));
+            } else {
+                // Clear selection
+                device.queue.writeBuffer(pickedIdBuffer, 0, new Float32Array([0]));
+            }
+
+            sharedReadBuffer.unmap();
+            bufferIsMapped = false; // Clear mapping flag
+            
+        } catch (err) {
+            console.error("Error mapping buffer:", err);
+            // Make sure we clear the flag even if there's an error
+            if (sharedReadBuffer && bufferIsMapped) {
+                try {
+                    sharedReadBuffer.unmap();
+                } catch (e) {
+                    console.warn("Error unmapping buffer:", e);
+                }
+                bufferIsMapped = false;
+            }
+        }
+    });
+}

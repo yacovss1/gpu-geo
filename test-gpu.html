@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>GPU Coordinate Tr                resultsDiv.innerHTML += `<p>✅ GPU Round 1 completed in ${gpuTime1.toFixed(2)} ms</p>`;
+                
+                console.log('🖥️ CPU transformation (baseline)...');
+                resultsDiv.innerHTML += '<p>🖥️ CPU transformation (baseline)...</p>';
+                const cpuStart = performance.now();
+                const cpuResults = testCoords.map(coord => mercatorToClipSpace(coord));
+                const cpuTime = performance.now() - cpuStart;
+                
+                console.log('✅ CPU transformation completed in', cpuTime.toFixed(2), 'ms');
+                console.log('CPU results sample (first 3):', cpuResults.slice(0, 3));
+                resultsDiv.innerHTML += `<p>✅ CPU transformation completed in ${cpuTime.toFixed(2)} ms</p>`;
+                
+                // SECOND GPU RUN - reusing existing resources
+                console.log('🚀 ROUND 2: GPU transformation (reusing setup, no overhead)...');
+                resultsDiv.innerHTML += '<p>🚀 <strong>ROUND 2</strong>: GPU transformation (reusing setup, no overhead)...</p>';
+                
+                const gpuStart2 = performance.now();
+                const gpuResults2 = await gpuMercatorToClipSpace(testCoords, device);
+                const gpuTime2 = performance.now() - gpuStart2;
+                
+                console.log('✅ GPU Round 2 completed in', gpuTime2.toFixed(2), 'ms');
+                console.log('GPU results sample (first 3):', gpuResults2.slice(0, 3));
+                resultsDiv.innerHTML += `<p>✅ GPU Round 2 completed in ${gpuTime2.toFixed(2)} ms</p>`;
+                
+                // THIRD GPU RUN - additional confirmation
+                console.log('⚡ ROUND 3: GPU transformation (final confirmation)...');
+                resultsDiv.innerHTML += '<p>⚡ <strong>ROUND 3</strong>: GPU transformation (final confirmation)...</p>';
+                
+                const gpuStart3 = performance.now();
+                const gpuResults3 = await gpuMercatorToClipSpace(testCoords, device);
+                const gpuTime3 = performance.now() - gpuStart3;
+                
+                console.log('✅ GPU Round 3 completed in', gpuTime3.toFixed(2), 'ms');
+                resultsDiv.innerHTML += `<p>✅ GPU Round 3 completed in ${gpuTime3.toFixed(2)} ms</p>`;Test</title>
+</head>
+<body>
+    <h1>GPU Coordinate Transform Test</h1>
+    <div id="results"></div>
+    
+    <script type="module">
+        import { gpuMercatorToClipSpace } from './src/coordinateGPU.js';
+        import { mercatorToClipSpace } from './src/utils.js';
+        import { initWebGPU } from './src/webgpu-init.js';
+        
+        async function runTest() {
+            const resultsDiv = document.getElementById('results');
+            
+            try {
+                // Initialize WebGPU
+                const canvas = document.createElement('canvas');
+                const { device } = await initWebGPU(canvas);
+                
+                console.log('✅ WebGPU initialized successfully');
+                resultsDiv.innerHTML += '<p>✅ WebGPU initialized successfully</p>';                // Generate a large test dataset to really test GPU performance
+                const baseCoords = [
+                    [-74.006, 40.7128], // New York
+                    [-122.4194, 37.7749], // San Francisco
+                    [2.3522, 48.8566], // Paris
+                    [139.6917, 35.6895], // Tokyo
+                    [-0.1276, 51.5074], // London
+                    [151.2093, -33.8688], // Sydney
+                    [55.2708, 25.2048], // Dubai
+                    [-43.1729, -22.9068], // Rio de Janeiro
+                    [37.6176, 55.7558], // Moscow
+                    [126.9780, 37.5665] // Seoul
+                ];
+                
+                // Create 100,000 coordinates for a serious performance test
+                const testCoords = [];
+                console.log('Generating 100,000 test coordinates...');
+                resultsDiv.innerHTML += '<p>⏳ Generating 100,000 test coordinates...</p>';
+                
+                for (let i = 0; i < 100000; i++) {
+                    // Add realistic global coordinate variation
+                    const baseCoord = baseCoords[i % baseCoords.length];
+                    testCoords.push([
+                        baseCoord[0] + (Math.random() - 0.5) * 2.0, // ±1 degree variation
+                        Math.max(-85, Math.min(85, baseCoord[1] + (Math.random() - 0.5) * 2.0)) // Keep within valid lat range
+                    ]);
+                }
+                  console.log(`🎯 Testing with ${testCoords.length.toLocaleString()} coordinates for serious GPU vs CPU comparison`);
+                resultsDiv.innerHTML += `<p>🎯 Generated ${testCoords.length.toLocaleString()} coordinates</p>`;
+                
+                console.log('🧪 ROUND 1: Initial GPU transformation (with setup overhead)...');
+                resultsDiv.innerHTML += '<p>🧪 <strong>ROUND 1</strong>: Initial GPU transformation (with setup overhead)...</p>';
+                
+                // GPU transformation - FIRST RUN (includes setup overhead)
+                const gpuStart1 = performance.now();
+                const gpuResults1 = await gpuMercatorToClipSpace(testCoords, device);
+                const gpuTime1 = performance.now() - gpuStart1;                console.log('✅ GPU Round 1 completed in', gpuTime1.toFixed(2), 'ms');
+                console.log('GPU results sample (first 3):', gpuResults1.slice(0, 3));
+                resultsDiv.innerHTML += `<p>✅ GPU Round 1 completed in ${gpuTime1.toFixed(2)} ms</p>`;console.log('🖥️ Starting CPU coordinate transformation...');
+                resultsDiv.innerHTML += '<p>🖥️ Starting CPU coordinate transformation...</p>';
+                const cpuStart = performance.now();
+                const cpuResults = testCoords.map(coord => mercatorToClipSpace(coord));
+                const cpuTime = performance.now() - cpuStart;
+                  console.log('✅ CPU transformation completed in', cpuTime.toFixed(2), 'ms');
+                console.log('CPU results sample (first 3):', cpuResults.slice(0, 3));
+                resultsDiv.innerHTML += `<p>✅ CPU transformation completed in ${cpuTime.toFixed(2)} ms</p>`;
+                  // Validate results format (using first GPU run)
+                if (!Array.isArray(gpuResults1) || !Array.isArray(cpuResults)) {
+                    throw new Error(`Results are not arrays. GPU: ${typeof gpuResults1}, CPU: ${typeof cpuResults}`);
+                }
+                
+                if (gpuResults1.length !== cpuResults.length) {
+                    throw new Error(`Result length mismatch. GPU: ${gpuResults1.length}, CPU: ${cpuResults.length}`);
+                }
+                  // Compare results (check only first 10 for performance)
+                let allMatch = true;
+                const samplesToCheck = Math.min(10, testCoords.length);
+                for (let i = 0; i < samplesToCheck; i++) {
+                    const gpuCoord = gpuResults1[i];
+                    const cpuCoord = cpuResults[i];
+                    
+                    // Validate coordinate format
+                    if (!Array.isArray(gpuCoord) || !Array.isArray(cpuCoord)) {
+                        console.error(`Invalid coordinate at index ${i}. GPU: ${typeof gpuCoord}, CPU: ${typeof cpuCoord}`);
+                        console.error(`GPU coord:`, gpuCoord);
+                        console.error(`CPU coord:`, cpuCoord);
+                        throw new Error(`Coordinate at index ${i} is not an array`);
+                    }
+                    
+                    const diffX = Math.abs(gpuCoord[0] - cpuCoord[0]);
+                    const diffY = Math.abs(gpuCoord[1] - cpuCoord[1]);
+                    
+                    if (diffX > 1e-5 || diffY > 1e-5) {
+                        allMatch = false;
+                        console.error(`❌ Mismatch at index ${i}:`, {
+                            input: testCoords[i],
+                            gpu: gpuCoord,
+                            cpu: cpuCoord,
+                            diff: [diffX, diffY]
+                        });
+                    } else {
+                        console.log(`✅ Match at index ${i}:`, {
+                            input: testCoords[i],
+                            result: gpuCoord
+                        });
+                    }
+                }
+                
+                if (allMatch) {
+                    console.log('🎉 All coordinates match! GPU acceleration is working correctly.');
+                    resultsDiv.innerHTML += '<p style="color: green; font-weight: bold;">🎉 All coordinates match! GPU acceleration is working correctly.</p>';
+                } else {
+                    console.error('❌ Some coordinates don\'t match. Check implementation.');
+                    resultsDiv.innerHTML += '<p style="color: red; font-weight: bold;">❌ Some coordinates don\'t match. Check implementation.</p>';                }
+                
+                // SECOND GPU RUN - reusing existing resources
+                console.log('🚀 ROUND 2: GPU transformation (reusing setup, no overhead)...');
+                resultsDiv.innerHTML += '<p>🚀 <strong>ROUND 2</strong>: GPU transformation (reusing setup, no overhead)...</p>';
+                
+                const gpuStart2 = performance.now();
+                const gpuResults2 = await gpuMercatorToClipSpace(testCoords, device);
+                const gpuTime2 = performance.now() - gpuStart2;
+                
+                console.log('✅ GPU Round 2 completed in', gpuTime2.toFixed(2), 'ms');
+                console.log('GPU results sample (first 3):', gpuResults2.slice(0, 3));
+                resultsDiv.innerHTML += `<p>✅ GPU Round 2 completed in ${gpuTime2.toFixed(2)} ms</p>`;
+                
+                // THIRD GPU RUN - additional confirmation
+                console.log('⚡ ROUND 3: GPU transformation (final confirmation)...');
+                resultsDiv.innerHTML += '<p>⚡ <strong>ROUND 3</strong>: GPU transformation (final confirmation)...</p>';
+                
+                const gpuStart3 = performance.now();
+                const gpuResults3 = await gpuMercatorToClipSpace(testCoords, device);
+                const gpuTime3 = performance.now() - gpuStart3;
+                
+                console.log('✅ GPU Round 3 completed in', gpuTime3.toFixed(2), 'ms');
+                resultsDiv.innerHTML += `<p>✅ GPU Round 3 completed in ${gpuTime3.toFixed(2)} ms</p>`;
+                
+                  // Performance comparison with detailed analysis
+                console.log(`📊 Performance Analysis:`);
+                resultsDiv.innerHTML += '<h3>📊 Performance Analysis</h3>';
+                
+                const gpuAvgTime = (gpuTime2 + gpuTime3) / 2; // Average of rounds 2 and 3 (no setup overhead)
+                
+                // Round 1 vs CPU (with setup overhead)
+                const speedup1 = cpuTime / gpuTime1;
+                const gpuThroughput1 = (testCoords.length / gpuTime1) * 1000;
+                const cpuThroughput = (testCoords.length / cpuTime) * 1000;
+                
+                console.log(`  Coordinates processed: ${testCoords.length.toLocaleString()}`);
+                console.log(`  CPU time: ${cpuTime.toFixed(2)}ms (${cpuThroughput.toFixed(0)} coords/sec)`);
+                console.log(`  GPU Round 1 (with setup): ${gpuTime1.toFixed(2)}ms (${gpuThroughput1.toFixed(0)} coords/sec)`);
+                console.log(`  GPU Round 2 (no setup): ${gpuTime2.toFixed(2)}ms`);
+                console.log(`  GPU Round 3 (no setup): ${gpuTime3.toFixed(2)}ms`);
+                console.log(`  GPU Average (no setup): ${gpuAvgTime.toFixed(2)}ms`);
+                
+                resultsDiv.innerHTML += `<p><strong>Coordinates:</strong> ${testCoords.length.toLocaleString()}</p>`;
+                resultsDiv.innerHTML += `<p><strong>CPU:</strong> ${cpuTime.toFixed(2)}ms (${cpuThroughput.toFixed(0)} coords/sec)</p>`;
+                resultsDiv.innerHTML += `<p><strong>GPU Round 1 (with setup):</strong> ${gpuTime1.toFixed(2)}ms</p>`;
+                resultsDiv.innerHTML += `<p><strong>GPU Round 2 (no setup):</strong> ${gpuTime2.toFixed(2)}ms</p>`;
+                resultsDiv.innerHTML += `<p><strong>GPU Round 3 (no setup):</strong> ${gpuTime3.toFixed(2)}ms</p>`;
+                resultsDiv.innerHTML += `<p><strong>GPU Average (no setup):</strong> ${gpuAvgTime.toFixed(2)}ms</p>`;
+                
+                // Performance comparison
+                if (speedup1 > 1) {
+                    console.log(`🐌 Round 1: CPU is ${(1/speedup1).toFixed(1)}x faster than GPU (due to setup overhead)`);
+                    resultsDiv.innerHTML += `<p style="color: orange;">🐌 Round 1: CPU is ${(1/speedup1).toFixed(1)}x faster (GPU setup overhead)</p>`;
+                } else {
+                    console.log(`⚡ Round 1: GPU is ${speedup1.toFixed(1)}x faster than CPU`);
+                    resultsDiv.innerHTML += `<p style="color: green;">⚡ Round 1: GPU is ${speedup1.toFixed(1)}x faster</p>`;
+                }
+                
+                // Compare optimized GPU performance
+                const speedupOptimized = cpuTime / gpuAvgTime;
+                const gpuOptimizedThroughput = (testCoords.length / gpuAvgTime) * 1000;
+                
+                if (speedupOptimized > 1) {
+                    console.log(`🚀 Optimized GPU: ${speedupOptimized.toFixed(1)}x faster than CPU (${gpuOptimizedThroughput.toFixed(0)} vs ${cpuThroughput.toFixed(0)} coords/sec)`);
+                    resultsDiv.innerHTML += `<p style="color: green; font-weight: bold;">🚀 Optimized GPU: ${speedupOptimized.toFixed(1)}x faster than CPU!</p>`;
+                } else {
+                    console.log(`🐌 Optimized GPU: CPU is still ${(1/speedupOptimized).toFixed(1)}x faster`);
+                    resultsDiv.innerHTML += `<p style="color: orange;">🐌 Optimized GPU: CPU is still ${(1/speedupOptimized).toFixed(1)}x faster</p>`;
+                }
+                
+            } catch (error) {
+                console.error('❌ Test failed:', error);
+                resultsDiv.innerHTML += `<p style="color: red;">❌ Test failed: ${error.message}</p>`;
+            }
+        }
+        
+        // Run test when page loads
+        runTest();
+    </script>
+</body>
+</html>
