@@ -256,14 +256,8 @@ async function main() {
     // Handle zoom events for loading tiles
     camera.addEventListener('zoomend', async (event) => {
         // Extract both zoom levels properly
-        const displayZoom = event.detail?.displayZoom || Math.floor(camera.zoom);
+        const displayZoom = camera.zoom;
         const fetchZoom = event.detail?.fetchZoom || Math.min(displayZoom, camera.maxFetchZoom);
-        
-        // Only log when zoom level changes significantly
-        if (lastLoggedZoom !== displayZoom) {
-            console.log(`Zoom levels: display=${displayZoom}, fetch=${fetchZoom}`);
-            lastLoggedZoom = displayZoom;
-        }
         
         // Always update the renderer with both zoom levels
         renderer.updateZoomInfo(camera.zoom, fetchZoom);
@@ -271,13 +265,7 @@ async function main() {
         // Get visible tiles for the fetch zoom level only
         const visibleTiles = getVisibleTiles(camera, fetchZoom);
         
-        // Debugging: Confirm overzooming when applicable
-        if (displayZoom > fetchZoom) {
-            console.log(`🔍 OVERZOOMING: Using zoom ${displayZoom} display with zoom ${fetchZoom} tiles`);
-        }
-        
         if (visibleTiles.length === 0) {
-            console.warn("No visible tiles at zoom level " + fetchZoom);
             return;
         }
         
@@ -301,7 +289,6 @@ async function main() {
         if (tilesToFetch.length === 0) {
             // Apply overzooming by updating the transform uniforms
             // This happens automatically via camera.getMatrix() already
-            console.log(`No new tiles to fetch at zoom ${fetchZoom}. Applying overzooming to display zoom ${displayZoom}`);
         }
         
         // Create new buffers for incoming tiles
@@ -309,8 +296,6 @@ async function main() {
         const newHiddenTileBuffers = [];
         
         if (tilesToFetch.length > 0) {
-            console.log(`Fetching ${tilesToFetch.length} new tiles at zoom ${fetchZoom}`);
-            
             try {
                 // Load tiles in larger batches for better throughput
                 const batchSize = 16;  // Increased batch size for faster loading
@@ -322,8 +307,6 @@ async function main() {
                 // Only add new tiles, never clear existing tiles unless explicitly requested
                 // This ensures we always have full coverage even if some tiles fail to load
                 if (newTileBuffers.length > 0) {
-                    console.log(`Loaded ${newTileBuffers.length} new tiles at zoom ${fetchZoom}`);
-                    
                     // Get current zoom level from existing tiles
                     const currentTileZoom = tileBuffers.length > 0 ? tileBuffers[0].zoomLevel : -1;
                     
@@ -334,7 +317,6 @@ async function main() {
                     
                     // Number of visible tiles we have now (existing + new)
                     const coveragePct = (newTileKeys.size / visibleTiles.length) * 100;
-                    console.log(`New coverage: ${coveragePct.toFixed(1)}% of viewport`);
                     
                     // If we have good coverage with new tiles (90%+) AND the zoom changed,
                     // we can safely remove old tiles from previous zoom levels
@@ -361,10 +343,10 @@ async function main() {
                     hiddenTileBuffers.push(...newHiddenTileBuffers);
                 }
             } catch (error) {
-                console.error("Error loading tiles:", error);
+                // Error loading tiles - keep existing tiles
             }
         } else {
-            console.log(`No new tiles to fetch at zoom ${fetchZoom}`);
+            // No new tiles to fetch
         }
     });
 
@@ -400,7 +382,6 @@ async function main() {
     });
 
     // Trigger initial tile fetch
-    console.log('Triggering initial tile fetch.'); // Debug log
     camera.triggerEvent('zoomend');
 
     // Set up event listeners
@@ -410,15 +391,6 @@ async function main() {
     async function frame() {
         // Update camera and transform matrices
         camera.updatePosition();
-        
-        // Debug: Track if camera position changes unexpectedly
-        if (!window._lastCameraPos) window._lastCameraPos = [...camera.position];
-        const posChanged = Math.abs(camera.position[0] - window._lastCameraPos[0]) > 0.01 || 
-                          Math.abs(camera.position[1] - window._lastCameraPos[1]) > 0.01;
-        if (posChanged && camera.zoom > 1.5) {
-            console.log('📹 Camera moved in frame loop to [' + camera.position[0].toFixed(3) + ', ' + camera.position[1].toFixed(3) + '] zoom=' + camera.zoom.toFixed(2));
-            window._lastCameraPos = [...camera.position];
-        }
         
         const transformMatrix = camera.getMatrix();
         
@@ -544,7 +516,6 @@ async function loadVisibleTiles(visibleTiles, device, newTileBuffers, newHiddenT
                 const parseStartTime = performance.now();
                   if (PERFORMANCE_STATS.gpuEnabled) {
                     // Use GPU batch processing for coordinate transformation
-                    console.log(`GPU batch processing ${features.length} features in layer ${layerName} for tile ${z}/${x}/${y}`);
                     parsedFeatures = await batchParseGeoJSONFeaturesGPU(features, device);
                     
                     const parseEndTime = performance.now();
@@ -554,11 +525,8 @@ async function loadVisibleTiles(visibleTiles, device, newTileBuffers, newHiddenT
                     PERFORMANCE_STATS.gpuBatchCount++;
                     PERFORMANCE_STATS.averageGPUBatchSize = 
                         (PERFORMANCE_STATS.averageGPUBatchSize * (PERFORMANCE_STATS.gpuBatchCount - 1) + features.length) / PERFORMANCE_STATS.gpuBatchCount;
-                    
-                    console.log(`GPU batch parsing took ${gpuTime.toFixed(2)}ms for ${features.length} features`);                } else {
+                } else {
                     // Use CPU processing for comparison
-                    console.log(`CPU processing ${features.length} features in layer ${layerName} for tile ${z}/${x}/${y}`);
-                    
                     for (const feature of features) {
                         const parsed = parseGeoJSONFeature(feature);
                         if (parsed) {
@@ -570,8 +538,6 @@ async function loadVisibleTiles(visibleTiles, device, newTileBuffers, newHiddenT
                     const cpuTime = parseEndTime - parseStartTime;
                     PERFORMANCE_STATS.totalCPUTime += cpuTime;
                     PERFORMANCE_STATS.cpuFeatureCount += features.length;
-                    
-                    console.log(`CPU parsing took ${cpuTime.toFixed(2)}ms for ${features.length} features`);
                 }
                 
                 PERFORMANCE_STATS.totalCoordinatesProcessed += features.length;
@@ -611,11 +577,6 @@ async function loadVisibleTiles(visibleTiles, device, newTileBuffers, newHiddenT
     });
     
     await Promise.all(tilePromises);
-    
-    // Log performance statistics periodically
-    if (PERFORMANCE_STATS.batchCount > 0 && PERFORMANCE_STATS.batchCount % 10 === 0) {
-        logPerformanceStats();
-    }
 }
 
 // Function to log and compare performance statistics

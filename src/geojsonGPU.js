@@ -88,7 +88,6 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
     const featureId = feature.properties?.fid;
     
     if (processedFeatures.has(featureId)) {
-        console.warn(`Feature with ID ${featureId} is already processed, skipping duplicate.`);
         return null;
     }
     processedFeatures.add(featureId);
@@ -203,7 +202,7 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
             break;
             
         default:
-            console.warn(`Unsupported GeoJSON type: ${feature.geometry.type}`);
+            // console.warn(`Unsupported GeoJSON type: ${feature.geometry.type}`);
     }
 
     return {
@@ -245,7 +244,6 @@ export async function batchParseGeoJSONFeaturesGPU(features, device, fillColor =
     // Transform all coordinates in a single GPU batch operation
     let transformedCoords = [];
     if (allCoordinates.length > 0) {
-        console.log(`GPU batch transforming ${allCoordinates.length} coordinates from ${features.length} features`);
         transformedCoords = await transformer.transformCoordinates(allCoordinates);
     }
 
@@ -405,7 +403,7 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
             break;
             
         default:
-            console.warn(`Unsupported GeoJSON type: ${feature.geometry.type}`);
+            // console.warn(`Unsupported GeoJSON type: ${feature.geometry.type}`);
     }
 
     return {

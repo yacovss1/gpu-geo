@@ -316,7 +316,6 @@ export class MapRenderer {
     updateTextureDimensions(width, height) {
         // Only recreate if dimensions changed
         if (this.textureWidth !== width || this.textureHeight !== height) {
-            console.log(`Updating texture dimensions from ${this.textureWidth}x${this.textureHeight} to ${width}x${height}`);
             this.createTextures(width, height);
             // Recreate any bind groups that reference the textures
             this.updateTextureBindGroups();
@@ -392,8 +391,6 @@ export class MapRenderer {
             const logVisualZoom = Math.floor(visualZoom * 2) / 2; // Round to nearest 0.5
             
             if (this._lastLoggedVisualZoom !== logVisualZoom) {
-                // Include raw zoom value for debugging
-                console.log(`Visual Zoom: ${visualZoom.toFixed(1)} (Raw: ${displayZoom.toFixed(1)}, Fetch: ${fetchZoom})`);
                 this._lastLoggedVisualZoom = logVisualZoom;
                 
                 // Update UI indicator with accurate values
@@ -541,7 +538,6 @@ export class MapRenderer {
     renderFrame(tileBuffers, camera) {
         // Validate that features are properly scaled with current zoom
         const scale = camera.getMatrix()[5]; // Y-scale from matrix
-        console.log(`Rendering frame with scale: ${scale}, zoom: ${camera.zoom}`);
         
         // Ensure the vertex shader is using the correct matrix
         this.updateCameraTransform(camera.getMatrix());

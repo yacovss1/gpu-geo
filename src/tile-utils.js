@@ -2,10 +2,6 @@ import { clipSpaceToTile } from './utils.js';
 
 export const MAX_SERVER_ZOOM = 6; // Maximum zoom level supported by server
 
-// Module-level variables for tracking state changes
-let lastLoggedZoomDelta = -1;
-let lastLoggedTileCount = -1;
-
 // Add a function to detect when we're overzooming
 export function isOverzoomed(camera) {
     return camera.zoom > camera.maxFetchZoom;
@@ -13,15 +9,8 @@ export function isOverzoomed(camera) {
 
 // Enhance getVisibleTiles to handle extreme overzooming
 export function getVisibleTiles(camera, fetchZoom) {
-    // Remove redundant logging, only log significant changes
     const displayZoom = camera.zoom;
     const zoomDelta = Math.max(0, displayZoom - fetchZoom);
-    
-    // Only log zoom deltas on significant changes
-    if (Math.floor(lastLoggedZoomDelta) !== Math.floor(zoomDelta) && zoomDelta > 0) {
-        console.log(`Overzooming by ${zoomDelta.toFixed(1)} levels`);
-        lastLoggedZoomDelta = zoomDelta;
-    }
 
     // Add extra padding when overzoomed
     const basePadding = 5;
@@ -45,14 +34,6 @@ export function getVisibleTiles(camera, fetchZoom) {
     // Convert viewport corners to tile coordinates with extra padding
     const topLeftTile = worldToTile(paddedViewport.left, paddedViewport.top, fetchZoom);
     const bottomRightTile = worldToTile(paddedViewport.right, paddedViewport.bottom, fetchZoom);
-    
-    // Debug viewport bounds
-    if (Math.random() < 0.1) { // Only log 10% of the time
-        console.log('🗺️ Viewport:', 'left=' + paddedViewport.left.toFixed(3), 'right=' + paddedViewport.right.toFixed(3), 
-                   'top=' + paddedViewport.top.toFixed(3), 'bottom=' + paddedViewport.bottom.toFixed(3));
-        console.log('🗺️ Tiles:', 'topLeft=[' + topLeftTile[0].toFixed(1) + ',' + topLeftTile[1].toFixed(1) + ']',
-                   'bottomRight=[' + bottomRightTile[0].toFixed(1) + ',' + bottomRightTile[1].toFixed(1) + ']');
-    }
     
     // IMPROVED: Much larger padding for tiles to prevent truncation
     const padding = overzoomPadding; // Use overzoom padding
@@ -94,18 +75,11 @@ export function getVisibleTiles(camera, fetchZoom) {
     // Add wrapped tiles
     allTiles.push(...wrappedTiles);
     
-    // Reduce logging to only show on significant changes
     const tileCount = allTiles.length;
-    if (Math.abs(lastLoggedTileCount - tileCount) > 20) {
-        console.log(`Tiles: ${tileCount} at zoom ${fetchZoom}`);
-        lastLoggedTileCount = tileCount;
-    }
     
     // Safety limit for huge viewports
     const MAX_TILES = 200; // Increased from 150 to 200 for better coverage
     if (tileCount > MAX_TILES) {
-        console.warn(`Limiting tiles to ${MAX_TILES} (was ${tileCount})`);
-        
         // Get center tile coordinates
         const centerTileX = Math.floor((minTileX + maxTileX) / 2);
         const centerTileY = Math.floor((minTileY + maxTileY) / 2);

@@ -79,7 +79,6 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0]) {
 
     const featureId = feature.properties?.fid;
     if (processedFeatures.has(featureId)) {
-        console.warn(`Feature with ID ${featureId} is already processed, skipping duplicate.`);
         return null;
     }
     processedFeatures.add(featureId);
@@ -190,7 +189,8 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0]) {
             fillVertices.push(point[0], point[1], ..._fillColor);
             break;
         default:
-            console.warn(`Unsupported GeoJSON type: ${feature.geometry.type}`);
+            // Unsupported geometry type - skip silently
+            break;
     }
 
     return {
@@ -229,7 +229,6 @@ export function clearOldTileCache(activeZoom, maxSize = 100) {
     }
     
     // Remove all tiles from other zoom levels
-    console.log(`Clearing ${oldZoomKeys.length} tiles from non-active zoom levels`);
     oldZoomKeys.forEach(key => tileCache.delete(key));
 }
 
@@ -241,18 +240,32 @@ const activeFetchingTiles = new Set();
 const tileErrors = new Map(); // Track failed tiles to avoid repeated fetches
 const notFoundTiles = new Set(); // Keep track of tiles that failed with 404 to avoid repeating requests
 
+// Configurable tile source
+let tileSourceConfig = {
+    url: 'https://demotiles.maplibre.org/tiles/{z}/{x}/{y}.pbf',
+    maxZoom: 6,
+    timeout: 5000
+};
+
+// Function to configure tile source
+export function setTileSource(config) {
+    tileSourceConfig = {
+        url: config.url || tileSourceConfig.url,
+        maxZoom: config.maxZoom !== undefined ? config.maxZoom : tileSourceConfig.maxZoom,
+        timeout: config.timeout || tileSourceConfig.timeout
+    };
+}
+
 // Completely rewritten for much higher reliability
 export async function fetchVectorTile(x, y, z) {
     // Validate tile coordinates
     const scale = 1 << z;
     if (x < 0 || x >= scale || y < 0 || y >= scale) {
-        console.warn(`Skipping invalid tile coordinates: ${z}/${x}/${y}`);
         return null;
     }
     
     // Ensure valid zoom level
-    if (z < 0 || z > 6) {
-        console.warn(`Skipping invalid zoom level: ${z}`);
+    if (z < 0 || z > tileSourceConfig.maxZoom) {
         return null;
     }
     
@@ -317,22 +330,21 @@ export async function fetchVectorTile(x, y, z) {
     };
     
     try {
-        // For zoom level 6, add special handling
-        let url = `https://demotiles.maplibre.org/tiles/${z}/${x}/${y}.pbf`;
-        
-        // Show what we're fetching in console
-        console.log(`Fetching tile: ${tileKey}`);
+        // Build URL from template
+        let url = tileSourceConfig.url
+            .replace('{z}', z)
+            .replace('{x}', x)
+            .replace('{y}', y);
         
         const response = await fetchWithTimeout(url, {
             method: 'GET',
             cache: 'force-cache', // Use browser cache aggressively
             headers: { 'Accept': 'application/x-protobuf' }
-        }, z >= 5 ? 3000 : 5000); // Shorter timeout for high zoom
+        }, tileSourceConfig.timeout);
 
         if (!response.ok) {
             // If we get a 404, mark as permanently not found
             if (response.status === 404) {
-                console.log(`Tile not found (404): ${tileKey}`);
                 notFoundTiles.add(tileKey);
                 return null;
             }
@@ -350,7 +362,6 @@ export async function fetchVectorTile(x, y, z) {
         // Only cache valid tiles
         if (tile && tile.layers && Object.keys(tile.layers).length > 0) {
             tileCache.set(tileKey, tile);
-            console.log(`Successfully fetched tile: ${tileKey}`);
             activeFetchingTiles.delete(tileKey);
             
             // Clear error count on success
@@ -363,8 +374,6 @@ export async function fetchVectorTile(x, y, z) {
             throw new Error("Tile has no layers");
         }
     } catch (err) {
-        console.warn(`Error fetching tile ${tileKey}:`, err.message);
-        
         // If it's a 404, mark as permanently not found
         if (err.message.includes('404')) {
             notFoundTiles.add(tileKey);
@@ -398,14 +407,12 @@ export function getTileCacheStats() {
 // Helper function to clear tile cache
 export function clearTileCache() {
     tileCache.clear();
-    console.log("Tile cache cleared");
 }
 
 // Add a helper function to reset the system
 export function resetTileFetchingSystem() {
     tileCache.clear();
     problemTiles.clear();
-    console.log("Tile fetching system reset");
 }
 
 // Increase cache size to avoid frequent refetching
@@ -413,7 +420,6 @@ export function resetTileFetchingSystem() {
 // Clear cache when it gets too large
 export function maintainTileCache(maxSize = 100) {
     if (tileCache.size > maxSize) {
-        console.log(`Pruning tile cache from ${tileCache.size} to ${Math.floor(maxSize/2)}`);
         const keysToDelete = [...tileCache.keys()].slice(0, tileCache.size - Math.floor(maxSize/2));
         keysToDelete.forEach(key => tileCache.delete(key));
     }
@@ -422,12 +428,9 @@ export function maintainTileCache(maxSize = 100) {
 // Add an exported function to control caching strategy
 export function setCachingStrategy(cacheRawData = true)  {
     CACHE_TILE_DATA = cacheRawData;
-    console.log(`Tile caching strategy: ${CACHE_TILE_DATA ? 'Raw PBF data' : 'Processed Vector Tiles'}`);console.log(`Tile caching strategy: ${CACHE_TILE_DATA ? 'Raw PBF data' : 'Processed Vector Tiles'}`);
 }
 
 // Add this function to reset the not-found cache
 export function resetNotFoundTiles() {
-    const count = notFoundTiles.size;
     notFoundTiles.clear();
-    console.log(`Reset ${count} not-found tiles`);
 }

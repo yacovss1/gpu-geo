@@ -89,12 +89,6 @@ export class Camera extends EventTarget {
         this._visualZoom = effectiveZoom;
         this._zoomDebug.visual = effectiveZoom;
         
-        // Debug zoom state if it changed significantly
-        if (Math.abs(this.zoom - this.lastZoomDisplay) > 0.5) {
-            console.log(`ZOOM DEBUG - Raw: ${this.zoom.toFixed(2)}, Visual: ${effectiveZoom.toFixed(2)}, Ratio: 1.0`);
-            this.lastZoomDisplay = this.zoom;
-        }
-        
         this._cachedMatrix = matrix;
         this._lastState = { pos: [...this.position], zoom: this.zoom };
         
@@ -176,19 +170,6 @@ export class Camera extends EventTarget {
             const mouseClipY = this.mouseScreenY * 2 - 1;  // Screen Y already goes down, clip Y goes down too
             const aspectRatio = this.viewportWidth / this.viewportHeight;
             
-            console.log('� ZOOM:', prevZoom.toFixed(2), '→', (prevZoom * zoomFactor).toFixed(2), 'at mouse[' + this.mouseScreenX.toFixed(2) + ', ' + this.mouseScreenY.toFixed(2) + ']');
-            /*
-            console.log('�📍 Mouse screen:', this.mouseScreenX.toFixed(3), this.mouseScreenY.toFixed(3));
-            console.log('📍 Mouse clip:', mouseClipX.toFixed(3), mouseClipY.toFixed(3));
-            console.log('📐 Aspect:', aspectRatio.toFixed(3), 'Viewport:', this.viewportWidth + 'x' + this.viewportHeight);
-            console.log('Camera BEFORE: pos[' + this.position[0].toFixed(3) + ', ' + this.position[1].toFixed(3) + '] zoom=' + prevZoom.toFixed(2));
-            
-            // TEST: What offset does the mouse represent?
-            const offsetX = mouseClipX / prevZoom;
-            const offsetY = mouseClipY / prevZoom;
-            console.log('🧮 Mouse offset from camera (world units):', offsetX.toFixed(3), offsetY.toFixed(3));
-            */
-            
             // Calculate effective zoom scales (2^zoom)
             const prevEffectiveZoom = Math.pow(2, prevZoom);
             
@@ -206,24 +187,8 @@ export class Camera extends EventTarget {
             this.position[0] = worldX - (mouseClipX * aspectRatio) / nextEffectiveZoom;
             this.position[1] = worldY - mouseClipY / nextEffectiveZoom;
             
-            console.log('📍 Camera moved to [' + this.position[0].toFixed(3) + ', ' + this.position[1].toFixed(3) + ']');
-            /*
-            console.log('🎯 World point:', worldX.toFixed(3), worldY.toFixed(3));
-            console.log('Camera AFTER: pos[' + this.position[0].toFixed(3) + ', ' + this.position[1].toFixed(3) + '] zoom=' + this.zoom.toFixed(2));
-            
-            // Debug: Calculate where the world point should appear on screen after zoom
-            const screenAfterX = ((worldX - this.position[0]) * this.zoom / aspectRatio + 1) / 2;
-            const screenAfterY = (1 - (worldY - this.position[1]) * this.zoom) / 2;
-            console.log('🖼️ World point should render at screen:', screenAfterX.toFixed(3), screenAfterY.toFixed(3));
-            console.log('   Expected mouse:', this.mouseScreenX.toFixed(3), this.mouseScreenY.toFixed(3));
-            */
-            
             const beforeClamp = [...this.position];
             this.clampPosition();
-            
-            if (this.position[0] !== beforeClamp[0] || this.position[1] !== beforeClamp[1]) {
-                console.log('⚠️ CLAMPED from:', beforeClamp[0].toFixed(3), beforeClamp[1].toFixed(3), 'to:', this.position[0].toFixed(3), this.position[1].toFixed(3));
-            }
             
             // CRITICAL: Stop any velocity/momentum during zoom
             this.velocity[0] = 0;

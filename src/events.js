@@ -42,7 +42,6 @@ export function setupEventListeners(canvas, camera, device, hiddenTexture, tileB
         // Add debug visualization to verify zoom is working
         const zoomLevel = camera.zoom.toFixed(1);
         const visualZoom = camera.getVisualZoom().toFixed(1);
-        console.log(`ZOOM: ${beforeZoom.toFixed(2)} → ${camera.zoom.toFixed(2)} (visual: ${visualZoom})`);
         
         // Create a temporary overlay showing the zoom level
         const overlay = document.createElement('div');
