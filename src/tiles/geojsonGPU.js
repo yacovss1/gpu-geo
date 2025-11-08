@@ -35,20 +35,6 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
         const fillLayer = layers.find(l => l.type === 'fill' && (!l['source-layer'] || l['source-layer'] === feature.layer?.name));
         const lineLayer = layers.find(l => l.type === 'line' && (!l['source-layer'] || l['source-layer'] === feature.layer?.name));
 
-        // Debug once per batch
-        if (!window._gpuStyleDebugLogged && layers.length > 0) {
-            console.log('🎨 [GPU] Style has', layers.length, 'layers for source', sourceId);
-            console.log('🎨 [GPU] Looking for feature layer:', feature.layer?.name);
-            console.log('🎨 [GPU] Fill layer found?', fillLayer ? fillLayer.id : 'NO');
-            if (fillLayer) {
-                console.log('🎨 [GPU] Fill layer source-layer:', fillLayer['source-layer']);
-                const testColor = getPaintProperty(fillLayer.id, 'fill-color', feature, zoom);
-                console.log('🎨 [GPU] Test color value:', testColor);
-                console.log('🎨 [GPU] Sample feature ISO_A3:', feature.properties?.ISO_A3);
-            }
-            window._gpuStyleDebugLogged = true;
-        }
-
         // Apply filter if layer has one
         if (fillLayer && fillLayer.filter && !evaluateFilter(fillLayer.filter, feature, zoom)) {
             return null; // Feature filtered out
@@ -276,7 +262,8 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
         properties: {
             ...feature.properties,
             fid: featureId,           // Original feature ID
-            clampedFid: clampedFeatureId  // ID actually used in rendering (1-254)
+            clampedFid: clampedFeatureId,  // ID actually used in rendering (1-254)
+            sourceLayer: feature.layer?.name  // Store source-layer for symbol layer matching
         }
     };
 }
@@ -534,7 +521,8 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
         properties: {
             ...feature.properties,
             fid: featureId,           // Original feature ID
-            clampedFid: clampedFeatureId  // ID actually used in rendering (1-254)
+            clampedFid: clampedFeatureId,  // ID actually used in rendering (1-254)
+            sourceLayer: feature.layer?.name  // Store source-layer for symbol layer matching
         }
     };
 }

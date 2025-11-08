@@ -147,6 +147,37 @@ export function getLayer(layerId) {
 }
 
 /**
+ * Get all symbol (text/icon) layers for a specific source
+ * @param {string} sourceId - Source ID
+ * @returns {Array<Object>} Array of symbol layer configurations
+ */
+export function getSymbolLayers(sourceId) {
+    if (!currentStyle) {
+        return [];
+    }
+
+    return currentStyle.layers
+        .filter(layer => 
+            layer.type === 'symbol' && 
+            layer.source === sourceId &&
+            layer.layout?.visibility !== 'none'
+        )
+        .map(layer => ({
+            id: layer.id,
+            sourceLayer: layer['source-layer'],
+            minzoom: layer.minzoom || 0,
+            maxzoom: layer.maxzoom || 24,
+            textField: layer.layout?.['text-field'],
+            textSize: layer.layout?.['text-size'] || 16,
+            textFont: layer.layout?.['text-font'] || ['Open Sans Regular'],
+            textColor: layer.paint?.['text-color'] || '#000000',
+            textHaloColor: layer.paint?.['text-halo-color'],
+            textHaloWidth: layer.paint?.['text-halo-width'] || 0,
+            filter: layer.filter
+        }));
+}
+
+/**
  * Check if a tile coordinate is within the source bounds
  * @param {number} x - Tile X
  * @param {number} y - Tile Y  

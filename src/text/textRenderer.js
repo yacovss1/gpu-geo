@@ -1,6 +1,8 @@
 // WebGPU Text Renderer using SDF (Signed Distance Field) fonts
 // Renders crisp text at any zoom level
 
+import { getSymbolLayers } from '../core/style.js';
+
 /**
  * TextRenderer handles generating font atlases and rendering text labels
  */
@@ -189,13 +191,18 @@ export class TextRenderer {
 
     /**
      * Render all labels using marker buffer directly on GPU
+     * Filters labels based on symbol layer zoom ranges from MapLibre style
      */
-    renderFromMarkerBuffer(encoder, textureView, markerBuffer, markerBindGroup, featureNames) {
+    renderFromMarkerBuffer(encoder, textureView, markerBuffer, markerBindGroup, featureNames, camera, sourceId = null) {
         if (!this.initialized || featureNames.size === 0) {
             return;
         }
 
-        // Render ALL country labels
+        // Get symbol layers from style if available
+        const symbolLayers = sourceId ? getSymbolLayers(sourceId) : [];
+        const currentZoom = camera ? camera.zoom : 0;
+
+        // Render country labels with zoom-based filtering
         const allVertices = [];
         const allIndices = [];
         const labelData = []; // {featureId, indexStart, indexCount}
@@ -203,8 +210,41 @@ export class TextRenderer {
         const charHeight = 0.04;
         const charWidth = 0.024;
         
-        for (const [featureId, name] of featureNames) {
-            // Render all countries, no filtering
+        for (const [featureId, featureData] of featureNames) {
+            // Extract name and sourceLayer from feature data
+            const name = typeof featureData === 'string' ? featureData : featureData.name;
+            const sourceLayer = typeof featureData === 'object' ? featureData.sourceLayer : null;
+            
+            // Check if any symbol layer allows this label at current zoom
+            let shouldRender = true;
+            
+            if (symbolLayers.length > 0) {
+                // If we have a marker for this feature, we computed a centroid
+                // So look for symbol layers that reference centroid/point layers
+                // Otherwise match by the feature's actual source-layer
+                const matchingLayer = symbolLayers.find(layer => {
+                    // Check if this symbol layer is for centroids/points (common names)
+                    const isCentroidLayer = layer.sourceLayer && 
+                        (layer.sourceLayer.includes('centroid') || 
+                         layer.sourceLayer.includes('point') ||
+                         layer.sourceLayer.includes('label'));
+                    
+                    // If we computed a marker/centroid, prefer centroid layers
+                    // Otherwise match by actual sourceLayer
+                    const layerMatches = isCentroidLayer || layer.sourceLayer === sourceLayer;
+                    
+                    return layerMatches && 
+                           currentZoom >= layer.minzoom && 
+                           currentZoom <= layer.maxzoom;
+                });
+                
+                shouldRender = !!matchingLayer;
+            } else {
+                // No style information - render at zoom > 2
+                shouldRender = currentZoom > 2;
+            }
+            
+            if (!shouldRender) continue;
             
             const indexStart = allIndices.length;
             const vertexStart = allVertices.length / 8;

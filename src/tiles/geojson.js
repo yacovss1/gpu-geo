@@ -69,15 +69,6 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
             return null;
         }
 
-        // Debug once per batch
-        if (!window._styleDebugLogged && layers.length > 0) {
-            console.log('🎨 Style has', layers.length, 'layers for source', sourceId);
-            console.log('🎨 Looking for layer:', feature.layer?.name);
-            console.log('🎨 Fill layer found?', fillLayer ? fillLayer.id : 'NO');
-            console.log('🎨 Sample feature properties:', Object.keys(feature.properties || {}).slice(0, 5));
-            window._styleDebugLogged = true;
-        }
-
         // Apply filter if layer has one
         if (fillLayer && fillLayer.filter && !evaluateFilter(fillLayer.filter, feature, zoom)) {
             return null; // Feature filtered out
@@ -162,12 +153,6 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
     
     // Clamp feature ID to valid range for rendering (1-254)
     const clampedFeatureId = Math.max(1, Math.min(254, featureId));
-    
-    // ALWAYS debug log to see what's happening
-    const featureName = feature.properties?.NAME || feature.properties?.ADM0_A3;
-    if (featureName) {
-        console.log(`🎨 RENDERING: "${featureName}" → ID ${clampedFeatureId} (raw: ${featureId})`);
-    }
     
     if (processedFeatures.has(featureId)) {
         return null;
@@ -295,7 +280,8 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
         properties: {
             ...feature.properties,
             fid: featureId,           // Original feature ID
-            clampedFid: clampedFeatureId  // ID actually used in rendering (1-254)
+            clampedFid: clampedFeatureId,  // ID actually used in rendering (1-254)
+            sourceLayer: feature.layer?.name  // Store source-layer for symbol layer matching
         }
     };
 }

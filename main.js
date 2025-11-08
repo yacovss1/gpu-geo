@@ -325,6 +325,7 @@ async function main() {
     // Initialize renderer and camera
     const renderer = new MapRenderer(device, context, format);
     const camera = new Camera(canvas.width, canvas.height);
+    camera.zoom = 2; // Start at zoom 2 so labels are visible (countries-label minzoom: 2)
     
     // Handle window resize
     window.addEventListener('resize', () => {
@@ -595,7 +596,11 @@ async function main() {
             entries: [{ binding: 0, resource: { buffer: markerBuffer } }]
         });
         
-        textRenderer.renderFromMarkerBuffer(overlayEncoder, textureView, markerBuffer, markerDataBindGroup, featureNames);
+        // Get source ID from style (use first vector source)
+        const style = getStyle();
+        const sourceId = style && style.sources ? Object.keys(style.sources).find(key => style.sources[key].type === 'vector') : null;
+        
+        textRenderer.renderFromMarkerBuffer(overlayEncoder, textureView, markerBuffer, markerDataBindGroup, featureNames, camera, sourceId);
         
         // Submit all GPU work
         device.queue.submit([
@@ -1109,8 +1114,9 @@ function buildFeatureNameMap(tileBuffers) {
         if (!tileBuffer.properties) continue;
         const clampedFid = tileBuffer.properties.clampedFid;
         const name = tileBuffer.properties.NAME || tileBuffer.properties.ADM0_A3 || tileBuffer.properties.ISO_A3;
+        const sourceLayer = tileBuffer.properties.sourceLayer;
         if (clampedFid && name) {
-            featureNames.set(clampedFid, name);
+            featureNames.set(clampedFid, { name, sourceLayer });
         }
     }
     return featureNames;
