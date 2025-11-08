@@ -1,7 +1,7 @@
 // GPU Coordinate Transform Pipeline
 // This file provides utilities for batch processing coordinate transformations on GPU
 
-import { coordinateTransformShaderCode, batchCoordinateTransformShaderCode } from './shaders/coordinateShaders.js';
+import { coordinateTransformShaderCode, batchCoordinateTransformShaderCode } from '../shaders/coordinateShaders.js';
 
 export class GPUCoordinateTransformer {
     constructor(device) {

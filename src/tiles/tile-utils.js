@@ -1,4 +1,4 @@
-import { clipSpaceToTile } from './utils.js';
+import { clipSpaceToTile } from '../core/utils.js';
 
 export const MAX_SERVER_ZOOM = 6; // Maximum zoom level supported by server
 

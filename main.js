@@ -1,13 +1,13 @@
-import { initWebGPU } from './src/webgpu-init.js';
-import { Camera } from './src/camera.js';
-import { MapRenderer } from './src/renderer.js';
-import { parseGeoJSONFeature, fetchVectorTile, clearTileCache, resetNotFoundTiles, setTileSource } from './src/geojson.js';
-import { parseGeoJSONFeatureGPU, batchParseGeoJSONFeaturesGPU } from './src/geojsonGPU.js';
-import { getStyle, setStyle, setLayerVisibility, getLayerVisibility, getSourceTileUrl } from './src/style.js';
-import { setupEventListeners } from './src/events.js';
-import { getVisibleTiles } from './src/tile-utils.js'; 
-import { createMarkerPipeline } from './src/markerPipeline.js';
-import { createAccumulatorPipeline, createCenterPipeline } from './src/markerCompute.js';
+import { initWebGPU } from './src/core/webgpu-init.js';
+import { Camera } from './src/core/camera.js';
+import { MapRenderer } from './src/rendering/renderer.js';
+import { parseGeoJSONFeature, fetchVectorTile, clearTileCache, resetNotFoundTiles, setTileSource } from './src/tiles/geojson.js';
+import { batchParseGeoJSONFeaturesGPU } from './src/tiles/geojsonGPU.js';
+import { getStyle, setStyle, setLayerVisibility, getLayerVisibility } from './src/core/style.js';
+import { setupEventListeners } from './src/core/events.js';
+import { getVisibleTiles } from './src/tiles/tile-utils.js'; 
+import { createMarkerPipeline } from './src/rendering/markerPipeline.js';
+import { createAccumulatorPipeline, createCenterPipeline } from './src/rendering/markerCompute.js';
 import { TextRenderer } from './src/text/textRenderer.js';
 
 // Define constants at file scope to ensure they're available everywhere
@@ -114,13 +114,13 @@ window.mapPerformance = {
         
         // GPU benchmark
         const gpuStartTime = performance.now();
-        const { gpuMercatorToClipSpace } = await import('./src/coordinateGPU.js');
+        const { gpuMercatorToClipSpace } = await import('./src/core/coordinateGPU.js');
         const gpuResults = await gpuMercatorToClipSpace(testCoords, window.device);
         const gpuTime = performance.now() - gpuStartTime;
         
         // CPU benchmark
         const cpuStartTime = performance.now();
-        const { mercatorToClipSpace } = await import('./src/utils.js');
+        const { mercatorToClipSpace } = await import('./src/core/utils.js');
         const cpuResults = testCoords.map(coord => mercatorToClipSpace(coord[0], coord[1]));
         const cpuTime = performance.now() - cpuStartTime;
         

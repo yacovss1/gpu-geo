@@ -1,9 +1,9 @@
 // GPU-Accelerated GeoJSON Parser
 // This file provides enhanced parsing functions that use GPU compute shaders for coordinate transformation
 
-import { hexToRgb } from './utils.js';
-import { getColorOfCountries } from './utils.js';
-import { getGlobalCoordinateTransformer } from './coordinateGPU.js';
+import { hexToRgb } from '../core/utils.js';
+import { getColorOfCountries } from '../core/utils.js';
+import { getGlobalCoordinateTransformer } from '../core/coordinateGPU.js';
 import earcut from 'earcut';
 import { 
     getStyle, 
@@ -12,7 +12,7 @@ import {
     parseColor,
     evaluateFilter,
     getLayersBySource
-} from './style.js';
+} from '../core/style.js';
 
 // Enhanced parseGeoJSONFeature that uses GPU coordinate transformation
 export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 0.0, 0.0, 1.0], sourceId = null, zoom = 0) {

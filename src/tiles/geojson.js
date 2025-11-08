@@ -1,8 +1,8 @@
-import { hexToRgb, mercatorToClipSpace } from './utils.js';
+import { hexToRgb, mercatorToClipSpace } from '../core/utils.js';
 import Pbf from 'pbf';
 import { VectorTile } from '@mapbox/vector-tile';
 import earcut from 'earcut';
-import { getColorOfCountries } from './utils.js';
+import { getColorOfCountries } from '../core/utils.js';
 import { TileCache } from './tileCache.js';
 import { 
     getStyle, 
@@ -12,7 +12,7 @@ import {
     evaluateFilter,
     getLayersBySource,
     isTileInBounds
-} from './style.js';
+} from '../core/style.js';
 
 // Ensure tileCache is declared before use
 const problemTiles = new Set(["4/12/15"]);

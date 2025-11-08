@@ -1,5 +1,3 @@
-import { toggleCountryHighlight } from './utils.js';
-
 // At module scope, add a shared read buffer for click events. Note: Ensure its size (16) matches usage.
 let sharedReadBuffer = null;
 let bufferIsMapped = false; // Track buffer mapping state

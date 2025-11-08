@@ -1,4 +1,4 @@
-import { markerVertexShaderCode, markerFragmentShaderCode } from './shaders/markerShader.js';
+import { markerVertexShaderCode, markerFragmentShaderCode } from '../shaders/markerShader.js';
 
 export function createMarkerPipeline(device, format) {
     // Define bind group layouts
