@@ -144,6 +144,9 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
     const processedFeatures = new Set();
     const featureId = getFeatureId();
     
+    // Clamp feature ID to valid range for rendering (1-254)
+    const clampedFeatureId = Math.max(1, Math.min(254, featureId));
+    
     if (processedFeatures.has(featureId)) {
         return null;
     }
@@ -270,11 +273,13 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
         hiddenfillIndices: new Uint16Array(hiddenfillIndices),
         isFilled,
         isLine,
-        properties: feature.properties
+        properties: {
+            ...feature.properties,
+            fid: featureId,           // Original feature ID
+            clampedFid: clampedFeatureId  // ID actually used in rendering (1-254)
+        }
     };
 }
-
-// Batch processing function for multiple features
 export async function batchParseGeoJSONFeaturesGPU(features, device, fillColor = [0.0, 0.0, 0.0, 1.0], sourceId = null, zoom = 0) {
     if (features.length === 0) return [];
 
@@ -398,6 +403,9 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
     };
 
     const featureId = getFeatureId();
+    
+    // Clamp feature ID to valid range for rendering (1-254)
+    const clampedFeatureId = Math.max(1, Math.min(254, featureId));
 
     // Vertex creation functions (same as above)
     const coordsToVertices = (coords, color, targetArray) => {
@@ -523,6 +531,10 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
         hiddenfillIndices: new Uint16Array(hiddenfillIndices),
         isFilled,
         isLine,
-        properties: feature.properties
+        properties: {
+            ...feature.properties,
+            fid: featureId,           // Original feature ID
+            clampedFid: clampedFeatureId  // ID actually used in rendering (1-254)
+        }
     };
 }

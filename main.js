@@ -8,12 +8,13 @@ import { setupEventListeners } from './src/events.js';
 import { getVisibleTiles } from './src/tile-utils.js'; 
 import { createMarkerPipeline } from './src/markerPipeline.js';
 import { createAccumulatorPipeline, createCenterPipeline } from './src/markerCompute.js';
+import { TextRenderer } from './src/text/textRenderer.js';
 
 // Define constants at file scope to ensure they're available everywhere
 // Expanded to accommodate compound IDs (feature ID + polygon ID)
 const ACCUMULATOR_BUFFER_SIZE = 256 * (8 + 4); // Unchanged - we'll just use the first 256 entries
 const REGIONS_BUFFER_SIZE = 256 * 16;          // For 4 atomic u32s per feature
-const MARKER_BUFFER_SIZE = 256 * 24;           // Same, 256 markers maximum
+const MARKER_BUFFER_SIZE = 256 * 24;           // 6 floats per marker: vec2 center + vec4 color
 
 // Performance tracking and GPU acceleration toggle
 const PERFORMANCE_STATS = {
@@ -293,10 +294,16 @@ window.gpuMode = () => window.mapPerformance.setGPUEnabled(true);
 window.cpuMode = () => window.mapPerformance.setGPUEnabled(false);
 window.perfStats = () => window.mapPerformance.logStats();
 window.benchmark = (coords) => window.mapPerformance.runBenchmark(coords);
+window.clearCache = () => {
+    clearTileCache();
+    resetNotFoundTiles();
+    console.log('🗑️ Tile cache cleared - reloading tiles...');
+    window.camera.triggerEvent('zoomend');
+};
 
 // Module-level variable for tracking zoom changes
 let lastLoggedZoom = -1;
-let frameCount = 0; // Define frameCount variable that was missing
+let frameCount = 0;
 
 async function main() {
     // Initialize document and canvas
@@ -309,13 +316,48 @@ async function main() {
     canvas.width = rect.width * dpr;
     canvas.height = rect.height * dpr;
     canvas.style.width = rect.width + "px";
-    canvas.style.height = rect.height + "px";    // Initialize WebGPU
+    canvas.style.height = rect.height + "px";
+    
+    // Initialize WebGPU
     const { device, context } = await initWebGPU(canvas);
     const format = navigator.gpu.getPreferredCanvasFormat();
 
     // Initialize renderer and camera
     const renderer = new MapRenderer(device, context, format);
     const camera = new Camera(canvas.width, canvas.height);
+    
+    // Handle window resize
+    window.addEventListener('resize', () => {
+        const dpr = window.devicePixelRatio || 1;
+        const width = window.innerWidth;
+        const height = window.innerHeight;
+        
+        canvas.width = width * dpr;
+        canvas.height = height * dpr;
+        canvas.style.width = width + "px";
+        canvas.style.height = height + "px";
+        
+        // Reconfigure the canvas context for the new size
+        context.configure({
+            device: device,
+            format: format,
+            alphaMode: 'premultiplied',
+        });
+        
+        // Update camera
+        camera.updateDimensions(canvas.width, canvas.height);
+        
+        // Update canvas size buffer
+        device.queue.writeBuffer(renderer.buffers.canvasSize, 0, new Float32Array([canvas.width, canvas.height]));
+        
+        // Recreate textures and bind groups
+        renderer.createTextures(canvas.width, canvas.height);
+        renderer.updateTextureBindGroups();
+    });
+    
+    // Initialize text renderer
+    const textRenderer = new TextRenderer(device);
+    await textRenderer.initialize('Arial', 48);
     
     // Start at world center [0, 0] (Greenwich/Equator)
     camera.position = [0, 0];
@@ -497,6 +539,10 @@ async function main() {
     // Set up event listeners
     setupEventListeners(canvas, camera, device, renderer.textures.hidden, tileBuffers, renderer.buffers.pickedId);
 
+    // Marker position cache - updated after each frame
+    let markerPositionCache = null;
+    let isReadingMarkers = false;
+
     // Main rendering loop
     async function frame() {
         // Update camera and transform matrices
@@ -508,25 +554,79 @@ async function main() {
         renderer.updateCameraTransform(transformMatrix);
         device.queue.writeBuffer(markerUniformBuffer, 0, transformMatrix);
 
-        // Render map with camera parameter
-        renderMap(device, renderer, tileBuffers, hiddenTileBuffers, context, camera);
+        // Get the current texture ONCE for this frame
+        const currentTexture = context.getCurrentTexture();
+        const textureView = currentTexture.createView();
+
+        // Render map - returns encoder without submitting
+        const mapEncoder = renderMap(device, renderer, tileBuffers, hiddenTileBuffers, textureView, camera);
         
-        // Process and render markers
-        renderMarkers(
+        // Compute marker positions (separate encoder for compute work)
+        const computeEncoder = createComputeMarkerEncoder(
             device, 
-            renderer, 
-            context, 
+            renderer,
             accumulatorPipeline, 
             centerPipeline, 
-            markerPipeline, 
             accumulatorBuffer, 
             markerBuffer, 
             dimsBuffer, 
-            markerBindGroup, 
             canvas,
             regionsBuffer
         );
+        
+        // Create encoder for marker and label render passes
+        const overlayEncoder = device.createCommandEncoder();
+        
+        // Render markers
+        renderMarkersToEncoder(overlayEncoder, textureView, device, markerPipeline, markerBindGroup, markerBuffer);
+        
+        // Render labels using cached positions from PREVIOUS frame
+        // (One frame delay is acceptable - labels will catch up)
+        if (markerPositionCache) {
+            //renderLabelsToEncoder(overlayEncoder, textureView, textRenderer, tileBuffers, markerPositionCache, camera);
+        }
+        
+        // NEW: Render labels directly from GPU marker buffer
+        const featureNames = buildFeatureNameMap(tileBuffers);
+        
+        // Create bind group for marker buffer (same as markers use at group 1)
+        const markerDataBindGroup = device.createBindGroup({
+            layout: markerPipeline.getBindGroupLayout(1),
+            entries: [{ binding: 0, resource: { buffer: markerBuffer } }]
+        });
+        
+        textRenderer.renderFromMarkerBuffer(overlayEncoder, textureView, markerBuffer, markerDataBindGroup, featureNames);
+        
+        // Submit all GPU work
+        device.queue.submit([
+            mapEncoder.finish(),
+            computeEncoder.finish(),
+            overlayEncoder.finish()
+        ]);
+        
+        // Asynchronously read marker buffer for NEXT frame
+        if (!isReadingMarkers) {
+            isReadingMarkers = true;
+            readMarkerBufferSync(device, markerBuffer).then(positions => {
+                if (positions) {
+                    // Count non-zero markers
+                    let nonZeroCount = 0;
+                    for (let i = 0; i < 256; i++) {
+                        const offset = i * 6;
+                        if (positions[offset + 5] > 0) { // Check alpha
+                            nonZeroCount++;
+                        }
+                    }
 
+                    markerPositionCache = positions;
+                }
+                isReadingMarkers = false;
+            }).catch(err => {
+                console.error('Error reading markers:', err);
+                isReadingMarkers = false;
+            });
+        }
+        
         frameCount++;
         requestAnimationFrame(frame);
     }
@@ -814,7 +914,7 @@ function createAndAddBuffers(
 }
 
 // Render the map with hidden texture and edge detection
-function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, context, camera) {
+function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, textureView, camera) {
     const mapCommandEncoder = device.createCommandEncoder();
     
     // First render pass: hidden texture for feature IDs
@@ -864,7 +964,7 @@ function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, context, ca
     // Third render pass: Apply edge detection to screen
     const mainPass = mapCommandEncoder.beginRenderPass({
         colorAttachments: [{
-            view: context.getCurrentTexture().createView(),
+            view: textureView,  // Use passed texture view instead of calling getCurrentTexture again
             clearValue: { r: 0.15, g: 0.35, b: 0.6, a: 1.0 },
             loadOp: 'clear',
             storeOp: 'store',
@@ -888,22 +988,19 @@ function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, context, ca
     
     mainPass.end();
     
-    // Submit map drawing commands
-    device.queue.submit([mapCommandEncoder.finish()]);
+    // DON'T submit here - let caller submit
+    return mapCommandEncoder;
 }
 
-// Process and render markers
-function renderMarkers(
+// Process and render markers - COMPUTE ONLY, returns encoder without submitting
+function createComputeMarkerEncoder(
     device,
     renderer,
-    context,
     accumulatorPipeline,
     centerPipeline,
-    markerPipeline,
     accumulatorBuffer,
     markerBuffer,
     dimsBuffer,
-    markerBindGroup,
     canvas,
     regionsBuffer
 ) {
@@ -911,9 +1008,14 @@ function renderMarkers(
     device.queue.writeBuffer(accumulatorBuffer, 0, new Uint8Array(ACCUMULATOR_BUFFER_SIZE));
     
     // Update dimensions from the actual texture
+    const hiddenWidth = renderer.textures.hidden.width;
+    const hiddenHeight = renderer.textures.hidden.height;
+    
+
+    
     device.queue.writeBuffer(dimsBuffer, 0, new Uint32Array([
-        renderer.textures.hidden.width,
-        renderer.textures.hidden.height
+        hiddenWidth,
+        hiddenHeight
     ]));
     
     // Compute marker positions
@@ -950,10 +1052,20 @@ function renderMarkers(
     computeEncoder2.dispatchWorkgroups(4);
     computeEncoder2.end();
     
-    device.queue.submit([markerComputeEncoder.finish()]);
-    
-    // Render markers
-    const markerRenderEncoder = device.createCommandEncoder();
+    // Return encoder without submitting - caller will submit
+    return markerComputeEncoder;
+}
+
+// Render markers using pre-computed positions - adds to existing encoder
+function renderMarkersToEncoder(
+    encoder,
+    textureView,
+    device,
+    markerPipeline,
+    markerBindGroup,
+    markerBuffer
+) {
+    // Render triangles for markers
     const triangleData = new Float32Array([
         -0.5, -0.5,
          0.5, -0.5,
@@ -968,9 +1080,9 @@ function renderMarkers(
     new Float32Array(triangleBuffer.getMappedRange()).set(triangleData);
     triangleBuffer.unmap();
     
-    const markerPass = markerRenderEncoder.beginRenderPass({
+    const markerPass = encoder.beginRenderPass({
         colorAttachments: [{
-            view: context.getCurrentTexture().createView(),
+            view: textureView,
             loadOp: 'load',
             storeOp: 'store'
         }]
@@ -988,8 +1100,179 @@ function renderMarkers(
     markerPass.setBindGroup(1, markerDataBindGroup);
     markerPass.draw(3, 256);
     markerPass.end();
+}
+
+// Build feature name map from tile buffers
+function buildFeatureNameMap(tileBuffers) {
+    const featureNames = new Map();
+    for (const tileBuffer of tileBuffers) {
+        if (!tileBuffer.properties) continue;
+        const clampedFid = tileBuffer.properties.clampedFid;
+        const name = tileBuffer.properties.NAME || tileBuffer.properties.ADM0_A3 || tileBuffer.properties.ISO_A3;
+        if (clampedFid && name) {
+            featureNames.set(clampedFid, name);
+        }
+    }
+    return featureNames;
+}
+
+function renderLabelsToEncoder(encoder, textureView, textRenderer, tileBuffers, markerPositions, camera) {
+    if (!textRenderer || !textRenderer.initialized || !markerPositions) return;
     
-    device.queue.submit([markerRenderEncoder.finish()]);
+    textRenderer.clearLabels();
+    
+    // Build feature name map using CLAMPED feature ID as key
+    const featureNames = new Map();
+    
+    for (const tileBuffer of tileBuffers) {
+        if (!tileBuffer.properties) continue;
+        const clampedFid = tileBuffer.properties.clampedFid;
+        const name = tileBuffer.properties.NAME || tileBuffer.properties.ADM0_A3 || tileBuffer.properties.ISO_A3;
+        
+        if (clampedFid && name) {
+            featureNames.set(clampedFid, name);
+        }
+    }
+    
+    // Marker buffer format: [centerX, centerY, colorR, colorG, colorB, colorA] = 6 floats per marker
+    const markerStride = 6;
+    const maxMarkers = 256;
+    
+    let labelCount = 0;
+   
+    
+    // Render labels for ALL countries
+    for (let i = 0; i < maxMarkers; i++) {
+        const offset = i * markerStride;
+        const x = markerPositions[offset];
+        const y = markerPositions[offset + 1];
+        const colorA = markerPositions[offset + 5];
+        
+        if (colorA > 0 && featureNames.has(i)) {
+            const name = featureNames.get(i);
+            if (name) {
+                textRenderer.addLabel(name, x, y, 0.6);
+            }
+        }
+    }
+    
+    // Render using the passed encoder
+    textRenderer.render(encoder, textureView, camera);
+}
+
+// Synchronously read marker buffer (blocking but ensures labels match current frame)
+async function readMarkerBufferSync(device, markerBuffer) {
+    try {
+        const readBuffer = device.createBuffer({
+            size: MARKER_BUFFER_SIZE,
+            usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+        });
+        
+        const copyEncoder = device.createCommandEncoder();
+        copyEncoder.copyBufferToBuffer(markerBuffer, 0, readBuffer, 0, MARKER_BUFFER_SIZE);
+        device.queue.submit([copyEncoder.finish()]);
+        
+        await readBuffer.mapAsync(GPUMapMode.READ);
+        const data = new Float32Array(readBuffer.getMappedRange()).slice();
+        readBuffer.unmap();
+        readBuffer.destroy();
+        
+        return data;
+    } catch (err) {
+        console.error('Error reading markers sync:', err);
+        return null;
+    }
+}
+
+// Asynchronously read marker buffer (doesn't block rendering)
+let pendingRead = null;
+async function readMarkerBufferAsync(device, markerBuffer) {
+    // Skip if there's already a read in progress
+    if (pendingRead) {
+        return pendingRead;
+    }
+    
+    pendingRead = (async () => {
+        try {
+            const readBuffer = device.createBuffer({
+                size: MARKER_BUFFER_SIZE,
+                usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+            });
+            
+            const copyEncoder = device.createCommandEncoder();
+            copyEncoder.copyBufferToBuffer(markerBuffer, 0, readBuffer, 0, MARKER_BUFFER_SIZE);
+            device.queue.submit([copyEncoder.finish()]);
+            
+            await readBuffer.mapAsync(GPUMapMode.READ);
+            const data = new Float32Array(readBuffer.getMappedRange()).slice(); // Copy the data
+            readBuffer.unmap();
+            readBuffer.destroy();
+            
+            return data;
+        } finally {
+            pendingRead = null;
+        }
+    })();
+    
+    return pendingRead;
+}
+
+// OLD function - not used
+function renderLabels_OLD(device, textureView, textRenderer, tileBuffers, camera, canvas, markerBuffer) {
+    if (!textRenderer || !textRenderer.initialized) return;
+    
+    // Clear previous labels
+    textRenderer.clearLabels();
+    
+    // Extract labels from visible features using the same centroid calculation as before
+    const labeledFeatures = new Map();
+    
+    for (const tileBuffer of tileBuffers) {
+        if (!tileBuffer.properties) continue;
+        
+        const featureId = tileBuffer.properties.fid;
+        const name = tileBuffer.properties.NAME || tileBuffer.properties.ADM0_A3 || tileBuffer.properties.ISO_A3;
+        
+        if (!featureId || !name || labeledFeatures.has(featureId)) continue;
+        
+        // Calculate centroid from vertices - these are in clip space after GPU transformation
+        const clipPos = calculateCentroid(tileBuffer.vertices);
+        if (!clipPos) continue;
+        
+        labeledFeatures.set(featureId, { name, clipPos });
+    }
+    
+    if (labeledFeatures.size === 0) return;
+    
+    // Add labels to renderer at centroid positions
+    for (const [featureId, data] of labeledFeatures) {
+        const baseSize = Math.max(0.8, Math.min(2.0, camera.zoom / 4));
+        textRenderer.addLabel(data.name, data.clipPos[0], data.clipPos[1], baseSize);
+    }
+    
+    // Render all labels
+    const encoder = device.createCommandEncoder();
+    textRenderer.render(encoder, textureView, camera);
+    device.queue.submit([encoder.finish()]);
+}
+
+// Calculate centroid from vertex array
+function calculateCentroid(vertices) {
+    if (!vertices || vertices.length < 6) return null;
+    
+    let sumX = 0, sumY = 0;
+    let count = 0;
+    
+    // Vertices are [x, y, r, g, b, a, ...]
+    for (let i = 0; i < vertices.length; i += 6) {
+        sumX += vertices[i];
+        sumY += vertices[i + 1];
+        count++;
+    }
+    
+    if (count === 0) return null;
+    
+    return [sumX / count, sumY / count];
 }
 
 // Start application

@@ -44,6 +44,12 @@ export class Camera extends EventTarget {
         // console.log(`🖱️ Mouse updated: screen[${this.mouseScreenX.toFixed(3)}, ${this.mouseScreenY.toFixed(3)}]`);
     }
 
+    updateDimensions(width, height) {
+        this.viewportWidth = width;
+        this.viewportHeight = height;
+        this._cachedMatrix = null; // Invalidate cached matrix
+    }
+
     // Convert current mouse screen position to world coordinates
     getMouseWorldPosition() {
         // Convert from screen (0-1) to clip space (-1 to 1)

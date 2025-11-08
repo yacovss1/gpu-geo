@@ -24,6 +24,17 @@ let CACHE_TILE_DATA = true;   // Force this to true to always store raw PBF data
 
 const tileCache = new TileCache(); // Use the imported TileCache class
 
+// Create deterministic ID from country name (no collision resolution - let GPU handle duplicates)
+function getCountryId(countryName) {
+    let hash = 0;
+    for (let i = 0; i < countryName.length; i++) {
+        hash = ((hash << 5) - hash) + countryName.charCodeAt(i);
+        hash = hash & hash;
+    }
+    // Map to 1-254 range - same name ALWAYS gets same ID
+    return ((Math.abs(hash) % 254) + 1);
+}
+
 export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], sourceId = null, zoom = 0) {
     const fillVertices = [];
     const hiddenVertices = [];
@@ -94,6 +105,16 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
 
     // Get feature ID using style configuration or fallback
     const getFeatureId = () => {
+        // For country features, ALWAYS use our deterministic hash (ignore style system)
+        const countryName = feature.properties?.NAME || feature.properties?.ADM0_A3 || feature.properties?.ISO_A3;
+        
+        if (countryName) {
+            // Use hash-based ID for ANY feature with a country name
+            const hashedId = getCountryId(countryName);
+            return hashedId;
+        }
+        
+        // For other features, use style-based ID or fallback
         if (style && sourceId) {
             return getStyleFeatureId(feature, sourceId);
         }
@@ -119,7 +140,8 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
     const coordsToIdVertices = (coords, featureId, targetArray) => {
         const vertexStartIndex = targetArray.length / 6;
         
-        // Ensure feature ID is non-zero and normalized to 0-1 range
+        // Feature ID should already be clamped (1-254) when passed in
+        // Just ensure it's valid and normalize to 0-1 range for GPU
         const safeId = Math.max(1, Math.min(254, featureId || 1));
         const normalizedId = safeId / 255.0;
         
@@ -137,6 +159,16 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
     const processedFeatures = new Set();
 
     const featureId = getFeatureId();
+    
+    // Clamp feature ID to valid range for rendering (1-254)
+    const clampedFeatureId = Math.max(1, Math.min(254, featureId));
+    
+    // ALWAYS debug log to see what's happening
+    const featureName = feature.properties?.NAME || feature.properties?.ADM0_A3;
+    if (featureName) {
+        console.log(`🎨 RENDERING: "${featureName}" → ID ${clampedFeatureId} (raw: ${featureId})`);
+    }
+    
     if (processedFeatures.has(featureId)) {
         return null;
     }
@@ -173,7 +205,7 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
             const allCoords = coordinates.flat(1);
             const fillStartIndex = coordsToVertices(allCoords, _fillColor, fillVertices);
             const hiddenStartIndex = coordsToIdVertices(allCoords, 
-                featureId,
+                clampedFeatureId,  // Use clamped ID to match properties
                 hiddenVertices
             );
 
@@ -214,7 +246,7 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                 const allCoords = polygon.flat(1);
                 const fillStartIndex = coordsToVertices(allCoords, _fillColor, fillVertices);
                 const hiddenStartIndex = coordsToIdVertices(allCoords, 
-                    featureId,
+                    clampedFeatureId,  // Use clamped ID to match properties
                     hiddenVertices
                 );
 
@@ -260,7 +292,11 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
         hiddenfillIndices: new Uint16Array(hiddenfillIndices),
         isFilled,
         isLine,
-        properties: feature.properties  // Include properties here
+        properties: {
+            ...feature.properties,
+            fid: featureId,           // Original feature ID
+            clampedFid: clampedFeatureId  // ID actually used in rendering (1-254)
+        }
     };
 }
 

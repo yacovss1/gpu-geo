@@ -4,7 +4,7 @@ struct Uniforms {
 };
 
 struct Marker {
-    center: vec2<f32>, // Already in clip space
+    center: vec2<f32>, // Normalized coordinates (0-1)
     color: vec4<f32>,
 };
 
@@ -36,7 +36,7 @@ fn main(input: VertexInput) -> VertexOutput {
     // Use fixed marker size for visibility
     let markerSize = 0.02;
     
-    // Position the marker in clip space
+    // Position the marker in normalized space
     var output: VertexOutput;
     output.position = vec4<f32>(
         marker.center.x + input.quadPos.x * markerSize,
