@@ -5,9 +5,17 @@ import { hexToRgb } from './utils.js';
 import { getColorOfCountries } from './utils.js';
 import { getGlobalCoordinateTransformer } from './coordinateGPU.js';
 import earcut from 'earcut';
+import { 
+    getStyle, 
+    getFeatureId as getStyleFeatureId, 
+    getPaintProperty, 
+    parseColor,
+    evaluateFilter,
+    getLayersBySource
+} from './style.js';
 
 // Enhanced parseGeoJSONFeature that uses GPU coordinate transformation
-export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 0.0, 0.0, 1.0]) {
+export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 0.0, 0.0, 1.0], sourceId = null, zoom = 0) {
     const fillVertices = [];
     const hiddenVertices = [];
     const fillIndices = [];
@@ -16,15 +24,64 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
     let isFilled = true;
     let isLine = true;
 
-    // Get proper country color from properties
-    const countryCode = feature?.properties?.ADM0_A3 || feature?.properties?.ISO_A3;
-    const _fillColor = getColorOfCountries(countryCode, [0.7, 0.7, 0.7, 1.0]);
-    const _borderColor = [0.0, 0.0, 0.0, 1.0];
+    // Get style configuration
+    const style = getStyle();
+    let _fillColor = fillColor;
+    let _borderColor = [0.0, 0.0, 0.0, 1.0];
 
-    // Use a nonzero default if fid is missing.
-    const getFeatureId = (id) => {
-        const rawId = parseInt(id) || 1;
-        return rawId; // Use raw ID instead of hashed to maintain direct mapping
+    if (style && sourceId) {
+        // Get layers for this source
+        const layers = getLayersBySource(sourceId);
+        const fillLayer = layers.find(l => l.type === 'fill' && (!l['source-layer'] || l['source-layer'] === feature.layer?.name));
+        const lineLayer = layers.find(l => l.type === 'line' && (!l['source-layer'] || l['source-layer'] === feature.layer?.name));
+
+        // Debug once per batch
+        if (!window._gpuStyleDebugLogged && layers.length > 0) {
+            console.log('🎨 [GPU] Style has', layers.length, 'layers for source', sourceId);
+            console.log('🎨 [GPU] Looking for feature layer:', feature.layer?.name);
+            console.log('🎨 [GPU] Fill layer found?', fillLayer ? fillLayer.id : 'NO');
+            if (fillLayer) {
+                console.log('🎨 [GPU] Fill layer source-layer:', fillLayer['source-layer']);
+                const testColor = getPaintProperty(fillLayer.id, 'fill-color', feature, zoom);
+                console.log('🎨 [GPU] Test color value:', testColor);
+                console.log('🎨 [GPU] Sample feature ISO_A3:', feature.properties?.ISO_A3);
+            }
+            window._gpuStyleDebugLogged = true;
+        }
+
+        // Apply filter if layer has one
+        if (fillLayer && fillLayer.filter && !evaluateFilter(fillLayer.filter, feature, zoom)) {
+            return null; // Feature filtered out
+        }
+
+        // Get paint properties from style
+        if (fillLayer) {
+            const fillColorValue = getPaintProperty(fillLayer.id, 'fill-color', feature, zoom);
+            if (fillColorValue) {
+                _fillColor = parseColor(fillColorValue);
+            }
+        }
+
+        if (lineLayer) {
+            const lineColorValue = getPaintProperty(lineLayer.id, 'line-color', feature, zoom);
+            if (lineColorValue) {
+                _borderColor = parseColor(lineColorValue);
+            }
+        }
+    } else {
+        // Fallback to legacy hardcoded colors
+        const countryCode = feature?.properties?.ADM0_A3 || feature?.properties?.ISO_A3;
+        _fillColor = getColorOfCountries(countryCode, [0.7, 0.7, 0.7, 1.0]);
+    }
+
+    // Get feature ID using style configuration or fallback
+    const getFeatureId = () => {
+        if (style && sourceId) {
+            return getStyleFeatureId(feature, sourceId);
+        }
+        // Legacy fallback
+        const rawId = parseInt(feature.properties?.fid || feature.id) || 1;
+        return rawId;
     };
 
     // Get GPU coordinate transformer
@@ -85,7 +142,7 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
 
     // Deduplicate features by tracking processed feature IDs
     const processedFeatures = new Set();
-    const featureId = feature.properties?.fid;
+    const featureId = getFeatureId();
     
     if (processedFeatures.has(featureId)) {
         return null;
@@ -123,7 +180,7 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
             const allCoords = coordinates.flat(1);
             const fillStartIndex = coordsToVertices(allCoords, _fillColor, fillVertices);
             const hiddenStartIndex = coordsToIdVertices(allCoords, 
-                getFeatureId(feature.properties.fid),
+                featureId,
                 hiddenVertices
             );
 
@@ -164,7 +221,7 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
                 const allCoords = polygon.flat(1);
                 const fillStartIndex = coordsToVertices(allCoords, _fillColor, fillVertices);
                 const hiddenStartIndex = coordsToIdVertices(allCoords, 
-                    getFeatureId(feature.properties.fid),
+                    featureId,
                     hiddenVertices
                 );
 
@@ -218,7 +275,7 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
 }
 
 // Batch processing function for multiple features
-export async function batchParseGeoJSONFeaturesGPU(features, device, fillColor = [0.0, 0.0, 0.0, 1.0]) {
+export async function batchParseGeoJSONFeaturesGPU(features, device, fillColor = [0.0, 0.0, 0.0, 1.0], sourceId = null, zoom = 0) {
     if (features.length === 0) return [];
 
     const transformer = getGlobalCoordinateTransformer(device);
@@ -261,7 +318,7 @@ export async function batchParseGeoJSONFeaturesGPU(features, device, fillColor =
         };
 
         // Parse feature using transformed coordinates (reuse logic from parseGeoJSONFeatureGPU)
-        const result = await parseFeatureWithTransformedCoords(feature, getTransformedCoord, fillColor);
+        const result = await parseFeatureWithTransformedCoords(feature, getTransformedCoord, fillColor, sourceId, zoom);
         if (result) {
             results.push(result);
         }
@@ -271,7 +328,7 @@ export async function batchParseGeoJSONFeaturesGPU(features, device, fillColor =
 }
 
 // Helper function to parse a feature when coordinates are already transformed
-async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, fillColor) {
+async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, fillColor, sourceId = null, zoom = 0) {
     const fillVertices = [];
     const hiddenVertices = [];
     const fillIndices = [];
@@ -280,15 +337,67 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
     let isFilled = true;
     let isLine = true;
 
-    // Get proper country color from properties
-    const countryCode = feature?.properties?.ADM0_A3 || feature?.properties?.ISO_A3;
-    const _fillColor = getColorOfCountries(countryCode, [0.7, 0.7, 0.7, 1.0]);
-    const _borderColor = [0.0, 0.0, 0.0, 1.0];
+    // Get style configuration
+    const style = getStyle();
+    let _fillColor = fillColor;
+    let _borderColor = [0.0, 0.0, 0.0, 1.0];
 
-    const getFeatureId = (id) => {
-        const rawId = parseInt(id) || 1;
+    if (style && sourceId) {
+        // Get layers for this source
+        const layers = getLayersBySource(sourceId);
+        // Find first VISIBLE fill layer for this source-layer
+        const fillLayer = layers.find(l => 
+            l.type === 'fill' && 
+            (!l['source-layer'] || l['source-layer'] === feature.layer?.name) &&
+            l.layout?.visibility !== 'none'
+        );
+        const lineLayer = layers.find(l => 
+            l.type === 'line' && 
+            (!l['source-layer'] || l['source-layer'] === feature.layer?.name) &&
+            l.layout?.visibility !== 'none'
+        );
+
+        // If no visible fill layer found, skip this feature
+        if (!fillLayer) {
+            return null;
+        }
+
+        // Apply filter if layer has one
+        if (fillLayer && fillLayer.filter && !evaluateFilter(fillLayer.filter, feature, zoom)) {
+            return null; // Feature filtered out
+        }
+
+        // Get paint properties from style
+        if (fillLayer) {
+            const fillColorValue = getPaintProperty(fillLayer.id, 'fill-color', feature, zoom);
+            if (fillColorValue) {
+                _fillColor = parseColor(fillColorValue);
+            }
+        }
+
+        if (lineLayer) {
+            const lineColorValue = getPaintProperty(lineLayer.id, 'line-color', feature, zoom);
+            if (lineColorValue) {
+                _borderColor = parseColor(lineColorValue);
+            }
+        }
+    } else {
+        // Fallback to legacy hardcoded colors
+        const countryCode = feature?.properties?.ADM0_A3 || feature?.properties?.ISO_A3;
+        _fillColor = getColorOfCountries(countryCode, [0.7, 0.7, 0.7, 1.0]);
+    }
+
+    // Get feature ID using style configuration or fallback
+    const getFeatureId = () => {
+        if (style && sourceId) {
+            return getStyleFeatureId(feature, sourceId);
+        }
+        // Legacy fallback
+        const rawId = parseInt(feature.properties?.fid || feature.id) || 1;
         return rawId;
     };
+
+    const featureId = getFeatureId();
 
     // Vertex creation functions (same as above)
     const coordsToVertices = (coords, color, targetArray) => {
@@ -337,7 +446,7 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
             const allCoords = coordinates.flat(1);
             const fillStartIndex = coordsToVertices(allCoords, _fillColor, fillVertices);
             const hiddenStartIndex = coordsToIdVertices(allCoords, 
-                getFeatureId(feature.properties.fid), hiddenVertices);
+                featureId, hiddenVertices);
 
             triangles.forEach(index => {
                 fillIndices.push(fillStartIndex + index);
@@ -368,7 +477,7 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
                 const allCoords = polygon.flat(1);
                 const fillStartIndex = coordsToVertices(allCoords, _fillColor, fillVertices);
                 const hiddenStartIndex = coordsToIdVertices(allCoords, 
-                    getFeatureId(feature.properties.fid), hiddenVertices);
+                    featureId, hiddenVertices);
 
                 triangles.forEach(index => {
                     fillIndices.push(fillStartIndex + index);

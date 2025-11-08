@@ -13,7 +13,7 @@ export class Camera extends EventTarget {
         this.viewportWidth = viewportWidth;
         this.viewportHeight = viewportHeight;
         this.velocity = [0, 0];
-        this.friction = 0.92;  // Enable drift (was 1.0)
+        this.friction = 0.95;  // Increased for more momentum/drift
         this.velocityFactor = 0.5;
         this.zoomSpeed = 0.1;
         this.zoomEndTimeout = null;

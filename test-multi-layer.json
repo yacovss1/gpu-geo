@@ -1,0 +1,59 @@
+{
+  "version": 8,
+  "name": "Multi-Layer Test",
+  "sources": {
+    "maplibre": {
+      "type": "vector",
+      "url": "https://demotiles.maplibre.org/tiles/tiles.json"
+    }
+  },
+  "layers": [
+    {
+      "id": "countries-fill-original",
+      "type": "fill",
+      "source": "maplibre",
+      "source-layer": "countries",
+      "paint": {
+        "fill-color": [
+          "match",
+          ["get", "ADM0_A3"],
+          ["USA"], "#ff0000",
+          ["CAN"], "#00ff00",
+          ["MEX"], "#0000ff",
+          "#cccccc"
+        ],
+        "fill-opacity": 0.8
+      }
+    },
+    {
+      "id": "countries-fill-alternate",
+      "type": "fill",
+      "source": "maplibre",
+      "source-layer": "countries",
+      "layout": {
+        "visibility": "none"
+      },
+      "paint": {
+        "fill-color": [
+          "match",
+          ["get", "ADM0_A3"],
+          ["USA"], "#ffff00",
+          ["CAN"], "#ff00ff",
+          ["MEX"], "#00ffff",
+          "#ffffff"
+        ],
+        "fill-opacity": 0.8
+      }
+    },
+    {
+      "id": "countries-borders",
+      "type": "line",
+      "source": "maplibre",
+      "source-layer": "countries",
+      "paint": {
+        "line-color": "#000000",
+        "line-width": 1
+      }
+    }
+  ]
+}

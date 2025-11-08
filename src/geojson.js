@@ -3,7 +3,16 @@ import Pbf from 'pbf';
 import { VectorTile } from '@mapbox/vector-tile';
 import earcut from 'earcut';
 import { getColorOfCountries } from './utils.js';
-import { TileCache } from './tileCache.js'; // Import the TileCache class
+import { TileCache } from './tileCache.js';
+import { 
+    getStyle, 
+    getFeatureId as getStyleFeatureId, 
+    getPaintProperty, 
+    parseColor,
+    evaluateFilter,
+    getLayersBySource,
+    isTileInBounds
+} from './style.js';
 
 // Ensure tileCache is declared before use
 const problemTiles = new Set(["4/12/15"]);
@@ -15,7 +24,7 @@ let CACHE_TILE_DATA = true;   // Force this to true to always store raw PBF data
 
 const tileCache = new TileCache(); // Use the imported TileCache class
 
-export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0]) {
+export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], sourceId = null, zoom = 0) {
     const fillVertices = [];
     const hiddenVertices = [];
     const fillIndices = [];
@@ -24,23 +33,73 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0]) {
     let isFilled = true;
     let isLine = true;
 
-    // Get proper country color from properties
-    const countryCode = feature?.properties?.ADM0_A3 || feature?.properties?.ISO_A3;
-    const _fillColor = getColorOfCountries(countryCode, [0.7, 0.7, 0.7, 1.0]);
-    const _borderColor = [0.0, 0.0, 0.0, 1.0];
+    // Get style configuration
+    const style = getStyle();
+    let _fillColor = fillColor;
+    let _borderColor = [0.0, 0.0, 0.0, 1.0];
 
-    // Use a nonzero default if fid is missing.
-    const getFeatureId = (id) => {
-        const rawId = parseInt(id) || 1;
-        const hashedId = ((rawId % 253) + 1); // Ensures range 1-254
-        // if (feature.properties?.ADM0_A3) {
-        //     console.log('Feature ID for', feature.properties.ADM0_A3, ':', {
-        //         rawId,
-        //         hashedId,
-        //         fid: feature.properties.fid
-        //     });
-        // }
-        return rawId; // Use raw ID instead of hashed to maintain direct mapping
+    if (style && sourceId) {
+        // Get layers for this source
+        const layers = getLayersBySource(sourceId);
+        // Find first VISIBLE fill layer for this source-layer
+        const fillLayer = layers.find(l => 
+            l.type === 'fill' && 
+            (!l['source-layer'] || l['source-layer'] === feature.layer?.name) &&
+            l.layout?.visibility !== 'none'
+        );
+        const lineLayer = layers.find(l => 
+            l.type === 'line' && 
+            (!l['source-layer'] || l['source-layer'] === feature.layer?.name) &&
+            l.layout?.visibility !== 'none'
+        );
+
+        // If no visible fill layer found, skip this feature
+        if (!fillLayer) {
+            return null;
+        }
+
+        // Debug once per batch
+        if (!window._styleDebugLogged && layers.length > 0) {
+            console.log('🎨 Style has', layers.length, 'layers for source', sourceId);
+            console.log('🎨 Looking for layer:', feature.layer?.name);
+            console.log('🎨 Fill layer found?', fillLayer ? fillLayer.id : 'NO');
+            console.log('🎨 Sample feature properties:', Object.keys(feature.properties || {}).slice(0, 5));
+            window._styleDebugLogged = true;
+        }
+
+        // Apply filter if layer has one
+        if (fillLayer && fillLayer.filter && !evaluateFilter(fillLayer.filter, feature, zoom)) {
+            return null; // Feature filtered out
+        }
+
+        // Get paint properties from style
+        if (fillLayer) {
+            const fillColorValue = getPaintProperty(fillLayer.id, 'fill-color', feature, zoom);
+            if (fillColorValue) {
+                _fillColor = parseColor(fillColorValue);
+            }
+        }
+
+        if (lineLayer) {
+            const lineColorValue = getPaintProperty(lineLayer.id, 'line-color', feature, zoom);
+            if (lineColorValue) {
+                _borderColor = parseColor(lineColorValue);
+            }
+        }
+    } else {
+        // Fallback to legacy hardcoded colors
+        const countryCode = feature?.properties?.ADM0_A3 || feature?.properties?.ISO_A3;
+        _fillColor = getColorOfCountries(countryCode, [0.7, 0.7, 0.7, 1.0]);
+    }
+
+    // Get feature ID using style configuration or fallback
+    const getFeatureId = () => {
+        if (style && sourceId) {
+            return getStyleFeatureId(feature, sourceId);
+        }
+        // Legacy fallback
+        const rawId = parseInt(feature.properties?.fid || feature.id) || 1;
+        return rawId;
     };
 
     // Create two separate vertex arrays for visible and hidden rendering
@@ -77,7 +136,7 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0]) {
     // Deduplicate features by tracking processed feature IDs
     const processedFeatures = new Set();
 
-    const featureId = feature.properties?.fid;
+    const featureId = getFeatureId();
     if (processedFeatures.has(featureId)) {
         return null;
     }
@@ -114,7 +173,7 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0]) {
             const allCoords = coordinates.flat(1);
             const fillStartIndex = coordsToVertices(allCoords, _fillColor, fillVertices);
             const hiddenStartIndex = coordsToIdVertices(allCoords, 
-                getFeatureId(feature.properties.fid),
+                featureId,
                 hiddenVertices
             );
 
@@ -155,7 +214,7 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0]) {
                 const allCoords = polygon.flat(1);
                 const fillStartIndex = coordsToVertices(allCoords, _fillColor, fillVertices);
                 const hiddenStartIndex = coordsToIdVertices(allCoords, 
-                    getFeatureId(feature.properties.fid),
+                    featureId,
                     hiddenVertices
                 );
 
@@ -271,6 +330,16 @@ export async function fetchVectorTile(x, y, z) {
     
     const tileKey = `${z}/${x}/${y}`;
     
+    // Check if tile is within source bounds (prevents 404s on sparse tilesets)
+    const currentStyle = getStyle();
+    if (currentStyle && currentStyle.sources) {
+        const sourceId = Object.keys(currentStyle.sources)[0];
+        if (!isTileInBounds(x, y, z, sourceId)) {
+            notFoundTiles.add(tileKey); // Cache as not found
+            return null;
+        }
+    }
+    
     // Don't retry tiles we know don't exist
     if (notFoundTiles.has(tileKey)) {
         return null;
@@ -322,7 +391,13 @@ export async function fetchVectorTile(x, y, z) {
     // Fetch with a timeout for higher reliability
     const fetchWithTimeout = async (url, options, timeout = 5000) => {
         return Promise.race([
-            fetch(url, options),
+            fetch(url, options).catch(err => {
+                // Suppress console errors for 404s as they're expected for sparse tilesets
+                if (!err.message?.includes('404')) {
+                    console.error('Tile fetch error:', err);
+                }
+                throw err;
+            }),
             new Promise((_, reject) => 
                 setTimeout(() => reject(new Error('Fetch timeout')), timeout)
             )

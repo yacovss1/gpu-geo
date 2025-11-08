@@ -3,12 +3,23 @@
 <head>
     <meta charset="UTF-8"/>
     <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-    <!-- <script src="https://cdnjs.cloudflare.com/ajax/libs/gl-matrix/2.8.1/gl-matrix-min.js" integrity="sha512-zhHQR0/H5SEBL3Wn6yYSaTTZej12z0hVZKOv3TwCUXT1z5qeqGcXJLLrbERYRScEDDpYIJhPC1fk31gqR783iQ==" crossorigin="anonymous" defer></script> -->
-    <!-- <script src="https://cdn.jsdelivr.net/npm/earcut/dist/earcut.min.js" defer></script> -->
     <script type="module" src="./main.js" defer></script>
 </head>
 <body style="margin:0">
     <canvas id="canvas" style="width: 100%; height: 100vh; display: flex; position: relative;"></canvas>
     <div id="popup" style="display:none; position:absolute; background:white; border:1px solid black; padding:10px;"></div>
+    
+    <!-- 
+    To use custom map styles, open the browser console and run:
+    
+    // Load style from URL
+    await window.mapStyle.loadStyleFromURL('./example-style.json');
+    
+    // Or set style directly
+    await window.mapStyle.setStyle({ version: 8, sources: {...}, layers: [...] });
+    
+    // View current style
+    window.mapStyle.getStyle();
+    -->
 </body>
 </html>

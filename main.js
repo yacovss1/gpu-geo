@@ -1,8 +1,9 @@
 import { initWebGPU } from './src/webgpu-init.js';
 import { Camera } from './src/camera.js';
 import { MapRenderer } from './src/renderer.js';
-import { parseGeoJSONFeature, fetchVectorTile, clearTileCache, resetNotFoundTiles } from './src/geojson.js';
+import { parseGeoJSONFeature, fetchVectorTile, clearTileCache, resetNotFoundTiles, setTileSource } from './src/geojson.js';
 import { parseGeoJSONFeatureGPU, batchParseGeoJSONFeaturesGPU } from './src/geojsonGPU.js';
+import { getStyle, setStyle, setLayerVisibility, getLayerVisibility, getSourceTileUrl } from './src/style.js';
 import { setupEventListeners } from './src/events.js';
 import { getVisibleTiles } from './src/tile-utils.js'; 
 import { createMarkerPipeline } from './src/markerPipeline.js';
@@ -196,6 +197,97 @@ window.mapPerformance = {
     }
 };
 
+// Map style API
+window.mapStyle = {
+    // Set map style using Mapbox/MapLibre style specification
+    setStyle: async (style) => {
+        try {
+            await setStyle(style);
+            console.log('✅ Map style set successfully');
+            
+            // Extract tile source from style and configure
+            const currentStyle = getStyle();
+            if (currentStyle && currentStyle.sources) {
+                const firstVectorSource = Object.entries(currentStyle.sources).find(
+                    ([_, source]) => source.type === 'vector'
+                );
+                
+                if (firstVectorSource) {
+                    const [sourceId, source] = firstVectorSource;
+                    if (source.tiles && source.tiles.length > 0) {
+                        setTileSource({
+                            url: source.tiles[0],
+                            maxZoom: source.maxzoom || 14,
+                            timeout: 10000
+                        });
+                        console.log(`🗺️  Configured tile source: ${sourceId}`);
+                    }
+                }
+            }
+            
+            // Reload tiles with new style
+            clearTileCache();
+            resetNotFoundTiles();
+            
+            if (window.camera && window.device && window.tileBuffers && window.hiddenTileBuffers) {
+                window.tileBuffers.length = 0;
+                window.hiddenTileBuffers.length = 0;
+                
+                // Trigger a tile reload by firing the zoomend event
+                window.camera.triggerEvent('zoomend');
+            }
+        } catch (error) {
+            console.error('❌ Failed to set map style:', error);
+        }
+    },
+    
+    // Get current style
+    getStyle: () => {
+        return getStyle();
+    },
+    
+    // Helper to load a style from URL
+    loadStyleFromURL: async (url) => {
+        try {
+            const response = await fetch(url);
+            const style = await response.json();
+            await window.mapStyle.setStyle(style);
+        } catch (error) {
+            console.error(`❌ Failed to load style from ${url}:`, error);
+        }
+    },
+    
+    // Layer visibility controls
+    setLayerVisibility: (layerId, visible) => {
+        console.log(`🎨 Setting layer ${layerId} visibility to ${visible}`);
+        setLayerVisibility(layerId, visible);
+        // Force re-render by clearing everything
+        tileBuffers.length = 0;
+        hiddenTileBuffers.length = 0;
+        clearTileCache(); // Clear the tile data cache
+        resetNotFoundTiles(); // Clear the 404 cache
+        
+        // Re-trigger tile loading which will re-fetch and re-parse with new visibility
+        console.log('🔄 Re-loading tiles with new visibility...');
+        window.camera.triggerEvent('zoomend');
+    },
+    
+    getLayerVisibility: (layerId) => {
+        return getLayerVisibility(layerId);
+    },
+    
+    // List all layers
+    listLayers: () => {
+        const style = getStyle();
+        return style?.layers.map(l => ({ 
+            id: l.id, 
+            type: l.type, 
+            sourceLayer: l['source-layer'],
+            visible: l.layout?.visibility !== 'none'
+        })) || [];
+    }
+};
+
 // Convenience aliases for console usage
 window.gpuMode = () => window.mapPerformance.setGPUEnabled(true);
 window.cpuMode = () => window.mapPerformance.setGPUEnabled(false);
@@ -240,6 +332,14 @@ async function main() {
     window.tileBuffers = tileBuffers;
     window.hiddenTileBuffers = hiddenTileBuffers;
 
+    // Load the official MapLibre style from the demotiles server
+    try {
+        await window.mapStyle.loadStyleFromURL('https://demotiles.maplibre.org/style.json');
+        console.log('✅ MapLibre style loaded successfully');
+    } catch (error) {
+        console.warn('⚠️ Could not load style, using default colors:', error.message);
+    }
+
     // Initialize marker rendering resources
     const { 
         accumulatorPipeline, 
@@ -257,7 +357,17 @@ async function main() {
     camera.addEventListener('zoomend', async (event) => {
         // Extract both zoom levels properly
         const displayZoom = camera.zoom;
-        const fetchZoom = event.detail?.fetchZoom || Math.min(displayZoom, camera.maxFetchZoom);
+        let fetchZoom = event.detail?.fetchZoom || Math.min(displayZoom, camera.maxFetchZoom);
+        
+        // Respect style maxzoom if available
+        const currentStyle = getStyle();
+        if (currentStyle && currentStyle.sources) {
+            const sourceId = Object.keys(currentStyle.sources)[0];
+            const source = currentStyle.sources[sourceId];
+            if (source && source.maxzoom !== undefined) {
+                fetchZoom = Math.min(fetchZoom, source.maxzoom);
+            }
+        }
         
         // Always update the renderer with both zoom levels
         renderer.updateZoomInfo(camera.zoom, fetchZoom);
@@ -510,13 +620,23 @@ async function loadVisibleTiles(visibleTiles, device, newTileBuffers, newHiddenT
                     features.push(feature);
                 }
                 
+                // IMPORTANT: Set layer name on ALL features BEFORE GPU processing
+                // This ensures the style system can match source-layer correctly
+                features.forEach(feature => {
+                    feature.layer = { name: layerName };
+                });
+                
                 if (features.length === 0) continue;
 
                 let parsedFeatures = [];
                 const parseStartTime = performance.now();
                   if (PERFORMANCE_STATS.gpuEnabled) {
                     // Use GPU batch processing for coordinate transformation
-                    parsedFeatures = await batchParseGeoJSONFeaturesGPU(features, device);
+                    const currentStyle = getStyle();
+                    const sourceId = currentStyle ? Object.keys(currentStyle.sources)[0] : null;
+                    const zoom = camera.zoom;
+                    
+                    parsedFeatures = await batchParseGeoJSONFeaturesGPU(features, device, [0.0, 0.0, 0.0, 1.0], sourceId, zoom);
                     
                     const parseEndTime = performance.now();
                     const gpuTime = parseEndTime - parseStartTime;
@@ -527,8 +647,12 @@ async function loadVisibleTiles(visibleTiles, device, newTileBuffers, newHiddenT
                         (PERFORMANCE_STATS.averageGPUBatchSize * (PERFORMANCE_STATS.gpuBatchCount - 1) + features.length) / PERFORMANCE_STATS.gpuBatchCount;
                 } else {
                     // Use CPU processing for comparison
+                    const currentStyle = getStyle();
+                    const sourceId = currentStyle ? Object.keys(currentStyle.sources)[0] : null;
+                    const zoom = camera.zoom;
+                    
                     for (const feature of features) {
-                        const parsed = parseGeoJSONFeature(feature);
+                        const parsed = parseGeoJSONFeature(feature, [0.0, 0.0, 0.0, 1.0], sourceId, zoom);
                         if (parsed) {
                             parsedFeatures.push(parsed);
                         }
