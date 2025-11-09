@@ -947,6 +947,12 @@ function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, textureView
             loadOp: 'clear',
             storeOp: 'store',
         }],
+        depthStencilAttachment: {
+            view: renderer.textures.depth.createView(),
+            depthClearValue: 1.0,
+            depthLoadOp: 'clear',
+            depthStoreOp: 'store',
+        }
     });
     
     hiddenTileBuffers.forEach(({ vertexBuffer, hiddenFillIndexBuffer, hiddenfillIndexCount }) => {
@@ -969,6 +975,12 @@ function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, textureView
             loadOp: 'clear',
             storeOp: 'store',
         }],
+        depthStencilAttachment: {
+            view: renderer.textures.depth.createView(),
+            depthClearValue: 1.0,
+            depthLoadOp: 'clear',
+            depthStoreOp: 'store',
+        }
     });
     
     tileBuffers.forEach(({ vertexBuffer, fillIndexBuffer, fillIndexCount }) => {

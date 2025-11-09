@@ -79,7 +79,12 @@ export function createRenderPipeline(device, format, topology, isHidden = false)
                 }
             }],
         },
-        primitive: { topology, cullMode: 'none', frontFace: 'ccw' }
+        primitive: { topology, cullMode: 'none', frontFace: 'ccw' },
+        depthStencil: {
+            format: 'depth24plus',
+            depthWriteEnabled: true,
+            depthCompare: 'less'
+        }
     });
 }
 
@@ -310,6 +315,17 @@ export class MapRenderer {
             size: [width, height, 1],
             format: this.format,
             usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+        });
+        
+        // Create depth texture for 3D rendering
+        if (this.textures.depth) {
+            this.textures.depth.destroy();
+        }
+        
+        this.textures.depth = this.device.createTexture({
+            size: [width, height, 1],
+            format: 'depth24plus',
+            usage: GPUTextureUsage.RENDER_ATTACHMENT,
         });
     }
     
