@@ -170,6 +170,7 @@ export function getSymbolLayers(sourceId) {
             textField: layer.layout?.['text-field'],
             textSize: layer.layout?.['text-size'] || 16,
             textFont: layer.layout?.['text-font'] || ['Open Sans Regular'],
+            textAnchor: layer.layout?.['text-anchor'] || 'center',  // 9 positions: center, top, bottom, left, right, top-left, top-right, bottom-left, bottom-right
             textColor: layer.paint?.['text-color'] || '#000000',
             textHaloColor: layer.paint?.['text-halo-color'],
             textHaloWidth: layer.paint?.['text-halo-width'] || 0,

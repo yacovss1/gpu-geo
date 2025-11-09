@@ -7,14 +7,16 @@ import { getStyle, setStyle, setLayerVisibility, getLayerVisibility } from './sr
 import { setupEventListeners } from './src/core/events.js';
 import { getVisibleTiles } from './src/tiles/tile-utils.js'; 
 import { createMarkerPipeline } from './src/rendering/markerPipeline.js';
-import { createAccumulatorPipeline, createCenterPipeline } from './src/rendering/markerCompute.js';
+import { createAccumulatorPipeline, createQuadrantPipeline, createCenterPipeline } from './src/rendering/markerCompute.js';
 import { TextRenderer } from './src/text/textRenderer.js';
 
 // Define constants at file scope to ensure they're available everywhere
-// Expanded to accommodate compound IDs (feature ID + polygon ID)
-const ACCUMULATOR_BUFFER_SIZE = 256 * (8 + 4); // Unchanged - we'll just use the first 256 entries
-const REGIONS_BUFFER_SIZE = 256 * 16;          // For 4 atomic u32s per feature
-const MARKER_BUFFER_SIZE = 256 * 24;           // 6 floats per marker: vec2 center + vec4 color
+// 9-quadrant labeling system (center + 8 directional positions)
+const MAX_FEATURES = 256; // TODO: Increase to 10000+ for production
+const ACCUMULATOR_BUFFER_SIZE = MAX_FEATURES * 28; // Pass 1: 7 u32 per feature (sumX, sumY, count, minX, minY, maxX, maxY) = 28 bytes
+const QUADRANT_BUFFER_SIZE = MAX_FEATURES * 108; // Pass 2: 9 quadrants × 3 u32 each = 108 bytes per feature
+const REGIONS_BUFFER_SIZE = MAX_FEATURES * 16;   // For 4 atomic u32s per feature  
+const MARKER_BUFFER_SIZE = MAX_FEATURES * 24;    // 6 floats per marker: vec2 center + vec4 color
 
 // Performance tracking and GPU acceleration toggle
 const PERFORMANCE_STATS = {
@@ -385,11 +387,13 @@ async function main() {
 
     // Initialize marker rendering resources
     const { 
-        accumulatorPipeline, 
+        accumulatorPipeline,
+        quadrantPipeline,
         centerPipeline,
         markerPipeline,
         markerBuffer,
         accumulatorBuffer,
+        quadrantBuffer,
         dimsBuffer,
         markerUniformBuffer,
         markerBindGroup,
@@ -562,13 +566,15 @@ async function main() {
         // Render map - returns encoder without submitting
         const mapEncoder = renderMap(device, renderer, tileBuffers, hiddenTileBuffers, textureView, camera);
         
-        // Compute marker positions (separate encoder for compute work)
+        // Compute marker positions (separate encoder for compute work - 3 passes)
         const computeEncoder = createComputeMarkerEncoder(
             device, 
             renderer,
-            accumulatorPipeline, 
+            accumulatorPipeline,
+            quadrantPipeline,
             centerPipeline, 
-            accumulatorBuffer, 
+            accumulatorBuffer,
+            quadrantBuffer,
             markerBuffer, 
             dimsBuffer, 
             canvas,
@@ -653,13 +659,19 @@ async function main() {
 
 // Add the initMarkerResources function that was referenced but not defined
 function initMarkerResources(device, format, canvas, camera) {
-    // Create compute pipelines for marker centers
+    // Create compute pipelines for 3-pass marker calculation
     const accumulatorPipeline = createAccumulatorPipeline(device);
+    const quadrantPipeline = createQuadrantPipeline(device);
     const centerPipeline = createCenterPipeline(device);
     
     // Create storage buffers
     const accumulatorBuffer = device.createBuffer({
         size: ACCUMULATOR_BUFFER_SIZE,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    
+    const quadrantBuffer = device.createBuffer({
+        size: QUADRANT_BUFFER_SIZE,
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
     
@@ -695,9 +707,11 @@ function initMarkerResources(device, format, canvas, camera) {
 
     return {
         accumulatorPipeline,
+        quadrantPipeline,
         centerPipeline,
         markerPipeline,
         accumulatorBuffer,
+        quadrantBuffer,
         markerBuffer,
         dimsBuffer,
         markerUniformBuffer,
@@ -1002,34 +1016,35 @@ function createComputeMarkerEncoder(
     device,
     renderer,
     accumulatorPipeline,
+    quadrantPipeline,
     centerPipeline,
     accumulatorBuffer,
+    quadrantBuffer,
     markerBuffer,
     dimsBuffer,
     canvas,
     regionsBuffer
 ) {
-    // Reset accumulator buffer for new frame
+    // Reset buffers for new frame
     device.queue.writeBuffer(accumulatorBuffer, 0, new Uint8Array(ACCUMULATOR_BUFFER_SIZE));
+    device.queue.writeBuffer(quadrantBuffer, 0, new Uint8Array(QUADRANT_BUFFER_SIZE));
     
     // Update dimensions from the actual texture
     const hiddenWidth = renderer.textures.hidden.width;
     const hiddenHeight = renderer.textures.hidden.height;
-    
-
     
     device.queue.writeBuffer(dimsBuffer, 0, new Uint32Array([
         hiddenWidth,
         hiddenHeight
     ]));
     
-    // Compute marker positions
+    // Compute marker positions with 3 passes
     const markerComputeEncoder = device.createCommandEncoder();
     
-    // First compute pass: Accumulate pixels by feature ID
-    const computeEncoder = markerComputeEncoder.beginComputePass();
-    computeEncoder.setPipeline(accumulatorPipeline);
-    computeEncoder.setBindGroup(0, device.createBindGroup({
+    // Pass 1: Accumulate centroid and bounding box
+    const computePass1 = markerComputeEncoder.beginComputePass();
+    computePass1.setPipeline(accumulatorPipeline);
+    computePass1.setBindGroup(0, device.createBindGroup({
         layout: accumulatorPipeline.getBindGroupLayout(0),
         entries: [
             { binding: 0, resource: renderer.textures.hidden.createView() },
@@ -1039,23 +1054,38 @@ function createComputeMarkerEncoder(
     
     const workgroupCountX = Math.ceil(canvas.width / 16);
     const workgroupCountY = Math.ceil(canvas.height / 16);
-    computeEncoder.dispatchWorkgroups(workgroupCountX, workgroupCountY);
-    computeEncoder.end();
+    computePass1.dispatchWorkgroups(workgroupCountX, workgroupCountY);
+    computePass1.end();
     
-    // Second compute pass: Calculate marker centers
-    const computeEncoder2 = markerComputeEncoder.beginComputePass();
-    computeEncoder2.setPipeline(centerPipeline);
-    computeEncoder2.setBindGroup(0, device.createBindGroup({
+    // Pass 2: Calculate quadrant centroids using stable centroid from pass 1
+    const computePass2 = markerComputeEncoder.beginComputePass();
+    computePass2.setPipeline(quadrantPipeline);
+    computePass2.setBindGroup(0, device.createBindGroup({
+        layout: quadrantPipeline.getBindGroupLayout(0),
+        entries: [
+            { binding: 0, resource: renderer.textures.hidden.createView() },
+            { binding: 1, resource: { buffer: accumulatorBuffer } },
+            { binding: 2, resource: { buffer: quadrantBuffer } }
+        ]
+    }));
+    computePass2.dispatchWorkgroups(workgroupCountX, workgroupCountY);
+    computePass2.end();
+    
+    // Pass 3: Calculate final marker positions from quadrant data
+    const computePass3 = markerComputeEncoder.beginComputePass();
+    computePass3.setPipeline(centerPipeline);
+    computePass3.setBindGroup(0, device.createBindGroup({
         layout: centerPipeline.getBindGroupLayout(0),
         entries: [
             { binding: 0, resource: { buffer: accumulatorBuffer } },
-            { binding: 1, resource: { buffer: markerBuffer } },
-            { binding: 2, resource: { buffer: dimsBuffer } },
-            { binding: 3, resource: renderer.textures.hidden.createView() }
+            { binding: 1, resource: { buffer: quadrantBuffer } },
+            { binding: 2, resource: { buffer: markerBuffer } },
+            { binding: 3, resource: { buffer: dimsBuffer } },
+            { binding: 4, resource: renderer.textures.hidden.createView() }
         ]
     }));
-    computeEncoder2.dispatchWorkgroups(4);
-    computeEncoder2.end();
+    computePass3.dispatchWorkgroups(4);
+    computePass3.end();
     
     // Return encoder without submitting - caller will submit
     return markerComputeEncoder;
