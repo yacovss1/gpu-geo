@@ -227,6 +227,7 @@ struct Marker {
 @group(0) @binding(1) var<storage, read_write> quadrants: array<QuadrantAccumulator>;
 @group(0) @binding(2) var<storage, read_write> markers: array<Marker>;
 @group(0) @binding(3) var<uniform> dims: vec2<u32>;
+@group(0) @binding(4) var hiddenTex: texture_2d<f32>;
 
 // Helper function to calculate centroid from quadrant data
 fn calculateCentroid(quad: ptr<storage, QuadrantData, read_write>) -> vec2<f32> {
@@ -269,11 +270,56 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         return; // Invalid position
     }
     
-    // Store marker at the computed centroid position (convert to NDC: [-1, 1])
-    markers[idx].center = vec2<f32>(
-        (position.x / width) * 2.0 - 1.0,
-        (position.y / height) * 2.0 - 1.0
-    );
+    var centerX = position.x;
+    var centerY = position.y;
+    
+    // CRITICAL: Verify the computed centroid is actually ON the feature
+    let sampleX = i32(centerX);
+    let sampleY = i32(centerY);
+    var onFeature = false;
+    
+    // Check if the centroid point is on this feature
+    if (sampleX >= 0 && sampleX < i32(width) && sampleY >= 0 && sampleY < i32(height)) {
+        let pixelColor = textureLoad(hiddenTex, vec2<i32>(sampleX, sampleY), 0);
+        // Decode 16-bit feature ID from red+green channels
+        let pixelId = u32(pixelColor.r * 255.0) * 256u + u32(pixelColor.g * 255.0);
+        onFeature = (pixelId == idx);
+    }
+    
+    // If centroid is not on feature, do a grid search to find a valid point
+    if (!onFeature) {
+        let gridSteps = 16;
+        let stepSizeX = i32(width) / gridSteps;
+        let stepSizeY = i32(height) / gridSteps;
+        
+        for (var gy = 0; gy < gridSteps && !onFeature; gy++) {
+            for (var gx = 0; gx < gridSteps && !onFeature; gx++) {
+                let gridX = gx * stepSizeX + stepSizeX / 2;
+                let gridY = gy * stepSizeY + stepSizeY / 2;
+                
+                let gridPixel = textureLoad(hiddenTex, vec2<i32>(gridX, gridY), 0);
+                let gridId = u32(gridPixel.r * 255.0) * 256u + u32(gridPixel.g * 255.0);
+                
+                if (gridId == idx) {
+                    centerX = f32(gridX);
+                    centerY = f32(gridY);
+                    onFeature = true;
+                }
+            }
+        }
+    }
+    
+    // Skip if we couldn't find a valid position
+    if (!onFeature) {
+        return;
+    }
+    
+    // Convert to clip space (-1 to 1)
+    let clipX = (centerX / width) * 2.0 - 1.0;
+    let clipY = (centerY / height) * 2.0 - 1.0;
+    
+    // Store marker position
+    markers[idx].center = vec2<f32>(clipX, clipY);
     
     // Set color from feature - use a simple scheme based on feature ID
     let r = f32(idx % 256u) / 255.0;

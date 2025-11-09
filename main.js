@@ -1095,7 +1095,8 @@ function createComputeMarkerEncoder(
             { binding: 0, resource: { buffer: accumulatorBuffer } },
             { binding: 1, resource: { buffer: quadrantBuffer } },
             { binding: 2, resource: { buffer: markerBuffer } },
-            { binding: 3, resource: { buffer: dimsBuffer } }
+            { binding: 3, resource: { buffer: dimsBuffer } },
+            { binding: 4, resource: renderer.textures.hidden.createView() }
         ]
     }));
     const workgroupCount3 = Math.ceil(10000 / 64);

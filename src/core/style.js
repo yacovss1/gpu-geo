@@ -451,14 +451,20 @@ export function getFeatureId(feature, sourceId) {
     if (promoteId) {
         // If promoteId is a string, use that property
         if (typeof promoteId === 'string') {
-            return feature.properties?.[promoteId] || feature.id || generateFeatureId(feature);
+            const id = feature.properties?.[promoteId];
+            if (id !== undefined && id !== null) {
+                return id;
+            }
         }
         
         // If promoteId is an object with source-layer keys
         if (typeof promoteId === 'object' && feature.layer) {
             const propertyName = promoteId[feature.layer.name];
             if (propertyName) {
-                return feature.properties?.[propertyName] || feature.id || generateFeatureId(feature);
+                const id = feature.properties?.[propertyName];
+                if (id !== undefined && id !== null) {
+                    return id;
+                }
             }
         }
     }
@@ -468,7 +474,7 @@ export function getFeatureId(feature, sourceId) {
         return feature.id;
     }
 
-    // Generate a stable ID from feature properties
+    // Generate a stable ID from feature properties (uses name-based hash for countries)
     return generateFeatureId(feature);
 }
 
@@ -478,7 +484,19 @@ export function getFeatureId(feature, sourceId) {
  * @returns {number}
  */
 function generateFeatureId(feature) {
-    // Simple hash of stringified properties
+    // Prioritize country name for deterministic IDs (same as geojson.js)
+    const countryName = feature.properties?.NAME || feature.properties?.ADM0_A3 || feature.properties?.ISO_A3;
+    if (countryName) {
+        let hash = 0;
+        for (let i = 0; i < countryName.length; i++) {
+            hash = ((hash << 5) - hash) + countryName.charCodeAt(i);
+            hash = hash & hash;
+        }
+        // Better distribution: use prime number 9973 instead of 9999
+        return ((Math.abs(hash) % 9973) + 1);
+    }
+    
+    // Fallback: hash all properties for non-country features  
     const str = JSON.stringify(feature.properties || {});
     let hash = 0;
     for (let i = 0; i < str.length; i++) {
@@ -486,6 +504,6 @@ function generateFeatureId(feature) {
         hash = ((hash << 5) - hash) + char;
         hash = hash & hash; // Convert to 32-bit integer
     }
-    // Map to 1-9999 range for 16-bit feature ID encoding
-    return ((Math.abs(hash) % 9999) + 1);
+    // Map to 1-9973 range (prime number for better distribution)
+    return ((Math.abs(hash) % 9973) + 1);
 }

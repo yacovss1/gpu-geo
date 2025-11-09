@@ -8,8 +8,7 @@
         "https://demotiles.maplibre.org/tiles/{z}/{x}/{y}.pbf"
       ],
       "minzoom": 0,
-      "maxzoom": 6,
-      "promoteId": "fid"
+      "maxzoom": 6
     }
   },
   "layers": [

@@ -173,7 +173,7 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
             const allCoords = coordinates.flat(1);
             const fillStartIndex = coordsToVertices(allCoords, _fillColor, fillVertices);
             const hiddenStartIndex = coordsToIdVertices(allCoords, 
-                featureId,
+                clampedFeatureId,  // Use clamped ID for consistency
                 hiddenVertices
             );
 

@@ -31,8 +31,8 @@ function getCountryId(countryName) {
         hash = ((hash << 5) - hash) + countryName.charCodeAt(i);
         hash = hash & hash;
     }
-    // Map to 1-9999 range for 16-bit encoding - same name ALWAYS gets same ID
-    return ((Math.abs(hash) % 9999) + 1);
+    // Map to 1-9973 range (prime number for better distribution, under 10000 MAX_FEATURES)
+    return ((Math.abs(hash) % 9973) + 1);
 }
 
 export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], sourceId = null, zoom = 0) {
