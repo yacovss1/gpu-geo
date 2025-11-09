@@ -12,7 +12,7 @@ import { TextRenderer } from './src/text/textRenderer.js';
 
 // Define constants at file scope to ensure they're available everywhere
 // 9-quadrant labeling system (center + 8 directional positions)
-const MAX_FEATURES = 256; // TODO: Increase to 10000+ for production
+const MAX_FEATURES = 10000; // Scaled up from 256, can go to 65536 with 16-bit encoding
 const ACCUMULATOR_BUFFER_SIZE = MAX_FEATURES * 28; // Pass 1: 7 u32 per feature (sumX, sumY, count, minX, minY, maxX, maxY) = 28 bytes
 const QUADRANT_BUFFER_SIZE = MAX_FEATURES * 108; // Pass 2: 9 quadrants × 3 u32 each = 108 bytes per feature
 const REGIONS_BUFFER_SIZE = MAX_FEATURES * 16;   // For 4 atomic u32s per feature  
@@ -566,8 +566,11 @@ async function main() {
         // Render map - returns encoder without submitting
         const mapEncoder = renderMap(device, renderer, tileBuffers, hiddenTileBuffers, textureView, camera);
         
-        // Compute marker positions (separate encoder for compute work - 3 passes)
-        const computeEncoder = createComputeMarkerEncoder(
+        // MUST submit map first so hidden texture is populated before compute reads it
+        device.queue.submit([mapEncoder.finish()]);
+        
+        // Compute marker positions (submits 3 passes internally, reads from hidden texture)
+        createComputeMarkerEncoder(
             device, 
             renderer,
             accumulatorPipeline,
@@ -608,12 +611,8 @@ async function main() {
         
         textRenderer.renderFromMarkerBuffer(overlayEncoder, textureView, markerBuffer, markerDataBindGroup, featureNames, camera, sourceId);
         
-        // Submit all GPU work
-        device.queue.submit([
-            mapEncoder.finish(),
-            computeEncoder.finish(),
-            overlayEncoder.finish()
-        ]);
+        // Submit overlay rendering (map and compute already submitted)
+        device.queue.submit([overlayEncoder.finish()]);
         
         // Asynchronously read marker buffer for NEXT frame
         if (!isReadingMarkers) {
@@ -622,7 +621,7 @@ async function main() {
                 if (positions) {
                     // Count non-zero markers
                     let nonZeroCount = 0;
-                    for (let i = 0; i < 256; i++) {
+                    for (let i = 0; i < MAX_FEATURES; i++) {
                         const offset = i * 6;
                         if (positions[offset + 5] > 0) { // Check alpha
                             nonZeroCount++;
@@ -996,7 +995,7 @@ function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, textureView
         colorAttachments: [{
             view: textureView,  // Use passed texture view instead of calling getCurrentTexture again
             clearValue: { r: 0.15, g: 0.35, b: 0.6, a: 1.0 },
-            loadOp: 'clear',
+            loadOp: 'load',  // Load existing content, don't clear!
             storeOp: 'store',
         }],
     });
@@ -1022,7 +1021,7 @@ function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, textureView
     return mapCommandEncoder;
 }
 
-// Process and render markers - COMPUTE ONLY, returns encoder without submitting
+// Process and render markers - COMPUTE ONLY, submits directly (no return)
 function createComputeMarkerEncoder(
     device,
     renderer,
@@ -1049,11 +1048,14 @@ function createComputeMarkerEncoder(
         hiddenHeight
     ]));
     
-    // Compute marker positions with 3 passes
-    const markerComputeEncoder = device.createCommandEncoder();
+    // Compute marker positions with 3 passes - MUST submit between passes for atomic visibility
+    
+    const workgroupCountX = Math.ceil(canvas.width / 16);
+    const workgroupCountY = Math.ceil(canvas.height / 16);
     
     // Pass 1: Accumulate centroid and bounding box
-    const computePass1 = markerComputeEncoder.beginComputePass();
+    const encoder1 = device.createCommandEncoder();
+    const computePass1 = encoder1.beginComputePass();
     computePass1.setPipeline(accumulatorPipeline);
     computePass1.setBindGroup(0, device.createBindGroup({
         layout: accumulatorPipeline.getBindGroupLayout(0),
@@ -1062,14 +1064,14 @@ function createComputeMarkerEncoder(
             { binding: 1, resource: { buffer: accumulatorBuffer } }
         ]
     }));
-    
-    const workgroupCountX = Math.ceil(canvas.width / 16);
-    const workgroupCountY = Math.ceil(canvas.height / 16);
     computePass1.dispatchWorkgroups(workgroupCountX, workgroupCountY);
     computePass1.end();
+    device.queue.submit([encoder1.finish()]);
+    
     
     // Pass 2: Calculate quadrant centroids using stable centroid from pass 1
-    const computePass2 = markerComputeEncoder.beginComputePass();
+    const encoder2 = device.createCommandEncoder();
+    const computePass2 = encoder2.beginComputePass();
     computePass2.setPipeline(quadrantPipeline);
     computePass2.setBindGroup(0, device.createBindGroup({
         layout: quadrantPipeline.getBindGroupLayout(0),
@@ -1081,9 +1083,11 @@ function createComputeMarkerEncoder(
     }));
     computePass2.dispatchWorkgroups(workgroupCountX, workgroupCountY);
     computePass2.end();
+    device.queue.submit([encoder2.finish()]);
     
     // Pass 3: Calculate final marker positions from quadrant data
-    const computePass3 = markerComputeEncoder.beginComputePass();
+    const encoder3 = device.createCommandEncoder();
+    const computePass3 = encoder3.beginComputePass();
     computePass3.setPipeline(centerPipeline);
     computePass3.setBindGroup(0, device.createBindGroup({
         layout: centerPipeline.getBindGroupLayout(0),
@@ -1091,15 +1095,15 @@ function createComputeMarkerEncoder(
             { binding: 0, resource: { buffer: accumulatorBuffer } },
             { binding: 1, resource: { buffer: quadrantBuffer } },
             { binding: 2, resource: { buffer: markerBuffer } },
-            { binding: 3, resource: { buffer: dimsBuffer } },
-            { binding: 4, resource: renderer.textures.hidden.createView() }
+            { binding: 3, resource: { buffer: dimsBuffer } }
         ]
     }));
-    computePass3.dispatchWorkgroups(4);
+    const workgroupCount3 = Math.ceil(10000 / 64);
+    computePass3.dispatchWorkgroups(workgroupCount3);
     computePass3.end();
+    device.queue.submit([encoder3.finish()]);
     
-    // Return encoder without submitting - caller will submit
-    return markerComputeEncoder;
+    // All passes submitted, nothing to return
 }
 
 // Render markers using pre-computed positions - adds to existing encoder
@@ -1144,7 +1148,7 @@ function renderMarkersToEncoder(
     });
     
     markerPass.setBindGroup(1, markerDataBindGroup);
-    markerPass.draw(3, 256);
+    markerPass.draw(3, MAX_FEATURES); // Draw one triangle per feature
     markerPass.end();
 }
 
@@ -1223,6 +1227,20 @@ async function readMarkerBufferSync(device, markerBuffer) {
         const data = new Float32Array(readBuffer.getMappedRange()).slice();
         readBuffer.unmap();
         readBuffer.destroy();
+        
+        // Debug: Check Russia (ID 48) specifically
+        if (frameCount % 60 === 0) {
+            const id = 48;
+            const offset = id * 6;
+            
+            
+            // Count total markers
+            let count = 0;
+            for (let i = 0; i < MAX_FEATURES; i++) {
+                if (data[i * 6 + 5] > 0) count++;
+            }
+            
+        }
         
         return data;
     } catch (err) {

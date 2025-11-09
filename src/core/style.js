@@ -486,5 +486,6 @@ function generateFeatureId(feature) {
         hash = ((hash << 5) - hash) + char;
         hash = hash & hash; // Convert to 32-bit integer
     }
-    return Math.abs(hash) || 1;
+    // Map to 1-9999 range for 16-bit feature ID encoding
+    return ((Math.abs(hash) % 9999) + 1);
 }

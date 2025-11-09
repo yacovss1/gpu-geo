@@ -112,15 +112,19 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
     const coordsToIdVertices = (coords, featureId, targetArray) => {
         const vertexStartIndex = targetArray.length / 6;
         
-        // Ensure feature ID is non-zero and normalized to 0-1 range
-        const safeId = Math.max(1, Math.min(254, featureId || 1));
-        const normalizedId = safeId / 255.0;
+        // Encode feature ID as 16-bit across red and green channels
+        // R = high byte (bits 8-15), G = low byte (bits 0-7)
+        const safeId = Math.max(1, Math.min(65534, featureId || 1)); // 16-bit range (avoid 0 and 65535)
+        const highByte = Math.floor(safeId / 256); // Red channel
+        const lowByte = safeId % 256;              // Green channel
+        const normalizedR = highByte / 255.0;
+        const normalizedG = lowByte / 255.0;
         
         coords.forEach(coord => {
             const [x, y] = getTransformedCoord(coord);
             targetArray.push(
                 x, y,             // Position
-                normalizedId, 0.0, 0.0, 1.0  // ID in red, no polygon ID
+                normalizedR, normalizedG, 0.0, 1.0  // 16-bit ID in R+G channels
             );
         });
         return vertexStartIndex;
@@ -130,8 +134,8 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
     const processedFeatures = new Set();
     const featureId = getFeatureId();
     
-    // Clamp feature ID to valid range for rendering (1-254)
-    const clampedFeatureId = Math.max(1, Math.min(254, featureId));
+    // Clamp feature ID to valid range for rendering (1-9999)
+    const clampedFeatureId = Math.max(1, Math.min(9999, featureId));
     
     if (processedFeatures.has(featureId)) {
         return null;
@@ -391,8 +395,8 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
 
     const featureId = getFeatureId();
     
-    // Clamp feature ID to valid range for rendering (1-254)
-    const clampedFeatureId = Math.max(1, Math.min(254, featureId));
+    // Clamp feature ID to valid range for rendering (1-9999)
+    const clampedFeatureId = Math.max(1, Math.min(9999, featureId));
 
     // Vertex creation functions (same as above)
     const coordsToVertices = (coords, color, targetArray) => {
@@ -406,12 +410,18 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
 
     const coordsToIdVertices = (coords, featureId, targetArray) => {
         const vertexStartIndex = targetArray.length / 6;
-        const safeId = Math.max(1, Math.min(254, featureId || 1));
-        const normalizedId = safeId / 255.0;
+        
+        // Encode feature ID as 16-bit across red and green channels
+        // R = high byte (bits 8-15), G = low byte (bits 0-7)
+        const safeId = Math.max(1, Math.min(65534, featureId || 1)); // 16-bit range (avoid 0 and 65535)
+        const highByte = Math.floor(safeId / 256); // Red channel
+        const lowByte = safeId % 256;              // Green channel
+        const normalizedR = highByte / 255.0;
+        const normalizedG = lowByte / 255.0;
         
         coords.forEach(coord => {
             const [x, y] = getTransformedCoord(coord);
-            targetArray.push(x, y, normalizedId, 0.0, 0.0, 1.0);
+            targetArray.push(x, y, normalizedR, normalizedG, 0.0, 1.0);
         });
         return vertexStartIndex;
     };

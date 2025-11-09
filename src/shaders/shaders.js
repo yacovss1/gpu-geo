@@ -39,8 +39,8 @@ fn main(@location(0) fragCoord: vec2<f32>, @location(1) color: vec4<f32>) -> @lo
 export const hiddenFragmentShaderCode = `
 @fragment
 fn main(@location(0) fragCoord: vec2<f32>, @location(1) color: vec4<f32>) -> @location(0) vec4<f32> {
-    // Only use red channel for the feature ID, zero out others
-    return vec4<f32>(color.r, 0.0, 0.0, 1.0);
+    // Use red and green channels for 16-bit feature ID encoding
+    return vec4<f32>(color.r, color.g, 0.0, 1.0);
 }
 `;
 
@@ -79,31 +79,31 @@ export const edgeDetectionFragmentShaderCode = `
     fn main(@location(0) texCoord: vec2<f32>) -> @location(0) vec4<f32> {
         let texelSize = 1.0 / canvasSize;
         
-        // Get center color and ID
+        // Get center color and decode 16-bit ID from red+green channels
         let centerColor = textureSample(colorTexture, mysampler, texCoord);
-        let id = textureSample(idTexture, mysampler, texCoord).r * 255.0;
+        let centerPixel = textureSample(idTexture, mysampler, texCoord);
+        let id = centerPixel.r * 255.0 * 256.0 + centerPixel.g * 255.0;
         
         // FIXED: Use actual display zoom (same as used in the vertex shader)
         let displayZoom = zoomInfo.x;
         let effectStrength = zoomInfo.z;
         let extremeZoom = zoomInfo.w;
         
-        // FIXED: Scale edge detection the same way as the features
-        var edgeZoomFactor = 1.0;
+        // Keep edge detection at 1-pixel width always
+        let sampleOffset = texelSize;
         
-        if (displayZoom > 5.0) {
-            // Use a fixed minimum thickness instead of scaling
-            edgeZoomFactor = min(1.0, 5.0 / displayZoom);
-        }
+        // Sample neighbors with adapted offset and decode 16-bit IDs
+        let leftPixel = textureSample(idTexture, mysampler, texCoord + vec2<f32>(-sampleOffset.x, 0.0));
+        let leftId = leftPixel.r * 255.0 * 256.0 + leftPixel.g * 255.0;
         
-        // Apply the scale factor to sampling
-        let sampleOffset = texelSize * edgeZoomFactor;
+        let rightPixel = textureSample(idTexture, mysampler, texCoord + vec2<f32>(sampleOffset.x, 0.0));
+        let rightId = rightPixel.r * 255.0 * 256.0 + rightPixel.g * 255.0;
         
-        // Sample neighbors with adapted offset
-        let leftId = textureSample(idTexture, mysampler, texCoord + vec2<f32>(-sampleOffset.x, 0.0)).r * 255.0;
-        let rightId = textureSample(idTexture, mysampler, texCoord + vec2<f32>(sampleOffset.x, 0.0)).r * 255.0;
-        let upId = textureSample(idTexture, mysampler, texCoord + vec2<f32>(0.0, -sampleOffset.y)).r * 255.0;
-        let downId = textureSample(idTexture, mysampler, texCoord + vec2<f32>(0.0, sampleOffset.y)).r * 255.0;
+        let upPixel = textureSample(idTexture, mysampler, texCoord + vec2<f32>(0.0, -sampleOffset.y));
+        let upId = upPixel.r * 255.0 * 256.0 + upPixel.g * 255.0;
+        
+        let downPixel = textureSample(idTexture, mysampler, texCoord + vec2<f32>(0.0, sampleOffset.y));
+        let downId = downPixel.r * 255.0 * 256.0 + downPixel.g * 255.0;
 
         let hasFeature = id > 0.1;
         let isDifferent = hasFeature && (

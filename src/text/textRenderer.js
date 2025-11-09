@@ -547,7 +547,9 @@ export class TextRenderer {
         
         // Parse markers and add labels
         const markerStride = 6; // vec2 center + vec4 color = 6 floats
-        for (let i = 0; i < 256; i++) {
+        const maxMarkers = markerData.length / markerStride;
+        let labelsAdded = 0;
+        for (let i = 0; i < maxMarkers; i++) {
             const offset = i * markerStride;
             const x = markerData[offset];
             const y = markerData[offset + 1];
@@ -556,8 +558,11 @@ export class TextRenderer {
             if (colorA > 0 && featureNames.has(i)) {
                 const name = featureNames.get(i);
                 this.addLabel(name, x + 0.01, y + 0.01, 0.6);
+                labelsAdded++;
             }
         }
+        
+        console.log(`📝 Labels added: ${labelsAdded}, featureNames size: ${featureNames.size}`);
         
         readBuffer.unmap();
         readBuffer.destroy();

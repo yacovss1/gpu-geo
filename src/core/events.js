@@ -136,8 +136,11 @@ export function setupEventListeners(canvas, camera, device, hiddenTexture, tileB
             
             const data = new Uint8Array(sharedReadBuffer.getMappedRange());
             
-            // Read from blue channel (index 2) since format is BGRA
-            const featureId = Math.round(data[2]);
+            // Decode 16-bit feature ID from red and green channels (format is BGRA, so indices are reversed)
+            // BGRA format: B=data[0], G=data[1], R=data[2], A=data[3]
+            const redChannel = data[2];   // High byte
+            const greenChannel = data[1]; // Low byte
+            const featureId = redChannel * 256 + greenChannel;
             
             // Ignore clicks on ocean (where there's no feature)
             if (!featureId) {
@@ -146,7 +149,7 @@ export function setupEventListeners(canvas, camera, device, hiddenTexture, tileB
                 return;
             }
 
-            const feature = tileBuffers.find(b => b.properties?.fid === featureId);
+            const feature = tileBuffers.find(b => b.properties?.fid === featureId || b.properties?.clampedFid === featureId);
             if (feature) {
                 // Write the raw value directly
                 device.queue.writeBuffer(pickedIdBuffer, 0, new Float32Array([featureId]));

@@ -31,8 +31,8 @@ function getCountryId(countryName) {
         hash = ((hash << 5) - hash) + countryName.charCodeAt(i);
         hash = hash & hash;
     }
-    // Map to 1-254 range - same name ALWAYS gets same ID
-    return ((Math.abs(hash) % 254) + 1);
+    // Map to 1-9999 range for 16-bit encoding - same name ALWAYS gets same ID
+    return ((Math.abs(hash) % 9999) + 1);
 }
 
 export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], sourceId = null, zoom = 0) {
@@ -131,16 +131,19 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
     const coordsToIdVertices = (coords, featureId, targetArray) => {
         const vertexStartIndex = targetArray.length / 6;
         
-        // Feature ID should already be clamped (1-254) when passed in
-        // Just ensure it's valid and normalize to 0-1 range for GPU
-        const safeId = Math.max(1, Math.min(254, featureId || 1));
-        const normalizedId = safeId / 255.0;
+        // Encode feature ID as 16-bit across red and green channels
+        // R = high byte (bits 8-15), G = low byte (bits 0-7)
+        const safeId = Math.max(1, Math.min(65534, featureId || 1)); // 16-bit range (avoid 0 and 65535)
+        const highByte = Math.floor(safeId / 256); // Red channel
+        const lowByte = safeId % 256;              // Green channel
+        const normalizedR = highByte / 255.0;
+        const normalizedG = lowByte / 255.0;
         
         coords.forEach(coord => {
             const [x, y] = mercatorToClipSpace(coord);
             targetArray.push(
                 x, y,             // Position
-                normalizedId, 0.0, 0.0, 1.0  // ID in red, no polygon ID
+                normalizedR, normalizedG, 0.0, 1.0  // 16-bit ID in R+G channels
             );
         });
         return vertexStartIndex;
@@ -151,8 +154,8 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
 
     const featureId = getFeatureId();
     
-    // Clamp feature ID to valid range for rendering (1-254)
-    const clampedFeatureId = Math.max(1, Math.min(254, featureId));
+    // Clamp feature ID to valid range for rendering (1-9999)
+    const clampedFeatureId = Math.max(1, Math.min(9999, featureId));
     
     if (processedFeatures.has(featureId)) {
         return null;
@@ -199,6 +202,16 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                 fillIndices.push(fillStartIndex + index);
                 hiddenfillIndices.push(hiddenStartIndex + index);
             });
+            
+            // Add outline indices for polygon borders (outer ring only)
+            const outlineStartIndex = coordsToVertices(outerRing, _borderColor, fillVertices);
+            for (let i = 0; i < outerRing.length - 1; i++) {
+                outlineIndices.push(outlineStartIndex + i, outlineStartIndex + i + 1);
+            }
+            // Close the ring
+            if (outerRing.length > 0) {
+                outlineIndices.push(outlineStartIndex + outerRing.length - 1, outlineStartIndex);
+            }
             break;
 
         case 'MultiPolygon':
