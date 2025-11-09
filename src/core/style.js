@@ -288,6 +288,25 @@ export function evaluateExpression(expression, feature, zoom) {
 
         case 'has':
             return feature.properties?.hasOwnProperty(args[0]);
+            
+        case 'coalesce':
+            // ["coalesce", expression1, expression2, ..., fallback]
+            // Returns the first non-null, non-undefined value
+            for (const arg of args) {
+                const val = evaluateExpression(arg, feature, zoom);
+                if (val !== null && val !== undefined) {
+                    return val;
+                }
+            }
+            return null;
+            
+        case '*':
+            // ["*", num1, num2, ...]
+            return args.reduce((acc, arg) => acc * evaluateExpression(arg, feature, zoom), 1);
+            
+        case '+':
+            // ["+", num1, num2, ...]
+            return args.reduce((acc, arg) => acc + evaluateExpression(arg, feature, zoom), 0);
 
         case 'in':
             const value = evaluateExpression(args[0], feature, zoom);

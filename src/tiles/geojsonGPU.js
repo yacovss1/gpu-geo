@@ -28,12 +28,41 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
     const style = getStyle();
     let _fillColor = fillColor;
     let _borderColor = [0.0, 0.0, 0.0, 1.0];
+    
+    // Extrusion properties (for 3D buildings)
+    let extrusionHeight = 0;
+    let extrusionBase = 0;
+    let isExtruded = false;
 
     if (style && sourceId) {
         // Get layers for this source
         const layers = getLayersBySource(sourceId);
-        const fillLayer = layers.find(l => l.type === 'fill' && (!l['source-layer'] || l['source-layer'] === feature.layer?.name));
-        const lineLayer = layers.find(l => l.type === 'line' && (!l['source-layer'] || l['source-layer'] === feature.layer?.name));
+        
+        // Find extrusion layer first (higher priority for 3D buildings)
+        const extrusionLayer = layers.find(l => 
+            l.type === 'fill-extrusion' && 
+            (!l['source-layer'] || l['source-layer'] === feature.layer?.name)
+        );
+        
+        // Find fill layer as fallback
+        const fillLayer = extrusionLayer || layers.find(l => 
+            l.type === 'fill' && 
+            (!l['source-layer'] || l['source-layer'] === feature.layer?.name)
+        );
+        
+        const lineLayer = layers.find(l => 
+            l.type === 'line' && 
+            (!l['source-layer'] || l['source-layer'] === feature.layer?.name)
+        );
+
+        // Get extrusion properties if this is a 3D layer
+        if (extrusionLayer) {
+            isExtruded = true;
+            const heightValue = getPaintProperty(extrusionLayer.id, 'fill-extrusion-height', feature, zoom);
+            const baseValue = getPaintProperty(extrusionLayer.id, 'fill-extrusion-base', feature, zoom);
+            extrusionHeight = typeof heightValue === 'number' ? heightValue : 0;
+            extrusionBase = typeof baseValue === 'number' ? baseValue : 0;
+        }
 
         // Apply filter if layer has one
         if (fillLayer && fillLayer.filter && !evaluateFilter(fillLayer.filter, feature, zoom)) {
@@ -42,7 +71,8 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
 
         // Get paint properties from style
         if (fillLayer) {
-            const fillColorValue = getPaintProperty(fillLayer.id, 'fill-color', feature, zoom);
+            const colorProperty = extrusionLayer ? 'fill-extrusion-color' : 'fill-color';
+            const fillColorValue = getPaintProperty(fillLayer.id, colorProperty, feature, zoom);
             if (fillColorValue) {
                 _fillColor = parseColor(fillColorValue);
             }
@@ -130,6 +160,52 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
         return vertexStartIndex;
     };
 
+    // Helper function to generate 3D extrusion geometry (walls + roof)
+    const generateExtrusion = (outerRing, height, base) => {
+        const vertices = [];
+        const indices = [];
+        
+        // Generate vertical walls for each edge
+        for (let i = 0; i < outerRing.length - 1; i++) {
+            const p1 = outerRing[i];
+            const p2 = outerRing[i + 1];
+            const [x1, y1] = getTransformedCoord(p1);
+            const [x2, y2] = getTransformedCoord(p2);
+            
+            const baseIdx = vertices.length / 7;
+            
+            // Bottom-left, bottom-right, top-right, top-left
+            vertices.push(x1, y1, base, ..._fillColor);
+            vertices.push(x2, y2, base, ..._fillColor);
+            vertices.push(x2, y2, height, ..._fillColor);
+            vertices.push(x1, y1, height, ..._fillColor);
+            
+            // Two triangles for wall quad
+            indices.push(baseIdx, baseIdx + 1, baseIdx + 2);
+            indices.push(baseIdx, baseIdx + 2, baseIdx + 3);
+        }
+        
+        // Generate roof (flat top polygon at height)
+        const flatCoords = [];
+        outerRing.forEach(coord => {
+            flatCoords.push(coord[0], coord[1]);
+        });
+        
+        const roofTriangles = earcut(flatCoords, []);
+        const roofStartIdx = vertices.length / 7;
+        
+        outerRing.forEach(coord => {
+            const [x, y] = getTransformedCoord(coord);
+            vertices.push(x, y, height, ..._fillColor);
+        });
+        
+        roofTriangles.forEach(idx => {
+            indices.push(roofStartIdx + idx);
+        });
+        
+        return { vertices, indices };
+    };
+
     // Deduplicate features by tracking processed feature IDs
     const processedFeatures = new Set();
     const featureId = getFeatureId();
@@ -149,47 +225,14 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
             const outerRing = coordinates[0];
             const holes = coordinates.slice(1);
             
-            // Flatten coordinates for triangulation
-            const flatCoords = [];
-            const holeIndices = [];
-            
-            // Add outer ring
-            outerRing.forEach(coord => {
-                flatCoords.push(coord[0], coord[1]);
-            });
-            
-            // Add holes and store their starting indices
-            holes.forEach(hole => {
-                holeIndices.push(flatCoords.length / 2);
-                hole.forEach(coord => {
-                    flatCoords.push(coord[0], coord[1]);
-                });
-            });
-
-            // Triangulate with holes
-            const triangles = earcut(flatCoords, holeIndices);
-
-            // Add vertices for the entire polygon
-            const allCoords = coordinates.flat(1);
-            const fillStartIndex = coordsToVertices(allCoords, _fillColor, fillVertices);
-            const hiddenStartIndex = coordsToIdVertices(allCoords, 
-                clampedFeatureId,  // Use clamped ID for consistency
-                hiddenVertices
-            );
-
-            // Add triangle indices
-            triangles.forEach(index => {
-                fillIndices.push(fillStartIndex + index);
-                hiddenfillIndices.push(hiddenStartIndex + index);
-            });
-            break;
-
-        case 'MultiPolygon':
-            // Process each polygon's outer ring and holes
-            feature.geometry.coordinates.forEach((polygon, polygonIndex) => {
-                const outerRing = polygon[0];
-                const holes = polygon.slice(1);
-                
+            // Use extrusion geometry if this is a 3D layer
+            if (isExtruded && extrusionHeight > 0) {
+                const extrusion = generateExtrusion(outerRing, extrusionHeight, extrusionBase);
+                const vertexOffset = fillVertices.length / 7;
+                extrusion.vertices.forEach(v => fillVertices.push(v));
+                extrusion.indices.forEach(i => fillIndices.push(i + vertexOffset));
+            } else {
+                // Standard 2D fill
                 // Flatten coordinates for triangulation
                 const flatCoords = [];
                 const holeIndices = [];
@@ -210,11 +253,11 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
                 // Triangulate with holes
                 const triangles = earcut(flatCoords, holeIndices);
 
-                // Add vertices for this polygon part
-                const allCoords = polygon.flat(1);
+                // Add vertices for the entire polygon
+                const allCoords = coordinates.flat(1);
                 const fillStartIndex = coordsToVertices(allCoords, _fillColor, fillVertices);
                 const hiddenStartIndex = coordsToIdVertices(allCoords, 
-                    featureId,
+                    clampedFeatureId,  // Use clamped ID for consistency
                     hiddenVertices
                 );
 
@@ -223,6 +266,57 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
                     fillIndices.push(fillStartIndex + index);
                     hiddenfillIndices.push(hiddenStartIndex + index);
                 });
+            }
+            break;
+
+        case 'MultiPolygon':
+            // Process each polygon's outer ring and holes
+            feature.geometry.coordinates.forEach((polygon, polygonIndex) => {
+                const outerRing = polygon[0];
+                const holes = polygon.slice(1);
+                
+                // Use extrusion geometry if this is a 3D layer
+                if (isExtruded && extrusionHeight > 0) {
+                    const extrusion = generateExtrusion(outerRing, extrusionHeight, extrusionBase);
+                    const vertexOffset = fillVertices.length / 7;
+                    extrusion.vertices.forEach(v => fillVertices.push(v));
+                    extrusion.indices.forEach(i => fillIndices.push(i + vertexOffset));
+                } else {
+                    // Standard 2D fill
+                    // Flatten coordinates for triangulation
+                    const flatCoords = [];
+                    const holeIndices = [];
+                    
+                    // Add outer ring
+                    outerRing.forEach(coord => {
+                        flatCoords.push(coord[0], coord[1]);
+                    });
+                    
+                    // Add holes and store their starting indices
+                    holes.forEach(hole => {
+                        holeIndices.push(flatCoords.length / 2);
+                        hole.forEach(coord => {
+                            flatCoords.push(coord[0], coord[1]);
+                        });
+                    });
+
+                    // Triangulate with holes
+                    const triangles = earcut(flatCoords, holeIndices);
+
+                    // Add vertices for this polygon part
+                    const allCoords = polygon.flat(1);
+                    const fillStartIndex = coordsToVertices(allCoords, _fillColor, fillVertices);
+                    const hiddenStartIndex = coordsToIdVertices(allCoords, 
+                        featureId,
+                        hiddenVertices
+                    );
+
+                    // Add triangle indices
+                    triangles.forEach(index => {
+                        fillIndices.push(fillStartIndex + index);
+                        hiddenfillIndices.push(hiddenStartIndex + index);
+                    });
+                }
             });
             break;
             
@@ -258,9 +352,9 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
     return {
         vertices: new Float32Array(fillVertices),
         hiddenVertices: new Float32Array(hiddenVertices),
-        fillIndices: new Uint16Array(fillIndices),
-        outlineIndices: new Uint16Array(outlineIndices),
-        hiddenfillIndices: new Uint16Array(hiddenfillIndices),
+        fillIndices: new Uint32Array(fillIndices),
+        outlineIndices: new Uint32Array(outlineIndices),
+        hiddenfillIndices: new Uint32Array(hiddenfillIndices),
         isFilled,
         isLine,
         properties: {
@@ -337,25 +431,40 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
     const style = getStyle();
     let _fillColor = fillColor;
     let _borderColor = [0.0, 0.0, 0.0, 1.0];
+    
+    // Extrusion properties (for 3D buildings)
+    let extrusionHeight = 0;
+    let extrusionBase = 0;
+    let isExtruded = false;
 
     if (style && sourceId) {
         // Get layers for this source
         const layers = getLayersBySource(sourceId);
-        // Find first VISIBLE fill layer for this source-layer
-        const fillLayer = layers.find(l => 
-            l.type === 'fill' && 
-            (!l['source-layer'] || l['source-layer'] === feature.layer?.name) &&
-            l.layout?.visibility !== 'none'
+        
+        // Find extrusion layer first (higher priority for 3D buildings)
+        const extrusionLayer = layers.find(l => 
+            l.type === 'fill-extrusion' && 
+            (!l['source-layer'] || l['source-layer'] === feature.layer?.name)
         );
+        
+        // Find fill layer as fallback
+        const fillLayer = extrusionLayer || layers.find(l => 
+            l.type === 'fill' && 
+            (!l['source-layer'] || l['source-layer'] === feature.layer?.name)
+        );
+        
         const lineLayer = layers.find(l => 
             l.type === 'line' && 
-            (!l['source-layer'] || l['source-layer'] === feature.layer?.name) &&
-            l.layout?.visibility !== 'none'
+            (!l['source-layer'] || l['source-layer'] === feature.layer?.name)
         );
 
-        // If no visible fill layer found, skip this feature
-        if (!fillLayer) {
-            return null;
+        // Get extrusion properties if this is a 3D layer
+        if (extrusionLayer) {
+            isExtruded = true;
+            const heightValue = getPaintProperty(extrusionLayer.id, 'fill-extrusion-height', feature, zoom);
+            const baseValue = getPaintProperty(extrusionLayer.id, 'fill-extrusion-base', feature, zoom);
+            extrusionHeight = typeof heightValue === 'number' ? heightValue : 0;
+            extrusionBase = typeof baseValue === 'number' ? baseValue : 0;
         }
 
         // Apply filter if layer has one
@@ -365,7 +474,8 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
 
         // Get paint properties from style
         if (fillLayer) {
-            const fillColorValue = getPaintProperty(fillLayer.id, 'fill-color', feature, zoom);
+            const colorProperty = extrusionLayer ? 'fill-extrusion-color' : 'fill-color';
+            const fillColorValue = getPaintProperty(fillLayer.id, colorProperty, feature, zoom);
             if (fillColorValue) {
                 _fillColor = parseColor(fillColorValue);
             }
@@ -426,6 +536,52 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
         return vertexStartIndex;
     };
 
+    // Helper function to generate 3D extrusion geometry (walls + roof)
+    const generateExtrusion = (outerRing, height, base) => {
+        const vertices = [];
+        const indices = [];
+        
+        // Generate vertical walls for each edge
+        for (let i = 0; i < outerRing.length - 1; i++) {
+            const p1 = outerRing[i];
+            const p2 = outerRing[i + 1];
+            const [x1, y1] = getTransformedCoord(p1);
+            const [x2, y2] = getTransformedCoord(p2);
+            
+            const baseIdx = vertices.length / 7;
+            
+            // Bottom-left, bottom-right, top-right, top-left
+            vertices.push(x1, y1, base, ..._fillColor);
+            vertices.push(x2, y2, base, ..._fillColor);
+            vertices.push(x2, y2, height, ..._fillColor);
+            vertices.push(x1, y1, height, ..._fillColor);
+            
+            // Two triangles for wall quad
+            indices.push(baseIdx, baseIdx + 1, baseIdx + 2);
+            indices.push(baseIdx, baseIdx + 2, baseIdx + 3);
+        }
+        
+        // Generate roof (flat top polygon at height)
+        const flatCoords = [];
+        outerRing.forEach(coord => {
+            flatCoords.push(coord[0], coord[1]);
+        });
+        
+        const roofTriangles = earcut(flatCoords, []);
+        const roofStartIdx = vertices.length / 7;
+        
+        outerRing.forEach(coord => {
+            const [x, y] = getTransformedCoord(coord);
+            vertices.push(x, y, height, ..._fillColor);
+        });
+        
+        roofTriangles.forEach(idx => {
+            indices.push(roofStartIdx + idx);
+        });
+        
+        return { vertices, indices };
+    };
+
     // Process geometry (same logic as parseGeoJSONFeatureGPU)
     switch (feature.geometry.type) {
         case 'Polygon':
@@ -433,37 +589,14 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
             const outerRing = coordinates[0];
             const holes = coordinates.slice(1);
             
-            const flatCoords = [];
-            const holeIndices = [];
-            
-            outerRing.forEach(coord => {
-                flatCoords.push(coord[0], coord[1]);
-            });
-            
-            holes.forEach(hole => {
-                holeIndices.push(flatCoords.length / 2);
-                hole.forEach(coord => {
-                    flatCoords.push(coord[0], coord[1]);
-                });
-            });
-
-            const triangles = earcut(flatCoords, holeIndices);
-            const allCoords = coordinates.flat(1);
-            const fillStartIndex = coordsToVertices(allCoords, _fillColor, fillVertices);
-            const hiddenStartIndex = coordsToIdVertices(allCoords, 
-                featureId, hiddenVertices);
-
-            triangles.forEach(index => {
-                fillIndices.push(fillStartIndex + index);
-                hiddenfillIndices.push(hiddenStartIndex + index);
-            });
-            break;
-
-        case 'MultiPolygon':
-            feature.geometry.coordinates.forEach(polygon => {
-                const outerRing = polygon[0];
-                const holes = polygon.slice(1);
-                
+            // Use extrusion geometry if this is a 3D layer
+            if (isExtruded && extrusionHeight > 0) {
+                const extrusion = generateExtrusion(outerRing, extrusionHeight, extrusionBase);
+                const vertexOffset = fillVertices.length / 7;
+                extrusion.vertices.forEach(v => fillVertices.push(v));
+                extrusion.indices.forEach(i => fillIndices.push(i + vertexOffset));
+            } else {
+                // Standard 2D fill
                 const flatCoords = [];
                 const holeIndices = [];
                 
@@ -479,7 +612,10 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
                 });
 
                 const triangles = earcut(flatCoords, holeIndices);
-                const allCoords = polygon.flat(1);
+                
+                // Add vertices in the same order as flatCoords (outer + holes)
+                const allRings = [outerRing, ...holes];
+                const allCoords = allRings.flat(1);
                 const fillStartIndex = coordsToVertices(allCoords, _fillColor, fillVertices);
                 const hiddenStartIndex = coordsToIdVertices(allCoords, 
                     featureId, hiddenVertices);
@@ -488,6 +624,50 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
                     fillIndices.push(fillStartIndex + index);
                     hiddenfillIndices.push(hiddenStartIndex + index);
                 });
+            }
+            break;
+
+        case 'MultiPolygon':
+            feature.geometry.coordinates.forEach(polygon => {
+                const outerRing = polygon[0];
+                const holes = polygon.slice(1);
+                
+                // Use extrusion geometry if this is a 3D layer
+                if (isExtruded && extrusionHeight > 0) {
+                    const extrusion = generateExtrusion(outerRing, extrusionHeight, extrusionBase);
+                    const vertexOffset = fillVertices.length / 7;
+                    extrusion.vertices.forEach(v => fillVertices.push(v));
+                    extrusion.indices.forEach(i => fillIndices.push(i + vertexOffset));
+                } else {
+                    // Standard 2D fill
+                    const flatCoords = [];
+                    const holeIndices = [];
+                    
+                    outerRing.forEach(coord => {
+                        flatCoords.push(coord[0], coord[1]);
+                    });
+                    
+                    holes.forEach(hole => {
+                        holeIndices.push(flatCoords.length / 2);
+                        hole.forEach(coord => {
+                            flatCoords.push(coord[0], coord[1]);
+                        });
+                    });
+
+                    const triangles = earcut(flatCoords, holeIndices);
+                    
+                    // Add vertices in the same order as flatCoords (outer + holes)
+                    const allRings = [outerRing, ...holes];
+                    const allCoords = allRings.flat(1);
+                    const fillStartIndex = coordsToVertices(allCoords, _fillColor, fillVertices);
+                    const hiddenStartIndex = coordsToIdVertices(allCoords, 
+                        featureId, hiddenVertices);
+
+                    triangles.forEach(index => {
+                        fillIndices.push(fillStartIndex + index);
+                        hiddenfillIndices.push(hiddenStartIndex + index);
+                    });
+                }
             });
             break;
             
@@ -520,12 +700,13 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
             // console.warn(`Unsupported GeoJSON type: ${feature.geometry.type}`);
     }
 
+    if (feature.properties?.ADM0_A3 === 'USA' || feature.properties?.ADM0_A3 === 'CAN') { console.log('?? ' + feature.properties.ADM0_A3 + ': verts=' + fillVertices.length + ', idx=' + fillIndices.length); }
     return {
         vertices: new Float32Array(fillVertices),
         hiddenVertices: new Float32Array(hiddenVertices),
-        fillIndices: new Uint16Array(fillIndices),
-        outlineIndices: new Uint16Array(outlineIndices),
-        hiddenfillIndices: new Uint16Array(hiddenfillIndices),
+        fillIndices: new Uint32Array(fillIndices),
+        outlineIndices: new Uint32Array(outlineIndices),
+        hiddenfillIndices: new Uint32Array(hiddenfillIndices),
         isFilled,
         isLine,
         properties: {
@@ -536,3 +717,6 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
         }
     };
 }
+
+
+

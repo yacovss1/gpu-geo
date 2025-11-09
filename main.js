@@ -725,11 +725,15 @@ function initMarkerResources(device, format, canvas, camera) {
 
 // Load all visible tiles with GPU-accelerated coordinate transformation
 async function loadVisibleTiles(visibleTiles, device, newTileBuffers, newHiddenTileBuffers) {
+    console.log('🔍 loadVisibleTiles called with', visibleTiles.length, 'tiles');
     const tilePromises = visibleTiles.map(async (tile) => {
         const { x, y, z } = tile;
         try {
             const vectorTile = await fetchVectorTile(x, y, z);
-            if (!vectorTile || !vectorTile.layers) return;
+            if (!vectorTile || !vectorTile.layers) {
+                console.warn(`⚠️ No layers in tile ${z}/${x}/${y}`);
+                return;
+            }
             
             // Process each layer
             for (const layerName in vectorTile.layers) {
@@ -758,7 +762,16 @@ async function loadVisibleTiles(visibleTiles, device, newTileBuffers, newHiddenT
                     const sourceId = currentStyle ? Object.keys(currentStyle.sources)[0] : null;
                     const zoom = camera.zoom;
                     
-                    parsedFeatures = await batchParseGeoJSONFeaturesGPU(features, device, [0.0, 0.0, 0.0, 1.0], sourceId, zoom);
+                    try {
+                        parsedFeatures = await batchParseGeoJSONFeaturesGPU(features, device, [0.0, 0.0, 0.0, 1.0], sourceId, zoom);
+                        if (!window._parseSuccessLogged) {
+                            console.log('✅ GPU parsing succeeded:', parsedFeatures.length, 'features');
+                            window._parseSuccessLogged = true;
+                        }
+                    } catch (error) {
+                        console.error('❌ GPU parsing failed:', error);
+                        return;
+                    }
                     
                     const parseEndTime = performance.now();
                     const gpuTime = parseEndTime - parseStartTime;
@@ -796,6 +809,10 @@ async function loadVisibleTiles(visibleTiles, device, newTileBuffers, newHiddenT
                     } = parsedFeature;
                     
                     if (vertices.length === 0 || (fillIndices.length === 0 && outlineIndices.length === 0)) {
+                        if (!window._emptyGeomLogged) {
+                            console.log('⚠️ EMPTY GEOMETRY:', { verts: vertices.length, fillIdx: fillIndices.length, outIdx: outlineIndices.length });
+                            window._emptyGeomLogged = true;
+                        }
                         return;
                     }
                     
@@ -855,6 +872,11 @@ function logPerformanceStats() {
     }
 }
 
+// Helper to align buffer size to 4 bytes (WebGPU requirement)
+function alignBufferSize(size) {
+    return Math.max(4, Math.ceil(size / 4) * 4);
+}
+
 // Create and add buffers for a feature
 function createAndAddBuffers(
     device,
@@ -874,38 +896,35 @@ function createAndAddBuffers(
 ) {
     // Create vertex buffer
     const vertexBuffer = device.createBuffer({
-        size: vertices.byteLength,
+        size: alignBufferSize(vertices.byteLength),
         usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
     });
     device.queue.writeBuffer(vertexBuffer, 0, vertices);
     
     const hiddenVertexBuffer = device.createBuffer({
-        size: hiddenVertices.byteLength,
+        size: alignBufferSize(hiddenVertices.byteLength),
         usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
     });
     device.queue.writeBuffer(hiddenVertexBuffer, 0, hiddenVertices);
     
-    // Ensure index buffers are padded correctly
-    const paddedFillIndices = fillIndices.length % 2 === 0 ? fillIndices : new Uint16Array([...fillIndices, 0]);
+    // Create index buffers (already Uint32Array from parsing)
     const fillIndexBuffer = device.createBuffer({
-        size: paddedFillIndices.byteLength,
+        size: alignBufferSize(fillIndices.byteLength),
         usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
     });
-    device.queue.writeBuffer(fillIndexBuffer, 0, paddedFillIndices);
+    device.queue.writeBuffer(fillIndexBuffer, 0, fillIndices);
     
-    const paddedOutlineIndices = outlineIndices.length % 2 === 0 ? outlineIndices : new Uint16Array([...outlineIndices, 0]);
     const outlineIndexBuffer = device.createBuffer({
-        size: paddedOutlineIndices.byteLength,
+        size: alignBufferSize(outlineIndices.byteLength),
         usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
     });
-    device.queue.writeBuffer(outlineIndexBuffer, 0, paddedOutlineIndices);
+    device.queue.writeBuffer(outlineIndexBuffer, 0, outlineIndices);
     
-    const paddedHiddenFillIndices = hiddenfillIndices.length % 2 === 0 ? hiddenfillIndices : new Uint16Array([...hiddenfillIndices, 0]);
     const hiddenFillIndexBuffer = device.createBuffer({
-        size: paddedHiddenFillIndices.byteLength,
+        size: alignBufferSize(hiddenfillIndices.byteLength),
         usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
     });
-    device.queue.writeBuffer(hiddenFillIndexBuffer, 0, paddedHiddenFillIndices);
+    device.queue.writeBuffer(hiddenFillIndexBuffer, 0, hiddenfillIndices);
     
     // Add to tile buffers
     newTileBuffers.push({
@@ -959,7 +978,7 @@ function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, textureView
         if (hiddenfillIndexCount > 0) {
             hiddenPass.setPipeline(renderer.pipelines.hidden);
             hiddenPass.setVertexBuffer(0, vertexBuffer);
-            hiddenPass.setIndexBuffer(hiddenFillIndexBuffer, "uint16");
+            hiddenPass.setIndexBuffer(hiddenFillIndexBuffer, "uint32");
             hiddenPass.setBindGroup(0, renderer.bindGroups.picking);
             hiddenPass.drawIndexed(hiddenfillIndexCount);
         }
@@ -987,7 +1006,7 @@ function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, textureView
         if (fillIndexCount > 0) {
             colorPass.setPipeline(renderer.pipelines.fill);
             colorPass.setVertexBuffer(0, vertexBuffer);
-            colorPass.setIndexBuffer(fillIndexBuffer, "uint16");
+            colorPass.setIndexBuffer(fillIndexBuffer, "uint32");
             colorPass.setBindGroup(0, renderer.bindGroups.main);
             colorPass.drawIndexed(fillIndexCount);
         }
@@ -998,7 +1017,7 @@ function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, textureView
         if (outlineIndexCount > 0) {
             colorPass.setPipeline(renderer.pipelines.outline);
             colorPass.setVertexBuffer(0, vertexBuffer);
-            colorPass.setIndexBuffer(outlineIndexBuffer, "uint16");
+            colorPass.setIndexBuffer(outlineIndexBuffer, "uint32");
             colorPass.setBindGroup(0, renderer.bindGroups.main);
             colorPass.drawIndexed(outlineIndexCount);
         }

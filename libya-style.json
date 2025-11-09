@@ -1,0 +1,41 @@
+{
+  "version": 8,
+  "name": "Libya Extrusion Test",
+  "sources": {
+    "demotiles": {
+      "type": "vector",
+      "tiles": [
+        "https://demotiles.maplibre.org/tiles/{z}/{x}/{y}.pbf"
+      ],
+      "minzoom": 0,
+      "maxzoom": 6
+    }
+  },
+  "layers": [
+     {
+      "id": "libya-extrusion",
+      "type": "fill-extrusion",
+      "source": "demotiles",
+      "source-layer": "countries",
+      "filter": ["==", ["get", "ADM0_A3"], "LBY"],
+      "paint": {
+        "fill-extrusion-color": "#ea4335",
+        "fill-extrusion-height": 10,
+        "fill-extrusion-base": 0,
+        "fill-extrusion-opacity": 1.0
+      }
+    },
+    {
+      "id": "libya-fill",
+      "type": "fill",
+      "source": "demotiles",
+      "source-layer": "countries",
+      "filter": ["==", ["get", "ADM0_A3"], "LBY"],
+      "paint": {
+        "fill-color": "#34a853",
+        "fill-opacity": 0.8
+      }
+    }
+   
+  ]
+}

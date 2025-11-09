@@ -9,6 +9,7 @@ export class Camera extends EventTarget {
         this.maxZoom = 22;        // Max zoom level (2^22 = ~4M scale, same as MapLibre)
         this.minZoom = 0;         // Start at 0 for exponential zoom (2^0 = 1x scale)
         this.zoom = 0;            // Start at zoom 0
+        this.pitch = 60;          // Pitch angle in degrees (0 = top-down, 60 = tilted)
         this.zoomFactor = 5.0;   // *** EXTREME TEST VALUE *** Should zoom WAY faster
         this.viewportWidth = viewportWidth;
         this.viewportHeight = viewportHeight;

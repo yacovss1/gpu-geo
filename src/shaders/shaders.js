@@ -13,11 +13,14 @@ struct VertexOutput {
 fn main(@location(0) inPosition: vec3<f32>, @location(1) inColor: vec4<f32>) -> VertexOutput {
     var output: VertexOutput;
     
-    // Create homogeneous coordinate with 3D position
-    let pos = vec4<f32>(inPosition.xyz, 1.0);
+    // Apply isometric projection: shift Y upward based on Z height
+    // This makes buildings appear to "stand up" visually
+    let isoPosition = vec3<f32>(inPosition.x, inPosition.y + inPosition.z * 0.3, inPosition.z);
     
-    // FIXED: Use proper matrix multiplication instead of accessing individual elements
-    // This ensures we're correctly applying the zoom scale
+    // Create homogeneous coordinate with modified position
+    let pos = vec4<f32>(isoPosition.xy, inPosition.z, 1.0);
+    
+    // Apply camera transform
     output.position = uniforms * pos;
     
     // Pass along coordinates for fragment shader
