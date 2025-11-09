@@ -368,10 +368,29 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
 export async function batchParseGeoJSONFeaturesGPU(features, device, fillColor = [0.0, 0.0, 0.0, 1.0], sourceId = null, zoom = 0) {
     if (features.length === 0) return [];
 
+    // Get style layers for filtering
+    const style = getStyle();
+    
+    if (!window._batchDebug) {
+        console.log('🔧 batchParse called: sourceId=', sourceId, ', style=', !!style, ', features=', features.length);
+        if (style) console.log('🔧 style.sources=', Object.keys(style.sources || {}));
+        window._batchDebug = true;
+    }
+    
+    const layers = style && sourceId ? getLayersBySource(sourceId) : [];
+    
+    if (!window._layerDebugLogged) {
+        console.log('🔍 Found', layers.length, 'layers for sourceId:', sourceId);
+        if (layers.length > 0) {
+            console.log('🔍 Layers:', layers.map(l => l.id + '(' + l.type + ')').join(', '));
+        }
+        window._layerDebugLogged = true;
+    }
+
     const transformer = getGlobalCoordinateTransformer(device);
     await transformer.initialize();
 
-    // Extract all coordinates from all features
+    // Extract all coordinates from all features (once, for all layers)
     const allCoordinates = [];
     const featureCoordMaps = [];
 
@@ -394,31 +413,93 @@ export async function batchParseGeoJSONFeaturesGPU(features, device, fillColor =
         transformedCoords = await transformer.transformCoordinates(allCoordinates);
     }
 
-    // Process each feature using the batch-transformed coordinates
+    // Process features PER LAYER (not per feature)
     const results = [];
-    for (let i = 0; i < features.length; i++) {
-        const feature = features[i];
-        const coordMap = featureCoordMaps[i];
-        
-        // Create lookup function for this feature
-        const getTransformedCoord = (coord) => {
-            const key = `${coord[0]},${coord[1]}`;
-            const globalIndex = coordMap.get(key);
-            return globalIndex !== undefined ? transformedCoords[globalIndex] : [0, 0];
-        };
+    
+    // If no style layers, fall back to processing all features with default styling
+    if (layers.length === 0) {
+        for (let i = 0; i < features.length; i++) {
+            const feature = features[i];
+            const coordMap = featureCoordMaps[i];
+            
+            const getTransformedCoord = (coord) => {
+                const key = `${coord[0]},${coord[1]}`;
+                const globalIndex = coordMap.get(key);
+                return globalIndex !== undefined ? transformedCoords[globalIndex] : [0, 0];
+            };
 
-        // Parse feature using transformed coordinates (reuse logic from parseGeoJSONFeatureGPU)
-        const result = await parseFeatureWithTransformedCoords(feature, getTransformedCoord, fillColor, sourceId, zoom);
-        if (result) {
-            results.push(result);
+            const result = await parseFeatureWithTransformedCoords(feature, getTransformedCoord, fillColor, sourceId, zoom, null);
+            if (result) {
+                results.push(result);
+            }
         }
+        return results;
+    }
+
+    // LAYER-FIRST: For each layer, process all matching features
+    for (const layer of layers) {
+        // Skip invisible layers
+        if (layer.layout?.visibility === 'none') continue;
+        
+        // Only process fill, fill-extrusion, and line layers
+        if (!['fill', 'fill-extrusion', 'line'].includes(layer.type)) continue;
+        
+        if (!window._processingLayer) {
+            console.log('✅ Processing layer:', layer.id, 'type:', layer.type);
+            window._processingLayer = true;
+        }
+        
+        let matchCount = 0;
+
+        for (let i = 0; i < features.length; i++) {
+            const feature = features[i];
+            
+            // IMPORTANT: Skip if geometry type doesn't match layer type
+            const geomType = feature.geometry.type;
+            if (layer.type === 'line' && !geomType.includes('LineString')) {
+                continue; // Line layers only render LineString geometry
+            }
+            if ((layer.type === 'fill' || layer.type === 'fill-extrusion') && !geomType.includes('Polygon')) {
+                continue; // Fill layers only render Polygon geometry
+            }
+            
+            // Check source-layer match
+            if (layer['source-layer'] && layer['source-layer'] !== feature.layer?.name) {
+                continue;
+            }
+
+            // Check filter
+            if (layer.filter && !evaluateFilter(layer.filter, feature, zoom)) {
+                continue;
+            }
+            
+            matchCount++;
+
+            const coordMap = featureCoordMaps[i];
+            
+            const getTransformedCoord = (coord) => {
+                const key = `${coord[0]},${coord[1]}`;
+                const globalIndex = coordMap.get(key);
+                return globalIndex !== undefined ? transformedCoords[globalIndex] : [0, 0];
+            };
+
+            // Parse feature for THIS SPECIFIC LAYER
+            const result = await parseFeatureWithTransformedCoords(feature, getTransformedCoord, fillColor, sourceId, zoom, layer);
+            if (result) {
+                // Add layerId to result
+                result.layerId = layer.id;
+                results.push(result);
+            }
+        }
+        
+
     }
 
     return results;
 }
 
 // Helper function to parse a feature when coordinates are already transformed
-async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, fillColor, sourceId = null, zoom = 0) {
+async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, fillColor, sourceId = null, zoom = 0, layer = null) {
     const fillVertices = [];
     const hiddenVertices = [];
     const fillIndices = [];
@@ -437,17 +518,46 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
     let extrusionBase = 0;
     let isExtruded = false;
 
-    if (style && sourceId) {
-        // Get layers for this source
+    // Use the provided layer instead of searching for one
+    if (layer) {
+        const fillLayer = layer.type === 'fill' || layer.type === 'fill-extrusion' ? layer : null;
+        const lineLayer = layer.type === 'line' ? layer : null;
+        const extrusionLayer = layer.type === 'fill-extrusion' ? layer : null;
+
+        // Get extrusion properties if this is a 3D layer
+        if (extrusionLayer) {
+            isExtruded = true;
+            const heightValue = getPaintProperty(extrusionLayer.id, 'fill-extrusion-height', feature, zoom);
+            const baseValue = getPaintProperty(extrusionLayer.id, 'fill-extrusion-base', feature, zoom);
+            extrusionHeight = typeof heightValue === 'number' ? heightValue : 0;
+            extrusionBase = typeof baseValue === 'number' ? baseValue : 0;
+        }
+
+        // Get paint properties from style
+        if (fillLayer) {
+            const colorProperty = extrusionLayer ? 'fill-extrusion-color' : 'fill-color';
+            const fillColorValue = getPaintProperty(fillLayer.id, colorProperty, feature, zoom);
+            
+            if (fillColorValue) {
+                _fillColor = parseColor(fillColorValue);
+            }
+        }
+
+        if (lineLayer) {
+            const lineColorValue = getPaintProperty(lineLayer.id, 'line-color', feature, zoom);
+            if (lineColorValue) {
+                _borderColor = parseColor(lineColorValue);
+            }
+        }
+    } else if (style && sourceId) {
+        // Fallback: find layer if not provided (legacy behavior)
         const layers = getLayersBySource(sourceId);
         
-        // Find extrusion layer first (higher priority for 3D buildings)
         const extrusionLayer = layers.find(l => 
             l.type === 'fill-extrusion' && 
             (!l['source-layer'] || l['source-layer'] === feature.layer?.name)
         );
         
-        // Find fill layer as fallback
         const fillLayer = extrusionLayer || layers.find(l => 
             l.type === 'fill' && 
             (!l['source-layer'] || l['source-layer'] === feature.layer?.name)
@@ -465,11 +575,6 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
             const baseValue = getPaintProperty(extrusionLayer.id, 'fill-extrusion-base', feature, zoom);
             extrusionHeight = typeof heightValue === 'number' ? heightValue : 0;
             extrusionBase = typeof baseValue === 'number' ? baseValue : 0;
-        }
-
-        // Apply filter if layer has one
-        if (fillLayer && fillLayer.filter && !evaluateFilter(fillLayer.filter, feature, zoom)) {
-            return null; // Feature filtered out
         }
 
         // Get paint properties from style
@@ -700,7 +805,7 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
             // console.warn(`Unsupported GeoJSON type: ${feature.geometry.type}`);
     }
 
-    if (feature.properties?.ADM0_A3 === 'USA' || feature.properties?.ADM0_A3 === 'CAN') { console.log('?? ' + feature.properties.ADM0_A3 + ': verts=' + fillVertices.length + ', idx=' + fillIndices.length); }
+    
     return {
         vertices: new Float32Array(fillVertices),
         hiddenVertices: new Float32Array(hiddenVertices),

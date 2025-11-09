@@ -763,7 +763,7 @@ async function loadVisibleTiles(visibleTiles, device, newTileBuffers, newHiddenT
                     const zoom = camera.zoom;
                     
                     try {
-                        parsedFeatures = await batchParseGeoJSONFeaturesGPU(features, device, [0.0, 0.0, 0.0, 1.0], sourceId, zoom);
+                        parsedFeatures = await batchParseGeoJSONFeaturesGPU(features, device, [0.0, 1.0, 0.0, 1.0], sourceId, zoom);
                         if (!window._parseSuccessLogged) {
                             console.log('✅ GPU parsing succeeded:', parsedFeatures.length, 'features');
                             window._parseSuccessLogged = true;
