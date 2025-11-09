@@ -978,6 +978,17 @@ function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, textureView
         }
     });
     
+    // Draw outlines (borders) after fills
+    tileBuffers.forEach(({ vertexBuffer, outlineIndexBuffer, outlineIndexCount }) => {
+        if (outlineIndexCount > 0) {
+            colorPass.setPipeline(renderer.pipelines.outline);
+            colorPass.setVertexBuffer(0, vertexBuffer);
+            colorPass.setIndexBuffer(outlineIndexBuffer, "uint16");
+            colorPass.setBindGroup(0, renderer.bindGroups.main);
+            colorPass.drawIndexed(outlineIndexCount);
+        }
+    });
+    
     colorPass.end();
     
     // Third render pass: Apply edge detection to screen
