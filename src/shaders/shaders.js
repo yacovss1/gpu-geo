@@ -10,11 +10,11 @@ struct VertexOutput {
 @group(0) @binding(0) var<uniform> uniforms: mat4x4<f32>;
 
 @vertex
-fn main(@location(0) inPosition: vec2<f32>, @location(1) inColor: vec4<f32>) -> VertexOutput {
+fn main(@location(0) inPosition: vec3<f32>, @location(1) inColor: vec4<f32>) -> VertexOutput {
     var output: VertexOutput;
     
-    // Create homogeneous coordinate
-    let pos = vec4<f32>(inPosition.x, inPosition.y, 0.0, 1.0);
+    // Create homogeneous coordinate with 3D position
+    let pos = vec4<f32>(inPosition.xyz, 1.0);
     
     // FIXED: Use proper matrix multiplication instead of accessing individual elements
     // This ensures we're correctly applying the zoom scale

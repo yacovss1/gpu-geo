@@ -58,10 +58,10 @@ export function createRenderPipeline(device, format, topology, isHidden = false)
             module: cachedShaders.vertex,
             entryPoint: "main",
             buffers: [{
-                arrayStride: 24,
+                arrayStride: 28,
                 attributes: [
-                    { shaderLocation: 0, offset: 0, format: 'float32x2' },
-                    { shaderLocation: 1, offset: 8, format: 'float32x4' }
+                    { shaderLocation: 0, offset: 0, format: 'float32x3' },
+                    { shaderLocation: 1, offset: 12, format: 'float32x4' }
                 ]
             }],
         },

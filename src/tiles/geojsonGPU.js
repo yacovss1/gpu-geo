@@ -98,19 +98,19 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
 
     // Create vertex arrays using transformed coordinates
     const coordsToVertices = (coords, color, targetArray) => {
-        const vertexStartIndex = targetArray.length / 6;
+        const vertexStartIndex = targetArray.length / 7;
         coords.forEach(coord => {
             const [x, y] = getTransformedCoord(coord);
             targetArray.push(
-                x, y,     // Position
-                ...color  // Color
+                x, y, 0.0, // Position (z=0 for flat map)
+                ...color   // Color
             );
         });
         return vertexStartIndex;
     };
 
     const coordsToIdVertices = (coords, featureId, targetArray) => {
-        const vertexStartIndex = targetArray.length / 6;
+        const vertexStartIndex = targetArray.length / 7;
         
         // Encode feature ID as 16-bit across red and green channels
         // R = high byte (bits 8-15), G = low byte (bits 0-7)
@@ -123,7 +123,7 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
         coords.forEach(coord => {
             const [x, y] = getTransformedCoord(coord);
             targetArray.push(
-                x, y,             // Position
+                x, y, 0.0,        // Position (z=0 for flat map)
                 normalizedR, normalizedG, 0.0, 1.0  // 16-bit ID in R+G channels
             );
         });
@@ -248,7 +248,7 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
             
         case 'Point':
             const transformedPoint = getTransformedCoord(feature.geometry.coordinates);
-            fillVertices.push(transformedPoint[0], transformedPoint[1], ..._fillColor);
+            fillVertices.push(transformedPoint[0], transformedPoint[1], 0.0, ..._fillColor);
             break;
             
         default:
@@ -400,16 +400,16 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
 
     // Vertex creation functions (same as above)
     const coordsToVertices = (coords, color, targetArray) => {
-        const vertexStartIndex = targetArray.length / 6;
+        const vertexStartIndex = targetArray.length / 7;
         coords.forEach(coord => {
             const [x, y] = getTransformedCoord(coord);
-            targetArray.push(x, y, ...color);
+            targetArray.push(x, y, 0.0, ...color);
         });
         return vertexStartIndex;
     };
 
     const coordsToIdVertices = (coords, featureId, targetArray) => {
-        const vertexStartIndex = targetArray.length / 6;
+        const vertexStartIndex = targetArray.length / 7;
         
         // Encode feature ID as 16-bit across red and green channels
         // R = high byte (bits 8-15), G = low byte (bits 0-7)
@@ -421,7 +421,7 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
         
         coords.forEach(coord => {
             const [x, y] = getTransformedCoord(coord);
-            targetArray.push(x, y, normalizedR, normalizedG, 0.0, 1.0);
+            targetArray.push(x, y, 0.0, normalizedR, normalizedG, 0.0, 1.0);
         });
         return vertexStartIndex;
     };
@@ -513,7 +513,7 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
             
         case 'Point':
             const transformedPoint = getTransformedCoord(feature.geometry.coordinates);
-            fillVertices.push(transformedPoint[0], transformedPoint[1], ..._fillColor);
+            fillVertices.push(transformedPoint[0], transformedPoint[1], 0.0, ..._fillColor);
             break;
             
         default:
