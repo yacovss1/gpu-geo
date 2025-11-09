@@ -3,7 +3,7 @@ import {
     edgeDetectionVertexShaderCode, edgeDetectionFragmentShaderCode,
     debugVertexShaderCode, debugFragmentShaderCode 
 } from '../shaders/shaders.js';
-import { TextRenderer } from '../text/textRenderer.js';
+import { GPUTextRenderer } from '../text/gpuTextRenderer.js';
 
 // Cache shaders and layouts to avoid recreation
 let cachedShaders = { 

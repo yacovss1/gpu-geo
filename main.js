@@ -8,7 +8,7 @@ import { setupEventListeners } from './src/core/events.js';
 import { getVisibleTiles } from './src/tiles/tile-utils.js'; 
 import { createMarkerPipeline } from './src/rendering/markerPipeline.js';
 import { createAccumulatorPipeline, createQuadrantPipeline, createCenterPipeline } from './src/rendering/markerCompute.js';
-import { TextRenderer } from './src/text/textRenderer.js';
+import { GPUTextRenderer } from './src/text/gpuTextRenderer.js';
 
 // Define constants at file scope to ensure they're available everywhere
 // 9-quadrant labeling system (center + 8 directional positions)
@@ -358,8 +358,8 @@ async function main() {
         renderer.updateTextureBindGroups();
     });
     
-    // Initialize text renderer
-    const textRenderer = new TextRenderer(device);
+    // Initialize GPU-native text renderer
+    const textRenderer = new GPUTextRenderer(device);
     await textRenderer.initialize('Arial', 48);
     
     // Start at world center [0, 0] (Greenwich/Equator)
@@ -609,7 +609,11 @@ async function main() {
         const style = getStyle();
         const sourceId = style && style.sources ? Object.keys(style.sources).find(key => style.sources[key].type === 'vector') : null;
         
-        textRenderer.renderFromMarkerBuffer(overlayEncoder, textureView, markerBuffer, markerDataBindGroup, featureNames, camera, sourceId);
+        // Upload label data to GPU
+        textRenderer.uploadLabelData(featureNames, camera, sourceId);
+        
+        // Render all labels in one GPU call
+        textRenderer.render(overlayEncoder, textureView, markerBuffer);
         
         // Submit overlay rendering (map and compute already submitted)
         device.queue.submit([overlayEncoder.finish()]);
@@ -1116,11 +1120,11 @@ function renderMarkersToEncoder(
     markerBindGroup,
     markerBuffer
 ) {
-    // Render triangles for markers
+    // Render triangles for markers (pointing downward)
     const triangleData = new Float32Array([
-        -0.5, -0.5,
-         0.5, -0.5,
-         0.0,  0.5
+        -0.5,  0.5,  // Top-left
+         0.5,  0.5,  // Top-right
+         0.0, -0.5   // Bottom point (pointing down)
     ]);
     
     const triangleBuffer = device.createBuffer({
