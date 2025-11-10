@@ -219,38 +219,101 @@ export class GPUTextRenderer {
             return;
         }
 
-        // Filter labels based on zoom
+        // Get symbol layers from style
         const symbolLayers = sourceId ? getSymbolLayers(sourceId) : [];
         const currentZoom = camera ? camera.zoom : 0;
+        
+        if (!this._loggedOnce) {
+            console.log('📝 Symbol layers found:', symbolLayers.length);
+            symbolLayers.forEach((layer, i) => {
+                console.log(`📝 Symbol layer ${i}:`, layer);
+            });
+            this._loggedOnce = true;
+        }
         
         const labelData = [];
         const textData = [];
         let charOffset = 0;
         
         for (const [featureId, featureData] of featureNames) {
-            const name = typeof featureData === 'string' ? featureData : featureData.name;
-            const sourceLayer = typeof featureData === 'object' ? featureData.sourceLayer : null;
+            // Handle both old format (has .name directly) and new format (has .properties)
+            const properties = featureData.properties || {};
+            const sourceLayer = featureData.sourceLayer;
+            const name = featureData.name; // Fallback to direct name if available
             
-            // Check zoom-based filtering
-            let shouldRender = true;
-            if (symbolLayers.length > 0) {
-                const matchingLayer = symbolLayers.find(layer => {
-                    const isCentroidLayer = layer.sourceLayer && 
-                        (layer.sourceLayer.includes('centroid') || 
-                         layer.sourceLayer.includes('point') ||
-                         layer.sourceLayer.includes('label'));
-                    const layerMatches = isCentroidLayer || layer.sourceLayer === sourceLayer;
-                    return layerMatches && currentZoom >= layer.minzoom && currentZoom <= layer.maxzoom;
-                });
-                shouldRender = !!matchingLayer;
-            } else {
-                shouldRender = currentZoom > 2;
+            if (!this._propsLogged) {
+                console.log('📝 Feature data:', featureData);
+                console.log('📝 Feature sourceLayer:', sourceLayer);
+                this._propsLogged = true;
             }
             
-            if (!shouldRender) continue;
+            // Find matching symbol layer for this feature's source-layer
+            const matchingLayer = symbolLayers.find(layer => {
+                const layerSourceLayer = layer.sourceLayer;
+                
+                // Direct match
+                if (layerSourceLayer === sourceLayer) return true;
+                
+                // Smart matching: Symbol layers asking for point/centroid/label layers
+                // should match polygon/geometry layers (we compute centroids in real-time)
+                const isSymbolLookingForPoints = layerSourceLayer && (
+                    layerSourceLayer.includes('centroid') ||
+                    layerSourceLayer.includes('point') ||
+                    layerSourceLayer.includes('label')
+                );
+                
+                const isGeometryLayer = sourceLayer && (
+                    sourceLayer.includes('countries') ||
+                    sourceLayer.includes('states') ||
+                    sourceLayer.includes('regions') ||
+                    sourceLayer.includes('places') ||
+                    !sourceLayer.includes('line') && !sourceLayer.includes('boundary')
+                );
+                
+                // If symbol layer wants centroids and we have geometry, match it
+                if (isSymbolLookingForPoints && isGeometryLayer) {
+                    // Must be within zoom range
+                    if (currentZoom < layer.minzoom || currentZoom > layer.maxzoom) return false;
+                    return true;
+                }
+                
+                // Must be within zoom range for direct matches
+                if (currentZoom < layer.minzoom || currentZoom > layer.maxzoom) return false;
+                
+                return false;
+            });
+            
+            if (!matchingLayer) {
+                continue;
+            }
+            
+            // Parse text-field template to get the property name(s)
+            let labelText = this.evaluateTextField(matchingLayer.textField, properties, currentZoom);
+            
+            // Fallback to direct name if text-field parsing didn't work
+            if (!labelText && name) {
+                labelText = name;
+            }
+            
+            if (!labelText) {
+                continue;
+            }
+            
+            if (!this._textLogged) {
+                console.log('📝 First label text:', labelText, 'from textField:', matchingLayer.textField);
+                this._textLogged = true;
+            }
+            
+            // Apply text-transform if specified
+            const textTransform = this.evaluateProperty(matchingLayer.textTransform, currentZoom);
+            if (textTransform === 'uppercase') {
+                labelText = labelText.toUpperCase();
+            } else if (textTransform === 'lowercase') {
+                labelText = labelText.toLowerCase();
+            }
             
             // Limit label length
-            const labelText = name.substring(0, MAX_CHARS_PER_LABEL);
+            labelText = labelText.substring(0, MAX_CHARS_PER_LABEL);
             const charCount = labelText.length;
             
             // Store label metadata: featureId, charStart, charCount, padding
@@ -288,6 +351,53 @@ export class GPUTextRenderer {
             0,
             new Uint32Array(textData)
         );
+    }
+    
+    /**
+     * Evaluate text-field template with property substitution
+     * Supports: {PROPERTY}, literal strings, and stops
+     */
+    evaluateTextField(textField, properties, zoom) {
+        if (!textField) return null;
+        
+        // Handle stops (zoom-based values)
+        const value = this.evaluateProperty(textField, zoom);
+        
+        if (typeof value !== 'string') return null;
+        
+        // Replace {PROPERTY} with actual property value
+        return value.replace(/\{([^}]+)\}/g, (match, propName) => {
+            return properties[propName] || '';
+        });
+    }
+    
+    /**
+     * Evaluate a property that may have stops (zoom functions)
+     */
+    evaluateProperty(property, zoom) {
+        if (!property) return property;
+        
+        // If it's already a simple value, return it
+        if (typeof property !== 'object') return property;
+        
+        // Handle stops array
+        if (property.stops && Array.isArray(property.stops)) {
+            // Find the appropriate stop for current zoom
+            let value = property.stops[0][1]; // Default to first
+            
+            for (let i = 0; i < property.stops.length; i++) {
+                const [stopZoom, stopValue] = property.stops[i];
+                if (zoom >= stopZoom) {
+                    value = stopValue;
+                } else {
+                    break;
+                }
+            }
+            
+            return value;
+        }
+        
+        return property;
     }
 
     /**

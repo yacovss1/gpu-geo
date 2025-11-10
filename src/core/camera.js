@@ -5,12 +5,12 @@ export class Camera extends EventTarget {
         super();
         this.position = [0, 0];
         this.trueZoom = 1;
-        this.maxFetchZoom = 6;    // Maximum zoom level for fetching tiles
+        this.maxFetchZoom = 14;   // Match Carto maxzoom (tiles only go to 14)
         this.maxZoom = 22;        // Max zoom level (2^22 = ~4M scale, same as MapLibre)
         this.minZoom = 0;         // Start at 0 for exponential zoom (2^0 = 1x scale)
         this.zoom = 0;            // Start at zoom 0
         this.pitch = 60;          // Pitch angle in degrees (0 = top-down, 60 = tilted)
-        this.zoomFactor = 5.0;   // *** EXTREME TEST VALUE *** Should zoom WAY faster
+        this.zoomFactor = 1.0;    // Zoom by 1 level at a time (reasonable speed)
         this.viewportWidth = viewportWidth;
         this.viewportHeight = viewportHeight;
         this.velocity = [0, 0];
@@ -82,9 +82,13 @@ export class Camera extends EventTarget {
         const aspectRatio = this.viewportWidth / this.viewportHeight;
         const matrix = mat4.create();
         
-        // CORRECT ORDER: Scale FIRST (will be applied last), then translate (will be applied first)
-        // This way: vertex -> translate by -camera -> scale by zoom
+        // STANDARD web mercator zoom formula
+        // For Web Mercator with world in [-1, 1] normalized coordinates:
+        // scale = 2^zoom
+        // This ensures proper overzooming behavior when displayZoom > fetchZoom
         const effectiveZoom = Math.pow(2, this.zoom);
+        
+        
         
         // Apply the zoom scale FIRST in the matrix (but will be applied LAST to vertices)
         mat4.scale(matrix, matrix, [effectiveZoom / aspectRatio, effectiveZoom, 1]);
@@ -123,16 +127,11 @@ export class Camera extends EventTarget {
     }
 
     pan(dx, dy) {
-        // Pan speed should be inversely proportional to zoom scale
-        // At higher zooms, you're more "zoomed in" so same pixel movement = smaller world movement
-        
-        // Calculate the effective zoom scale (2^zoom)
         const effectiveZoom = Math.pow(2, this.zoom);
+        // Add extra damping at high zoom levels to prevent excessive speed
+        const zoomDamping = Math.min(1.0, 50 / effectiveZoom);
+        const panSpeed = (this.velocityFactor / effectiveZoom) * zoomDamping;
         
-        // Base pan speed inversely proportional to zoom
-        const panSpeed = this.velocityFactor / effectiveZoom;
-        
-        // Apply the pan
         this.position[0] -= dx * panSpeed;
         this.position[1] += dy * panSpeed; 
         
@@ -160,9 +159,9 @@ export class Camera extends EventTarget {
         
         // Debug if position changed
         if (hadVelocity && (this.position[0] !== posBefore[0] || this.position[1] !== posBefore[1])) {
-            console.log('⚡ updatePosition moved camera from', posBefore[0].toFixed(3), posBefore[1].toFixed(3), 
-                       'to', this.position[0].toFixed(3), this.position[1].toFixed(3),
-                       'velocity:', this.velocity[0].toFixed(3), this.velocity[1].toFixed(3));
+            // console.log('⚡ updatePosition moved camera from', posBefore[0].toFixed(3), posBefore[1].toFixed(3), 
+            //            'to', this.position[0].toFixed(3), this.position[1].toFixed(3),
+            //            'velocity:', this.velocity[0].toFixed(3), this.velocity[1].toFixed(3));
         }
     }
     
@@ -171,24 +170,30 @@ export class Camera extends EventTarget {
         const prevZoom = this.zoom;
         const zoomFactor = factor || this.zoomFactor;
         
+        // HARD CLAMP: Never allow zoom beyond maxZoom
+        if (this.zoom >= this.maxZoom) {
+            //console.warn(`🚫 Already at max zoom ${this.maxZoom}`);
+            return;
+        }
+        
         if (this.zoom < this.maxZoom) {
             // Get mouse position in clip space (-1 to 1)
             const mouseClipX = this.mouseScreenX * 2 - 1;
             const mouseClipY = this.mouseScreenY * 2 - 1;  // Screen Y already goes down, clip Y goes down too
             const aspectRatio = this.viewportWidth / this.viewportHeight;
             
-            // Calculate effective zoom scales (2^zoom)
+            // Use standard 2^zoom
             const prevEffectiveZoom = Math.pow(2, prevZoom);
             
             // Calculate the point in world space that is under the mouse BEFORE zoom
-            // World space is in Mercator projection (same as tiles)
-            // MUST account for aspect ratio because matrix scales X by (zoom/aspectRatio)
             const worldX = this.position[0] + (mouseClipX * aspectRatio) / prevEffectiveZoom;
             const worldY = this.position[1] + mouseClipY / prevEffectiveZoom;
             
             // Apply zoom (increment zoom level by 1 for each zoom in)
             this.zoom = Math.min(this.maxZoom, prevZoom + 1);
             const nextEffectiveZoom = Math.pow(2, this.zoom);
+            
+            console.log(`📈 ZOOM IN: ${prevZoom.toFixed(2)} → ${this.zoom.toFixed(2)} (scale: ${prevEffectiveZoom.toFixed(1)} → ${nextEffectiveZoom.toFixed(1)})`);
             
             // Move camera so that worldX,worldY is still under the mouse AFTER zoom
             this.position[0] = worldX - (mouseClipX * aspectRatio) / nextEffectiveZoom;
@@ -216,7 +221,7 @@ export class Camera extends EventTarget {
             const mouseClipY = this.mouseScreenY * 2 - 1;  // Screen Y already goes down, clip Y goes down too
             const aspectRatio = this.viewportWidth / this.viewportHeight;
             
-            // Calculate effective zoom scales (2^zoom)
+            // Use standard 2^zoom for consistency
             const prevEffectiveZoom = Math.pow(2, prevZoom);
             
             // Calculate the point in world space that is under the mouse BEFORE zoom
@@ -279,13 +284,15 @@ export class Camera extends EventTarget {
     }
 
     getViewport() {
-        // Calculate the viewport extents in world coordinates
+        // Calculate the viewport extents in world coordinates  
         const aspectRatio = this.viewportWidth / this.viewportHeight;
         
-        // The viewport size in world space is determined by zoom
-        // But we need to account for aspect ratio in X direction since matrix scales X by (zoom / aspectRatio)
-        const halfWidth = (this.viewportWidth / 2) / (this.zoom / aspectRatio);
-        const halfHeight = (this.viewportHeight / 2) / this.zoom;
+        // Use standard 2^zoom
+        const effectiveZoom = Math.pow(2, this.zoom);
+        
+        // Viewport in world space
+        const halfWidth = aspectRatio / effectiveZoom;
+        const halfHeight = 1.0 / effectiveZoom;
         
         // Get raw viewport coordinates
         const rawViewport = {

@@ -41,86 +41,92 @@ export class GPUCoordinateTransformer {
         if (coordinates.length === 0) return [];
 
         const coordinateCount = coordinates.length;
-        const inputSize = coordinateCount * 8; // 2 float32s per coordinate
-        const outputSize = coordinateCount * 8; // 2 float32s per coordinate
+        const inputSize = Math.max(256, coordinateCount * 8); // Minimum 256 bytes for mapped buffers
+        const outputSize = Math.max(256, coordinateCount * 8);
 
-        // Create input buffer with coordinate data
-        const inputBuffer = this.device.createBuffer({
-            size: inputSize,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-            mappedAtCreation: true
-        });
+        try {
+            // Create input buffer with coordinate data
+            const inputBuffer = this.device.createBuffer({
+                size: inputSize,
+                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+            });
+            
+            // Write data separately to avoid mappedAtCreation issues
+            const inputData = new Float32Array(coordinateCount * 2);
+            coordinates.forEach((coord, i) => {
+                inputData[i * 2] = coord[0]; // longitude
+                inputData[i * 2 + 1] = coord[1]; // latitude
+            });
+            this.device.queue.writeBuffer(inputBuffer, 0, inputData);
 
-        const inputData = new Float32Array(inputBuffer.getMappedRange());
-        coordinates.forEach((coord, i) => {
-            inputData[i * 2] = coord[0]; // longitude
-            inputData[i * 2 + 1] = coord[1]; // latitude
-        });
-        inputBuffer.unmap();
+            // Create output buffer
+            const outputBuffer = this.device.createBuffer({
+                size: outputSize,
+                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
+            });
 
-        // Create output buffer
-        const outputBuffer = this.device.createBuffer({
-            size: outputSize,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
-        });
+            // Create staging buffer for reading results
+            const stagingBuffer = this.device.createBuffer({
+                size: outputSize,
+                usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+            });
 
-        // Create staging buffer for reading results
-        const stagingBuffer = this.device.createBuffer({
-            size: outputSize,
-            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
-        });
+            // Set up compute pass
+            const bindGroup = this.device.createBindGroup({
+                layout: this.pipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: inputBuffer } },
+                    { binding: 1, resource: { buffer: outputBuffer } }
+                ]
+            });
 
-        // Set up compute pass
-        const bindGroup = this.device.createBindGroup({
-            layout: this.pipeline.getBindGroupLayout(0),
-            entries: [
-                { binding: 0, resource: { buffer: inputBuffer } },
-                { binding: 1, resource: { buffer: outputBuffer } }
-            ]
-        });
+            const commandEncoder = this.device.createCommandEncoder();
+            const computePass = commandEncoder.beginComputePass();
+            
+            computePass.setPipeline(this.pipeline);
+            computePass.setBindGroup(0, bindGroup);
+            
+            // Dispatch workgroups (256 threads per workgroup)
+            const workgroupCount = Math.ceil(coordinateCount / 256);
+            computePass.dispatchWorkgroups(workgroupCount);
+            
+            computePass.end();
 
-        const commandEncoder = this.device.createCommandEncoder();
-        const computePass = commandEncoder.beginComputePass();
-        
-        computePass.setPipeline(this.pipeline);
-        computePass.setBindGroup(0, bindGroup);
-        
-        // Dispatch workgroups (256 threads per workgroup)
-        const workgroupCount = Math.ceil(coordinateCount / 256);
-        computePass.dispatchWorkgroups(workgroupCount);
-        
-        computePass.end();
+            // Copy output to staging buffer
+            commandEncoder.copyBufferToBuffer(
+                outputBuffer, 0,
+                stagingBuffer, 0,
+                outputSize
+            );
 
-        // Copy output to staging buffer
-        commandEncoder.copyBufferToBuffer(
-            outputBuffer, 0,
-            stagingBuffer, 0,
-            outputSize
-        );
+            this.device.queue.submit([commandEncoder.finish()]);
 
-        this.device.queue.submit([commandEncoder.finish()]);
+            // Read results
+            await stagingBuffer.mapAsync(GPUMapMode.READ);
+            const outputData = new Float32Array(stagingBuffer.getMappedRange());
+            
+            // Convert back to coordinate pairs
+            const transformedCoords = [];
+            for (let i = 0; i < coordinateCount; i++) {
+                transformedCoords.push([
+                    outputData[i * 2],     // x
+                    outputData[i * 2 + 1]  // y
+                ]);
+            }
 
-        // Read results
-        await stagingBuffer.mapAsync(GPUMapMode.READ);
-        const outputData = new Float32Array(stagingBuffer.getMappedRange());
-        
-        // Convert back to coordinate pairs
-        const transformedCoords = [];
-        for (let i = 0; i < coordinateCount; i++) {
-            transformedCoords.push([
-                outputData[i * 2],     // x
-                outputData[i * 2 + 1]  // y
-            ]);
+            stagingBuffer.unmap();
+
+            // Cleanup buffers
+            inputBuffer.destroy();
+            outputBuffer.destroy();
+            stagingBuffer.destroy();
+
+            return transformedCoords;
+        } catch (error) {
+            console.error('GPU coordinate transformation failed:', error);
+            // Return untr ansformed coordinates as fallback
+            return coordinates.map(coord => [...coord]);
         }
-
-        stagingBuffer.unmap();
-
-        // Cleanup buffers
-        inputBuffer.destroy();
-        outputBuffer.destroy();
-        stagingBuffer.destroy();
-
-        return transformedCoords;
     }
 
     // Batch transform for very large datasets using flattened arrays

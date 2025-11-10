@@ -1,0 +1,84 @@
+{
+  "version": 8,
+  "name": "Carto Streets",
+  "sources": {
+    "carto": {
+      "type": "vector",
+      "tiles": ["https://tiles-a.basemaps.cartocdn.com/vectortiles/carto.streets/v1/{z}/{x}/{y}.mvt"],
+      "minzoom": 0,
+      "maxzoom": 14
+    }
+  },
+  "layers": [
+    {
+      "id": "water",
+      "type": "fill",
+      "source": "carto",
+      "source-layer": "water",
+      "paint": {
+        "fill-opacity": 0.5,
+        "fill-color": "#800080"
+      }
+    },
+    {
+      "id": "landuse",
+      "type": "fill",
+      "source": "carto",
+      "source-layer": "landuse",
+      "minzoom": 8,
+      "paint": {
+        "fill-opacity": 0.4,
+        "fill-color": "#e8f5e9"
+      }
+    },
+    
+    {
+      "id": "buildings",
+      "type": "fill",
+      "source": "carto",
+      "source-layer": "building",
+      "minzoom": 13,
+      "paint": {
+        "fill-color": "#ff0000",
+        "fill-opacity": 0.7
+      }
+    },
+    {
+      "id": "roads-all",
+      "type": "line",
+      "source": "carto",
+      "source-layer": "transportation",
+      "paint": {
+        "line-width": 6,
+        "line-color": "#000000"
+      }
+    },
+ 
+    {
+      "id": "boundaries",
+      "type": "line",
+      "source": "carto",
+      "source-layer": "boundary",
+      "paint": {
+        "line-width": 3,
+        "line-color": "#ffc0cb"
+      }
+    },
+    {
+      "id": "place-labels",
+      "type": "symbol",
+      "source": "carto",
+      "source-layer": "place",
+      "minzoom": 8,
+      "layout": {
+        "text-field": "{name}",
+        "text-size": 12
+      },
+      "paint": {
+        "text-color": "#333333",
+        "text-halo-color": "#ffffff",
+        "text-halo-width": 2
+      }
+    }
+  ]
+}

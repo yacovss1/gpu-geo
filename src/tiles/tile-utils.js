@@ -12,18 +12,18 @@ export function getVisibleTiles(camera, fetchZoom) {
     const displayZoom = camera.zoom;
     const zoomDelta = Math.max(0, displayZoom - fetchZoom);
 
-    // Add extra padding when overzoomed
-    const basePadding = 5;
+    // Minimal padding - only 1-2 tiles beyond viewport
+    const basePadding = 1;
     const overzoomPadding = zoomDelta > 0 ? 
-        Math.min(20, basePadding + Math.floor(zoomDelta * 1.5)) : 
+        Math.min(5, basePadding + Math.floor(zoomDelta * 0.5)) : 
         basePadding;
     
     // Get the viewport bounds
     const viewport = camera.getViewport();
     const scale = 1 << fetchZoom; // 2^zoom
     
-    // Add even more padding when overzoomed to ensure we have enough coverage
-    const paddingFactor = 0.5 + (zoomDelta * 0.1);
+    // MINIMAL viewport padding - NO padding for now to debug
+    const paddingFactor = 0.0; // ZERO padding to see what's happening
     const paddedViewport = {
         left: viewport.left - paddingFactor, 
         right: viewport.right + paddingFactor,
@@ -35,8 +35,8 @@ export function getVisibleTiles(camera, fetchZoom) {
     const topLeftTile = worldToTile(paddedViewport.left, paddedViewport.top, fetchZoom);
     const bottomRightTile = worldToTile(paddedViewport.right, paddedViewport.bottom, fetchZoom);
     
-    // IMPROVED: Much larger padding for tiles to prevent truncation
-    const padding = overzoomPadding; // Use overzoom padding
+    // ZERO padding to debug
+    const padding = 0;
     
     // Calculate Y bounds first
     const minTileY = Math.max(0, Math.floor(Math.min(topLeftTile[1], bottomRightTile[1])) - padding);

@@ -34,7 +34,7 @@ function initCachedShaders(device) {
 }
 
 // Create a standard rendering pipeline for map features
-export function createRenderPipeline(device, format, topology, isHidden = false) {
+export function createRenderPipeline(device, format, topology, isHidden = false, depthBias = 0) {
     initCachedShaders(device);
     
     // Create and cache layout for render pipelines
@@ -83,7 +83,11 @@ export function createRenderPipeline(device, format, topology, isHidden = false)
         depthStencil: {
             format: 'depth24plus',
             depthWriteEnabled: true,
-            depthCompare: 'less'
+            depthCompare: 'less',
+            ...(depthBias !== 0 && topology !== 'line-list' ? {
+                depthBias: depthBias,
+                depthBiasSlopeScale: 1.0
+            } : {})
         }
     });
 }
@@ -214,9 +218,14 @@ export class MapRenderer {
     
     initializePipelines() {
         // Create main rendering pipelines
-        this.pipelines.fill = createRenderPipeline(this.device, this.format, "triangle-list");
-        this.pipelines.outline = createRenderPipeline(this.device, this.format, "line-list");
-        this.pipelines.hidden = createRenderPipeline(this.device, this.format, "triangle-list", true);
+        // Regular fill pipeline - no depth bias for normal rendering
+        this.pipelines.fill = createRenderPipeline(this.device, this.format, "triangle-list", false, 0);
+        // Fill with depth bias - ONLY for fills that have a corresponding extrusion
+        this.pipelines.fillWithBias = createRenderPipeline(this.device, this.format, "triangle-list", false, 100);
+        // Extrusion pipeline without depth bias - renders at true depth
+        this.pipelines.extrusion = createRenderPipeline(this.device, this.format, "triangle-list", false, 0);
+        this.pipelines.outline = createRenderPipeline(this.device, this.format, "line-list", false, 0);
+        this.pipelines.hidden = createRenderPipeline(this.device, this.format, "triangle-list", true, 0);
         this.pipelines.edgeDetection = createEdgeDetectionPipeline(this.device, this.format);
         this.pipelines.debug = createDebugTexturePipeline(this.device, this.format);
     }
@@ -297,19 +306,15 @@ export class MapRenderer {
         this.textureWidth = width;
         this.textureHeight = height;
         
-        if (this.textures.hidden) {
-            this.textures.hidden.destroy();
-        }
+        // Don't explicitly destroy old textures - let WebGPU garbage collect them
+        // when they're no longer referenced. This prevents validation errors when
+        // a resize happens while commands referencing the old textures are in flight.
         
         this.textures.hidden = this.device.createTexture({
             size: [width, height, 1],
             format: this.format,
             usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC | GPUTextureUsage.TEXTURE_BINDING,
         });
-        
-        if (this.textures.color) {
-            this.textures.color.destroy();
-        }
         
         this.textures.color = this.device.createTexture({
             size: [width, height, 1],
@@ -318,10 +323,6 @@ export class MapRenderer {
         });
         
         // Create depth texture for 3D rendering
-        if (this.textures.depth) {
-            this.textures.depth.destroy();
-        }
-        
         this.textures.depth = this.device.createTexture({
             size: [width, height, 1],
             format: 'depth24plus',
@@ -390,12 +391,8 @@ export class MapRenderer {
         // Write the matrix to the uniform buffer
         this.device.queue.writeBuffer(this.buffers.uniform, 0, matrixData);
         
-        // Extract the actual zoom level from the matrix
-        const actualZoom = matrix[5]; 
-        const fetchZoom = Math.min(Math.floor(actualZoom), this.maxFetchZoom || 6);
-        
-        // Update zoom info for shaders
-        this.updateZoomInfo(actualZoom, fetchZoom);
+        // Don't extract zoom from matrix - we don't have camera access here
+        // This function should only update the matrix, zoom info updated elsewhere
     }
     
     // Add a new method to update zoom info

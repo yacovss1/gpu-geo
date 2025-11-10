@@ -77,12 +77,11 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
             l.layout?.visibility !== 'none'
         );
 
-        // Prefer fill-extrusion over fill
-        const activeLayer = extrusionLayer || fillLayer;
+        // Prefer fill-extrusion over fill, then line
+        const activeLayer = extrusionLayer || fillLayer || lineLayer;
         
-        // If no visible fill or extrusion layer found, skip this feature
+        // If no visible layer found, skip this feature silently
         if (!activeLayer) {
-            console.warn('No active layer found for feature, skipping');
             return null;
         }
         
@@ -96,18 +95,13 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
             extrusionBase = baseValue !== undefined ? baseValue : 0;
         }
 
-        // If no visible fill/extrusion layer found, skip this feature
-        if (!activeLayer) {
-            return null;
-        }
-
         // Apply filter if layer has one
         if (activeLayer && activeLayer.filter && !evaluateFilter(activeLayer.filter, feature, zoom)) {
             return null; // Feature filtered out
         }
 
-        // Get paint properties from style
-        if (activeLayer) {
+        // Get paint properties from style based on layer type
+        if (fillLayer || extrusionLayer) {
             const fillColorValue = getPaintProperty(activeLayer.id, 
                 extrusionLayer ? 'fill-extrusion-color' : 'fill-color', 
                 feature, zoom);
@@ -463,10 +457,15 @@ export function setTileSource(config) {
 }
 
 // Completely rewritten for much higher reliability
-export async function fetchVectorTile(x, y, z) {
+export async function fetchVectorTile(x, y, z, abortSignal = null) {
     // Validate tile coordinates
     const scale = 1 << z;
     if (x < 0 || x >= scale || y < 0 || y >= scale) {
+        return null;
+    }
+    
+    // Check if request was aborted
+    if (abortSignal?.aborted) {
         return null;
     }
     
@@ -497,32 +496,19 @@ export async function fetchVectorTile(x, y, z) {
         return null; // Skip after 3 failures
     }
 
+    // Check if request was aborted
+    if (abortSignal?.aborted) {
+        return null;
+    }
+    
     // Check if already fetching
     if (activeFetchingTiles.has(tileKey)) {
-        // For higher zoom levels, don't wait to avoid UI blocking
-        if (z >= 5) return null;
-        
-        // For lower zoom levels, wait a bit
-        try {
-            return await Promise.race([
-                new Promise(resolve => {
-                    setTimeout(() => {
-                        resolve(null); // Timeout after 2 seconds
-                    }, 2000);
-                }),
-                new Promise(resolve => {
-                    const interval = setInterval(() => {
-                        if (!activeFetchingTiles.has(tileKey)) {
-                            clearInterval(interval);
-                            resolve(tileCache.get(tileKey));
-                        }
-                    }, 100);
-                })
-            ]);
-        } catch (e) {
-            console.warn(`Error waiting for tile ${tileKey}:`, e);
-            return null;
-        }
+        return null; // Don't wait for tiles already being fetched
+    }
+    
+    // Check if request was aborted again before starting fetch
+    if (abortSignal?.aborted) {
+        return null;
     }
     
     // Mark as being fetched
@@ -537,18 +523,35 @@ export async function fetchVectorTile(x, y, z) {
     
     // Fetch with a timeout for higher reliability
     const fetchWithTimeout = async (url, options, timeout = 5000) => {
-        return Promise.race([
-            fetch(url, options).catch(err => {
-                // Suppress console errors for 404s as they're expected for sparse tilesets
-                if (!err.message?.includes('404')) {
-                    console.error('Tile fetch error:', err);
-                }
-                throw err;
-            }),
-            new Promise((_, reject) => 
-                setTimeout(() => reject(new Error('Fetch timeout')), timeout)
-            )
-        ]);
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), timeout);
+        
+        try {
+            // Combine abort signals if one was passed in
+            const signal = options.signal 
+                ? combineAbortSignals([options.signal, controller.signal])
+                : controller.signal;
+                
+            const response = await fetch(url, { ...options, signal });
+            clearTimeout(timeoutId);
+            return response;
+        } catch (err) {
+            clearTimeout(timeoutId);
+            throw err;
+        }
+    };
+    
+    // Helper to combine multiple abort signals
+    const combineAbortSignals = (signals) => {
+        const controller = new AbortController();
+        for (const signal of signals) {
+            if (signal.aborted) {
+                controller.abort();
+                break;
+            }
+            signal.addEventListener('abort', () => controller.abort());
+        }
+        return controller.signal;
     };
     
     try {
@@ -561,7 +564,8 @@ export async function fetchVectorTile(x, y, z) {
         const response = await fetchWithTimeout(url, {
             method: 'GET',
             cache: 'force-cache', // Use browser cache aggressively
-            headers: { 'Accept': 'application/x-protobuf' }
+            headers: { 'Accept': 'application/x-protobuf' },
+            signal: abortSignal // Will be combined with timeout signal
         }, tileSourceConfig.timeout);
 
         if (!response.ok) {
@@ -596,6 +600,12 @@ export async function fetchVectorTile(x, y, z) {
             throw new Error("Tile has no layers");
         }
     } catch (err) {
+        // Handle abort errors silently
+        if (err.name === 'AbortError' || abortSignal?.aborted) {
+            activeFetchingTiles.delete(tileKey);
+            return null;
+        }
+        
         // If it's a 404, mark as permanently not found
         if (err.message.includes('404')) {
             notFoundTiles.add(tileKey);

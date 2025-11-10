@@ -3,7 +3,7 @@ import { Camera } from './src/core/camera.js';
 import { MapRenderer } from './src/rendering/renderer.js';
 import { parseGeoJSONFeature, fetchVectorTile, clearTileCache, resetNotFoundTiles, setTileSource } from './src/tiles/geojson.js';
 import { batchParseGeoJSONFeaturesGPU } from './src/tiles/geojsonGPU.js';
-import { getStyle, setStyle, setLayerVisibility, getLayerVisibility } from './src/core/style.js';
+import { getStyle, setStyle, setLayerVisibility, getLayerVisibility, getLayer } from './src/core/style.js';
 import { setupEventListeners } from './src/core/events.js';
 import { getVisibleTiles } from './src/tiles/tile-utils.js'; 
 import { createMarkerPipeline } from './src/rendering/markerPipeline.js';
@@ -307,6 +307,22 @@ window.clearCache = () => {
 let lastLoggedZoom = -1;
 let frameCount = 0;
 
+// Helper function to check if layer should render at current zoom
+function shouldRenderLayer(layerId, zoom) {
+    if (!getLayerVisibility(layerId)) return false;
+    
+    const layer = getLayer(layerId);
+    if (!layer) return false;
+    
+    // Check minzoom
+    if (layer.minzoom !== undefined && zoom < layer.minzoom) return false;
+    
+    // Check maxzoom
+    if (layer.maxzoom !== undefined && zoom > layer.maxzoom) return false;
+    
+    return true;
+}
+
 async function main() {
     // Initialize document and canvas
     document.body.style.margin = "0";
@@ -327,7 +343,8 @@ async function main() {
     // Initialize renderer and camera
     const renderer = new MapRenderer(device, context, format);
     const camera = new Camera(canvas.width, canvas.height);
-    camera.zoom = 2; // Start at zoom 2 so labels are visible (countries-label minzoom: 2)
+    camera.position = [0, 0]; // Center at origin
+    camera.zoom = 1;
     
     // Handle window resize
     window.addEventListener('resize', () => {
@@ -379,7 +396,9 @@ async function main() {
 
     // Load the official MapLibre style from the demotiles server
     try {
-        await window.mapStyle.loadStyleFromURL('https://demotiles.maplibre.org/style.json');
+        //simple demo tiles for label display//
+        //await window.mapStyle.loadStyleFromURL('https://demotiles.maplibre.org/style.json')
+        await window.mapStyle.loadStyleFromURL('./carto-style.json');
         console.log('✅ MapLibre style loaded successfully');
     } catch (error) {
         console.warn('⚠️ Could not load style, using default colors:', error.message);
@@ -401,7 +420,39 @@ async function main() {
     } = initMarkerResources(device, format, canvas, camera);
 
     // Handle zoom events for loading tiles
+    let lastFetchZoom = -1;
+    let currentAbortController = null; // Track ongoing fetch requests
+    let isTileLoadInProgress = false; // Track if tile loading is in progress
+    
+    // Abort ongoing requests when actively zooming
+    camera.addEventListener('zoom', () => {
+        if (currentAbortController && !isTileLoadInProgress) {
+            currentAbortController.abort();
+            console.log('🛑 Cancelled tile requests due to zoom');
+            currentAbortController = null;
+        }
+    });
+    
     camera.addEventListener('zoomend', async (event) => {
+        // Skip if already loading tiles
+        if (isTileLoadInProgress) {
+            console.log('⏭️ Skipping tile load - already in progress');
+            // But still abort the previous one
+            if (currentAbortController) {
+                currentAbortController.abort();
+                console.log('🛑 Aborting previous in-progress tile load');
+            }
+            return;
+        }
+        
+        // Cancel any ongoing tile fetches (in case zoom event didn't fire)
+        if (currentAbortController) {
+            currentAbortController.abort();
+            console.log('🛑 Cancelled previous tile requests (zoomend)');
+        }
+        currentAbortController = new AbortController();
+        console.log('✅ Created new AbortController for tile fetch');
+        
         // Extract both zoom levels properly
         const displayZoom = camera.zoom;
         let fetchZoom = event.detail?.fetchZoom || Math.min(displayZoom, camera.maxFetchZoom);
@@ -416,11 +467,32 @@ async function main() {
             }
         }
         
+        // If fetch zoom changed (by even 1 level), mark that we should clear after loading
+        let shouldClearOldTiles = false; // DISABLED
+        if (lastFetchZoom !== -1 && fetchZoom !== lastFetchZoom) {
+            console.log(`� Zoom changed ${lastFetchZoom} → ${fetchZoom}, will replace tiles`);
+            shouldClearOldTiles = false; // DISABLED
+            // clearTileCache(); // DISABLED
+            // Reset logging flags
+            window._parsedLogged = false;
+            window._lineBufferLogged = false;
+            window._zoomFilterLogged = false;
+            window._renderLogged = false;
+            window._lineDrawLogged = false;
+            window._totalLineDrawLogged = false;
+            window._tileLayersLogged = false;
+        }
+        lastFetchZoom = fetchZoom;
+        
         // Always update the renderer with both zoom levels
         renderer.updateZoomInfo(camera.zoom, fetchZoom);
         
         // Get visible tiles for the fetch zoom level only
         const visibleTiles = getVisibleTiles(camera, fetchZoom);
+        
+        const viewport = camera.getViewport();
+        console.log(`🔍 Zoom ${displayZoom.toFixed(1)}, fetch ${fetchZoom}, visibleTiles: ${visibleTiles.length}`);
+        console.log(`👁️ Viewport: X [${viewport.left.toFixed(3)}, ${viewport.right.toFixed(3)}], Y [${viewport.bottom.toFixed(3)}, ${viewport.top.toFixed(3)}]`);
         
         if (visibleTiles.length === 0) {
             return;
@@ -457,13 +529,42 @@ async function main() {
                 // Load tiles in larger batches for better throughput
                 const batchSize = 16;  // Increased batch size for faster loading
                 for (let i = 0; i < tilesToFetch.length; i += batchSize) {
+                    // Check if aborted before starting each batch
+                    if (currentAbortController.signal.aborted) {
+                        console.log('🛑 Batch loading cancelled');
+                        break;
+                    }
                     const batch = tilesToFetch.slice(i, i + batchSize);
-                    await loadVisibleTiles(batch, device, newTileBuffers, newHiddenTileBuffers);
+                    await loadVisibleTiles(batch, device, newTileBuffers, newHiddenTileBuffers, currentAbortController.signal);
+                }
+                
+                // Check if aborted before adding new tiles
+                if (currentAbortController.signal.aborted) {
+                    console.log('🛑 Skipping buffer update - request was aborted');
+                    return;
                 }
                 
                 // Only add new tiles, never clear existing tiles unless explicitly requested
                 // This ensures we always have full coverage even if some tiles fail to load
                 if (newTileBuffers.size > 0) {
+                    // SMART CLEARING: Remove tiles from wrong zoom levels only
+                    if (shouldClearOldTiles && lastFetchZoom !== fetchZoom) {
+                        console.log(`🗑️ Removing tiles from old zoom ${lastFetchZoom}, keeping zoom ${fetchZoom}`);
+                        // Filter out tiles that aren't at current fetchZoom
+                        for (const [layerId, buffers] of tileBuffers) {
+                            const filtered = buffers.filter(tile => tile.zoomLevel === fetchZoom);
+                            if (filtered.length !== buffers.length) {
+                                console.log(`  Layer ${layerId}: ${buffers.length} → ${filtered.length} tiles`);
+                                tileBuffers.set(layerId, filtered);
+                            }
+                        }
+                        // Same for hidden buffers
+                        for (const [layerId, buffers] of hiddenTileBuffers) {
+                            const filtered = buffers.filter(tile => tile.zoomLevel === fetchZoom);
+                            hiddenTileBuffers.set(layerId, filtered);
+                        }
+                    }
+                    
                     // Merge new layer-grouped buffers into existing buffers
                     for (const [layerId, buffers] of newTileBuffers) {
                         if (!tileBuffers.has(layerId)) {
@@ -480,7 +581,15 @@ async function main() {
                     }
                 }
             } catch (error) {
+                // Silently ignore aborted requests
+                if (error.name === 'AbortError') {
+                    console.log('🛑 Tile loading aborted');
+                    return;
+                }
                 // Error loading tiles - keep existing tiles
+                console.warn('Error loading tiles:', error);
+            } finally {
+                isTileLoadInProgress = false; // Clear loading flag
             }
         } else {
             // No new tiles to fetch
@@ -489,6 +598,19 @@ async function main() {
 
     // Pan handler with strict throttling and debouncing
     camera.addEventListener('pan', () => {
+        // Immediately abort ongoing tile requests when panning starts
+        if (currentAbortController) {
+            currentAbortController.abort();
+            console.log('🛑 Cancelled tile requests due to pan');
+            currentAbortController = null; // Clear it so we don't double-abort
+        }
+        
+        // Clear any pending pan trigger
+        if (camera.panTriggerTimeout) {
+            clearTimeout(camera.panTriggerTimeout);
+            camera.panTriggerTimeout = null;
+        }
+        
         // Track time to prevent excessive triggers
         const now = performance.now();
         if (camera.lastPanTime && (now - camera.lastPanTime < 500)) {
@@ -514,7 +636,7 @@ async function main() {
             camera.panTriggerTimeout = setTimeout(() => {
                 camera.triggerEvent('zoomend');
                 camera.panTriggerTimeout = null;
-            }, 250); // Wait 250ms to trigger tile fetch
+            }, 500); // Wait 500ms after pan stops before fetching tiles
         }
     });
 
@@ -549,51 +671,65 @@ async function main() {
         // MUST submit map first so hidden texture is populated before compute reads it
         device.queue.submit([mapEncoder.finish()]);
         
-        // Compute marker positions (submits 3 passes internally, reads from hidden texture)
-        createComputeMarkerEncoder(
-            device, 
-            renderer,
-            accumulatorPipeline,
-            quadrantPipeline,
-            centerPipeline, 
-            accumulatorBuffer,
-            quadrantBuffer,
-            markerBuffer, 
-            dimsBuffer, 
-            canvas,
-            regionsBuffer
-        );
+        // Only compute markers/labels at zoom 4+ to avoid GPU overload
+        if (camera.zoom >= 4) {
+            // Compute marker positions (submits 3 passes internally, reads from hidden texture)
+            createComputeMarkerEncoder(
+                device, 
+                renderer,
+                accumulatorPipeline,
+                quadrantPipeline,
+                centerPipeline, 
+                accumulatorBuffer,
+                quadrantBuffer,
+                markerBuffer, 
+                dimsBuffer, 
+                canvas,
+                regionsBuffer
+            );
+        }
         
         // Create encoder for marker and label render passes
         const overlayEncoder = device.createCommandEncoder();
         
-        // Render markers
-        renderMarkersToEncoder(overlayEncoder, textureView, device, markerPipeline, markerBindGroup, markerBuffer);
-        
-        // Render labels using cached positions from PREVIOUS frame
-        // (One frame delay is acceptable - labels will catch up)
-        if (markerPositionCache) {
-            //renderLabelsToEncoder(overlayEncoder, textureView, textRenderer, tileBuffers, markerPositionCache, camera);
+        // Only render markers/labels at zoom 4+
+        if (camera.zoom >= 4) {
+            // Render markers
+            renderMarkersToEncoder(overlayEncoder, textureView, device, markerPipeline, markerBindGroup, markerBuffer);
+            
+            // Render labels using cached positions from PREVIOUS frame
+            // (One frame delay is acceptable - labels will catch up)
+            if (markerPositionCache) {
+                //renderLabelsToEncoder(overlayEncoder, textureView, textRenderer, tileBuffers, markerPositionCache, camera);
+            }
+            
+            // NEW: Render labels directly from GPU marker buffer
+            const featureNames = buildFeatureNameMap(tileBuffers);
+            if (!window._labelDebugLogged) {
+                console.log('📝 Feature names map size:', featureNames.size);
+                if (featureNames.size > 0) {
+                    const firstEntry = Array.from(featureNames.entries())[0];
+                    console.log('📝 First feature:', firstEntry);
+                }
+                window._labelDebugLogged = true;
+            }
+            
+            // Create bind group for marker buffer (same as markers use at group 1)
+            const markerDataBindGroup = device.createBindGroup({
+                layout: markerPipeline.getBindGroupLayout(1),
+                entries: [{ binding: 0, resource: { buffer: markerBuffer } }]
+            });
+            
+            // Get source ID from style (use first vector source)
+            const style = getStyle();
+            const sourceId = style && style.sources ? Object.keys(style.sources).find(key => style.sources[key].type === 'vector') : null;
+            
+            // Upload label data to GPU
+            textRenderer.uploadLabelData(featureNames, camera, sourceId);
+            
+            // Render all labels in one GPU call
+            textRenderer.render(overlayEncoder, textureView, markerBuffer);
         }
-        
-        // NEW: Render labels directly from GPU marker buffer
-        const featureNames = buildFeatureNameMap(tileBuffers);
-        
-        // Create bind group for marker buffer (same as markers use at group 1)
-        const markerDataBindGroup = device.createBindGroup({
-            layout: markerPipeline.getBindGroupLayout(1),
-            entries: [{ binding: 0, resource: { buffer: markerBuffer } }]
-        });
-        
-        // Get source ID from style (use first vector source)
-        const style = getStyle();
-        const sourceId = style && style.sources ? Object.keys(style.sources).find(key => style.sources[key].type === 'vector') : null;
-        
-        // Upload label data to GPU
-        textRenderer.uploadLabelData(featureNames, camera, sourceId);
-        
-        // Render all labels in one GPU call
-        textRenderer.render(overlayEncoder, textureView, markerBuffer);
         
         // Submit overlay rendering (map and compute already submitted)
         device.queue.submit([overlayEncoder.finish()]);
@@ -704,19 +840,42 @@ function initMarkerResources(device, format, canvas, camera) {
 }
 
 // Load all visible tiles with GPU-accelerated coordinate transformation
-async function loadVisibleTiles(visibleTiles, device, newTileBuffers, newHiddenTileBuffers) {
+async function loadVisibleTiles(visibleTiles, device, newTileBuffers, newHiddenTileBuffers, abortSignal = null) {
     console.log('🔍 loadVisibleTiles called with', visibleTiles.length, 'tiles');
     const tilePromises = visibleTiles.map(async (tile) => {
         const { x, y, z } = tile;
         try {
-            const vectorTile = await fetchVectorTile(x, y, z);
+            // Check if aborted before starting
+            if (abortSignal?.aborted) {
+                return;
+            }
+            
+            const vectorTile = await fetchVectorTile(x, y, z, abortSignal);
+            
+            // Check if aborted after fetch
+            if (abortSignal?.aborted) {
+                return;
+            }
+            
             if (!vectorTile || !vectorTile.layers) {
                 console.warn(`⚠️ No layers in tile ${z}/${x}/${y}`);
                 return;
             }
             
+            // Removed verbose tile rendering logs
+            
+            if (z >= 14 && !window._tileLayersLogged) {
+                console.log(`📦 Tile ${z}/${x}/${y} layers:`, Object.keys(vectorTile.layers));
+                window._tileLayersLogged = true;
+            }
+            
             // Process each layer
             for (const layerName in vectorTile.layers) {
+                // Check if aborted before processing each layer
+                if (abortSignal?.aborted) {
+                    return;
+                }
+                
                 const layer = vectorTile.layers[layerName];
                 
                 // Collect all features from this layer for batch processing
@@ -724,6 +883,26 @@ async function loadVisibleTiles(visibleTiles, device, newTileBuffers, newHiddenT
                 for (let i = 0; i < layer.length; i++) {
                     const feature = layer.feature(i).toGeoJSON(x, y, z);
                     features.push(feature);
+                }
+                
+                // Debug: log coordinate range for first feature
+                if (features.length > 0 && !window._coordRangeLogged) {
+                    const firstFeature = features[0];
+                    if (firstFeature.geometry && firstFeature.geometry.coordinates) {
+                        const coords = firstFeature.geometry.coordinates;
+                        let flatCoords = [];
+                        const flatten = (c) => {
+                            if (typeof c[0] === 'number') flatCoords.push(c);
+                            else c.forEach(flatten);
+                        };
+                        flatten(coords);
+                        if (flatCoords.length > 0) {
+                            const lons = flatCoords.map(c => c[0]);
+                            const lats = flatCoords.map(c => c[1]);
+                            console.log(`📍 Tile ${z}/${x}/${y} coordinate range: lon [${Math.min(...lons).toFixed(2)}, ${Math.max(...lons).toFixed(2)}], lat [${Math.min(...lats).toFixed(2)}, ${Math.max(...lats).toFixed(2)}]`);
+                            window._coordRangeLogged = true;
+                        }
+                    }
                 }
                 
                 // IMPORTANT: Set layer name on ALL features BEFORE GPU processing
@@ -734,9 +913,14 @@ async function loadVisibleTiles(visibleTiles, device, newTileBuffers, newHiddenT
                 
                 if (features.length === 0) continue;
 
+                // Check if aborted before processing features
+                if (abortSignal?.aborted) {
+                    return;
+                }
+
                 let parsedFeatures = [];
                 const parseStartTime = performance.now();
-                  if (PERFORMANCE_STATS.gpuEnabled) {
+                if (PERFORMANCE_STATS.gpuEnabled) {
                     // Use GPU batch processing for coordinate transformation
                     const currentStyle = getStyle();
                     const sourceId = currentStyle ? Object.keys(currentStyle.sources)[0] : null;
@@ -779,7 +963,28 @@ async function loadVisibleTiles(visibleTiles, device, newTileBuffers, newHiddenT
                     PERFORMANCE_STATS.cpuFeatureCount += features.length;
                 }
                 
+                // Check if aborted after parsing
+                if (abortSignal?.aborted) {
+                    return;
+                }
+                
                 PERFORMANCE_STATS.totalCoordinatesProcessed += features.length;
+                
+                if (!window._parsedCount) window._parsedCount = 0;
+                window._parsedCount += parsedFeatures.length;
+                if (parsedFeatures.length > 0 && !window._parsedLogged) {
+                    const lineFeatures = parsedFeatures.filter(f => f.isLine);
+                    const fillFeatures = parsedFeatures.filter(f => f.isFilled);
+                    console.log(`✅ Parsed ${parsedFeatures.length} features from ${layerName}`);
+                    console.log(`   Lines: ${lineFeatures.length}, Fills: ${fillFeatures.length}`);
+                    if (lineFeatures.length > 0) {
+                        console.log('First line feature:', {
+                            vertices: lineFeatures[0]?.vertices?.slice(0, 21),
+                            outlineIndices: lineFeatures[0]?.outlineIndices?.slice(0, 9)
+                        });
+                    }
+                    window._parsedLogged = true;
+                }
                 
                 // Create buffers for each parsed feature, grouped by layer
                 parsedFeatures.forEach(parsedFeature => {
@@ -790,10 +995,25 @@ async function loadVisibleTiles(visibleTiles, device, newTileBuffers, newHiddenT
                     
                     if (vertices.length === 0 || (fillIndices.length === 0 && outlineIndices.length === 0)) {
                         if (!window._emptyGeomLogged) {
-                            console.log('⚠️ EMPTY GEOMETRY:', { verts: vertices.length, fillIdx: fillIndices.length, outIdx: outlineIndices.length });
+                            console.log('⚠️ EMPTY GEOMETRY:', { 
+                                verts: vertices.length, 
+                                fillIdx: fillIndices.length, 
+                                outIdx: outlineIndices.length,
+                                isLine,
+                                layerId 
+                            });
                             window._emptyGeomLogged = true;
                         }
                         return;
+                    }
+                    
+                    if (isLine && !window._lineBufferLogged) {
+                        console.log('📏 Creating LINE buffer:', {
+                            layerId,
+                            vertices: vertices.length,
+                            outlineIndices: outlineIndices.length
+                        });
+                        window._lineBufferLogged = true;
                     }
                     
                     createAndAddBuffers(
@@ -816,11 +1036,51 @@ async function loadVisibleTiles(visibleTiles, device, newTileBuffers, newHiddenT
                 });
             }
         } catch (err) {
-            console.warn(`Error loading tile ${z}/${x}/${y}:`, err);
+            // Don't log errors if aborted
+            if (!abortSignal?.aborted) {
+                console.warn(`Error loading tile ${z}/${x}/${y}:`, err);
+            }
         }
     });
     
-    await Promise.all(tilePromises);
+    // Check if aborted before processing results
+    if (abortSignal?.aborted) {
+        console.log('🛑 Tile loading aborted before starting');
+        return;
+    }
+    
+    // Create an abort promise that rejects when the signal is aborted
+    const abortPromise = abortSignal ? new Promise((_, reject) => {
+        if (abortSignal.aborted) {
+            reject(new Error('Aborted'));
+        } else {
+            abortSignal.addEventListener('abort', () => reject(new Error('Aborted')));
+        }
+    }) : null;
+    
+    try {
+        if (abortPromise) {
+            // Race between tile loading and abort signal
+            await Promise.race([
+                Promise.allSettled(tilePromises),
+                abortPromise
+            ]);
+        } else {
+            await Promise.allSettled(tilePromises);
+        }
+    } catch (err) {
+        if (err.message === 'Aborted') {
+            console.log('🛑 Tile loading aborted during fetch');
+            return;
+        }
+        throw err;
+    }
+    
+    // Final check if aborted after loading
+    if (abortSignal?.aborted) {
+        console.log('🛑 Tile loading aborted after fetch');
+        return;
+    }
 }
 
 // Function to log and compare performance statistics
@@ -858,6 +1118,20 @@ function alignBufferSize(size) {
     return Math.max(4, Math.ceil(size / 4) * 4);
 }
 
+// Helper to pad typed array to aligned size
+function padToAlignment(typedArray) {
+    const alignedSize = alignBufferSize(typedArray.byteLength);
+    if (typedArray.byteLength === alignedSize) {
+        return typedArray;
+    }
+    // Create new array with padded size
+    const Constructor = typedArray.constructor;
+    const elementsPerByte = typedArray.BYTES_PER_ELEMENT;
+    const paddedArray = new Constructor(alignedSize / elementsPerByte);
+    paddedArray.set(typedArray);
+    return paddedArray;
+}
+
 // Create and add buffers for a feature
 function createAndAddBuffers(
     device,
@@ -881,32 +1155,32 @@ function createAndAddBuffers(
         size: alignBufferSize(vertices.byteLength),
         usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
     });
-    device.queue.writeBuffer(vertexBuffer, 0, vertices);
+    device.queue.writeBuffer(vertexBuffer, 0, padToAlignment(vertices));
     
     const hiddenVertexBuffer = device.createBuffer({
         size: alignBufferSize(hiddenVertices.byteLength),
         usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
     });
-    device.queue.writeBuffer(hiddenVertexBuffer, 0, hiddenVertices);
+    device.queue.writeBuffer(hiddenVertexBuffer, 0, padToAlignment(hiddenVertices));
     
     // Create index buffers (already Uint32Array from parsing)
     const fillIndexBuffer = device.createBuffer({
         size: alignBufferSize(fillIndices.byteLength),
         usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
     });
-    device.queue.writeBuffer(fillIndexBuffer, 0, fillIndices);
+    device.queue.writeBuffer(fillIndexBuffer, 0, padToAlignment(fillIndices));
     
     const outlineIndexBuffer = device.createBuffer({
         size: alignBufferSize(outlineIndices.byteLength),
         usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
     });
-    device.queue.writeBuffer(outlineIndexBuffer, 0, outlineIndices);
+    device.queue.writeBuffer(outlineIndexBuffer, 0, padToAlignment(outlineIndices));
     
     const hiddenFillIndexBuffer = device.createBuffer({
         size: alignBufferSize(hiddenfillIndices.byteLength),
         usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
     });
-    device.queue.writeBuffer(hiddenFillIndexBuffer, 0, hiddenfillIndices);
+    device.queue.writeBuffer(hiddenFillIndexBuffer, 0, padToAlignment(hiddenfillIndices));
     
     // Add to tile buffers grouped by layer
     if (!newTileBuffers.has(layerId)) {
@@ -966,9 +1240,32 @@ function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, textureView
     });
     
     // Render hidden buffers layer by layer
+    if (!window._renderLogged) {
+        console.log('🎨 Render buffers:', {
+            hiddenLayers: Array.from(hiddenTileBuffers.keys()),
+            hiddenCount: Array.from(hiddenTileBuffers.values()).reduce((sum, arr) => sum + arr.length, 0),
+            visibleLayers: Array.from(tileBuffers.keys()),
+            visibleCount: Array.from(tileBuffers.values()).reduce((sum, arr) => sum + arr.length, 0)
+        });
+        window._renderLogged = true;
+    }
+    
+    const renderZoom = camera.zoom;
+    
+    if (!window._zoomFilterLogged) {
+        console.log(`🔍 Render zoom: ${renderZoom.toFixed(2)}`);
+        console.log('Layer checks:');
+        for (const [layerId] of tileBuffers) {
+            const shouldRender = shouldRenderLayer(layerId, renderZoom);
+            const layer = getLayer(layerId);
+            console.log(`  ${layerId}: ${shouldRender ? '✅' : '❌'} (minzoom: ${layer?.minzoom || 0}, maxzoom: ${layer?.maxzoom || 24})`);
+        }
+        window._zoomFilterLogged = true;
+    }
+    
     for (const [layerId, buffers] of hiddenTileBuffers) {
-        // Check layer visibility
-        if (!getLayerVisibility(layerId)) continue;
+        // Check layer visibility and zoom range
+        if (!shouldRenderLayer(layerId, renderZoom)) continue;
         
         buffers.forEach(({ vertexBuffer, hiddenFillIndexBuffer, hiddenfillIndexCount }) => {
             if (hiddenfillIndexCount > 0) {
@@ -999,14 +1296,39 @@ function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, textureView
         }
     });
     
-    // Render fills layer by layer
+    // Get style to check for extrusion layers
+    const style = getStyle();
+    const extrusionLayers = style?.layers?.filter(l => l.type === 'fill-extrusion').map(l => l.id) || [];
+    
+    // Check which fills have corresponding extrusions (need depth bias)
+    const fillsWithExtrusions = new Set();
+    if (style?.layers) {
+        for (const extrusionLayer of style.layers.filter(l => l.type === 'fill-extrusion')) {
+            // Find matching fill layers with same source/source-layer/filter
+            const matchingFills = style.layers.filter(l => 
+                l.type === 'fill' &&
+                l.source === extrusionLayer.source &&
+                l['source-layer'] === extrusionLayer['source-layer']
+            );
+            matchingFills.forEach(f => fillsWithExtrusions.add(f.id));
+        }
+    }
+    
+    // Render fills first
     for (const [layerId, buffers] of tileBuffers) {
-        // Check layer visibility
-        if (!getLayerVisibility(layerId)) continue;
+        // Skip extrusion layers in this pass
+        if (extrusionLayers.includes(layerId)) continue;
+        
+        // Check layer visibility and zoom range
+        if (!shouldRenderLayer(layerId, renderZoom)) continue;
+        
+        // Use biased pipeline only if this fill has a corresponding extrusion
+        const useBias = fillsWithExtrusions.has(layerId);
+        const pipeline = useBias ? renderer.pipelines.fillWithBias : renderer.pipelines.fill;
         
         buffers.forEach(({ vertexBuffer, fillIndexBuffer, fillIndexCount }) => {
             if (fillIndexCount > 0) {
-                colorPass.setPipeline(renderer.pipelines.fill);
+                colorPass.setPipeline(pipeline);
                 colorPass.setVertexBuffer(0, vertexBuffer);
                 colorPass.setIndexBuffer(fillIndexBuffer, "uint32");
                 colorPass.setBindGroup(0, renderer.bindGroups.main);
@@ -1015,20 +1337,57 @@ function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, textureView
         });
     }
     
-    // Draw outlines (borders) after fills, layer by layer
+    // Render extrusions second (no depth bias - true depth)
     for (const [layerId, buffers] of tileBuffers) {
-        // Check layer visibility
-        if (!getLayerVisibility(layerId)) continue;
+        // Only render if this is an extrusion layer
+        if (!extrusionLayers.includes(layerId)) continue;
         
-        buffers.forEach(({ vertexBuffer, outlineIndexBuffer, outlineIndexCount }) => {
-            if (outlineIndexCount > 0) {
-                colorPass.setPipeline(renderer.pipelines.outline);
+        // Check layer visibility and zoom range
+        if (!shouldRenderLayer(layerId, renderZoom)) continue;
+        
+        buffers.forEach(({ vertexBuffer, fillIndexBuffer, fillIndexCount }) => {
+            if (fillIndexCount > 0) {
+                colorPass.setPipeline(renderer.pipelines.extrusion);
                 colorPass.setVertexBuffer(0, vertexBuffer);
-                colorPass.setIndexBuffer(outlineIndexBuffer, "uint32");
+                colorPass.setIndexBuffer(fillIndexBuffer, "uint32");
                 colorPass.setBindGroup(0, renderer.bindGroups.main);
-                colorPass.drawIndexed(outlineIndexCount);
+                colorPass.drawIndexed(fillIndexCount);
             }
         });
+    }
+    
+    // Draw outlines (borders) and lines after fills and extrusions
+    let lineDrawCount = 0;
+    for (const [layerId, buffers] of tileBuffers) {
+        // Check layer visibility and zoom range
+        if (!shouldRenderLayer(layerId, renderZoom)) continue;
+        
+        buffers.forEach(({ vertexBuffer, fillIndexBuffer, fillIndexCount, outlineIndexBuffer, outlineIndexCount, isLine }) => {
+            // Lines are now tessellated as triangles, so they use fillIndexBuffer
+            if (isLine && fillIndexCount > 0) {
+                lineDrawCount++;
+                colorPass.setPipeline(renderer.pipelines.fill);
+                colorPass.setVertexBuffer(0, vertexBuffer);
+                colorPass.setIndexBuffer(fillIndexBuffer, "uint32");
+                colorPass.setBindGroup(0, renderer.bindGroups.main);
+                colorPass.drawIndexed(fillIndexCount);
+            }
+            // Polygon outlines disabled - they interfere with line rendering
+            // To enable: uncomment this block
+            // else if (!isLine && outlineIndexCount > 0) {
+            //     lineDrawCount++;
+            //     colorPass.setPipeline(renderer.pipelines.outline);
+            //     colorPass.setVertexBuffer(0, vertexBuffer);
+            //     colorPass.setIndexBuffer(outlineIndexBuffer, "uint32");
+            //     colorPass.setBindGroup(0, renderer.bindGroups.main);
+            //     colorPass.drawIndexed(outlineIndexCount);
+            // }
+        });
+    }
+    
+    if (!window._totalLineDrawLogged && lineDrawCount > 0) {
+        console.log(`🎨 Drew ${lineDrawCount} line/outline buffers`);
+        window._totalLineDrawLogged = true;
     }
     
     colorPass.end();
@@ -1166,9 +1525,10 @@ function renderMarkersToEncoder(
          0.0, -0.5   // Bottom point (pointing down)
     ]);
     
+    const bufferSize = Math.max(256, triangleData.byteLength); // Minimum 256 bytes
     const triangleBuffer = device.createBuffer({
-        size: triangleData.byteLength,
-        usage: GPUBufferUsage.VERTEX,
+        size: bufferSize,
+        usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
         mappedAtCreation: true
     });
     new Float32Array(triangleBuffer.getMappedRange()).set(triangleData);
@@ -1204,10 +1564,10 @@ function buildFeatureNameMap(tileBuffers) {
         for (const tileBuffer of buffers) {
             if (!tileBuffer.properties) continue;
             const clampedFid = tileBuffer.properties.clampedFid;
-            const name = tileBuffer.properties.NAME || tileBuffer.properties.ADM0_A3 || tileBuffer.properties.ISO_A3;
+            const name = tileBuffer.properties.NAME || tileBuffer.properties.name || tileBuffer.properties.ADM0_A3 || tileBuffer.properties.ISO_A3;
             const sourceLayer = tileBuffer.properties.sourceLayer;
             if (clampedFid && name) {
-                featureNames.set(clampedFid, { name, sourceLayer });
+                featureNames.set(clampedFid, { name, sourceLayer, properties: tileBuffer.properties });
             }
         }
     }

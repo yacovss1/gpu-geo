@@ -5,6 +5,7 @@ import { hexToRgb } from '../core/utils.js';
 import { getColorOfCountries } from '../core/utils.js';
 import { getGlobalCoordinateTransformer } from '../core/coordinateGPU.js';
 import earcut from 'earcut';
+import { tessellateLine, screenWidthToWorld } from './line-tessellation.js';
 import { 
     getStyle, 
     getFeatureId as getStyleFeatureId, 
@@ -323,20 +324,106 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
         case 'LineString':
             isFilled = false;
             isLine = true;
-            const lineStartIndex = coordsToVertices(feature.geometry.coordinates, _borderColor, fillVertices);
-            for (let i = 0; i < feature.geometry.coordinates.length - 1; i++) {
-                outlineIndices.push(lineStartIndex + i, lineStartIndex + i + 1);
+            
+            // Get line width from style (default 1px if not specified)
+            let lineWidth = 1;
+            let lineCap = 'butt';
+            let lineJoin = 'miter';
+            let miterLimit = 2;
+            
+            if (style && sourceId) {
+                const layers = getLayersBySource(sourceId);
+                const lineLayer = layers.find(l => 
+                    l.type === 'line' && 
+                    (!l['source-layer'] || l['source-layer'] === feature.layer?.name)
+                );
+                
+                if (lineLayer) {
+                    const widthValue = getPaintProperty(lineLayer.id, 'line-width', feature, zoom);
+                    lineWidth = typeof widthValue === 'number' ? widthValue : 1;
+                    lineCap = lineLayer.layout?.['line-cap'] || 'butt';
+                    lineJoin = lineLayer.layout?.['line-join'] || 'miter';
+                    miterLimit = lineLayer.layout?.['line-miter-limit'] || 2;
+                }
             }
+            
+            // Transform coordinates to screen space
+            const transformedLineCoords = feature.geometry.coordinates.map(coord => getTransformedCoord(coord));
+            
+            // Convert line width from pixels to world space
+            const worldWidth = screenWidthToWorld(lineWidth, zoom, 512);
+            
+            // Tessellate line into triangles
+            const tessellated = tessellateLine(transformedLineCoords, worldWidth, lineCap, lineJoin, miterLimit);
+            
+            // Add tessellated vertices and indices
+            const lineStartIndex = fillVertices.length / 7;
+            for (let i = 0; i < tessellated.vertices.length; i += 2) {
+                fillVertices.push(
+                    tessellated.vertices[i],     // x
+                    tessellated.vertices[i + 1], // y
+                    0.0,                          // z
+                    ..._borderColor               // color
+                );
+            }
+            
+            // Add triangle indices (lines now render as filled triangles)
+            tessellated.indices.forEach(idx => {
+                fillIndices.push(lineStartIndex + idx);
+            });
             break;
             
         case 'MultiLineString':
             isFilled = false;
             isLine = true;
-            feature.geometry.coordinates.forEach(line => {
-                const lineStartIndex = coordsToVertices(line, _borderColor, fillVertices);
-                for (let i = 0; i < line.length - 1; i++) {
-                    outlineIndices.push(lineStartIndex + i, lineStartIndex + i + 1);
+            
+            // Get line width from style (default 1px if not specified)
+            let multiLineWidth = 1;
+            let multiLineCap = 'butt';
+            let multiLineJoin = 'miter';
+            let multiMiterLimit = 2;
+            
+            if (style && sourceId) {
+                const layers = getLayersBySource(sourceId);
+                const lineLayer = layers.find(l => 
+                    l.type === 'line' && 
+                    (!l['source-layer'] || l['source-layer'] === feature.layer?.name)
+                );
+                
+                if (lineLayer) {
+                    const widthValue = getPaintProperty(lineLayer.id, 'line-width', feature, zoom);
+                    multiLineWidth = typeof widthValue === 'number' ? widthValue : 1;
+                    multiLineCap = lineLayer.layout?.['line-cap'] || 'butt';
+                    multiLineJoin = lineLayer.layout?.['line-join'] || 'miter';
+                    multiMiterLimit = lineLayer.layout?.['line-miter-limit'] || 2;
                 }
+            }
+            
+            feature.geometry.coordinates.forEach(line => {
+                // Transform coordinates to screen space
+                const transformedLineCoords = line.map(coord => getTransformedCoord(coord));
+                
+                // Convert line width from pixels to world space
+                const worldWidth = screenWidthToWorld(multiLineWidth, zoom, 512);
+                
+                // Tessellate line into triangles
+                const tessellated = tessellateLine(transformedLineCoords, worldWidth, multiLineCap, multiLineJoin, multiMiterLimit);
+                
+                // Add tessellated vertices and indices
+                const lineStartIndex = fillVertices.length / 7;
+                for (let i = 0; i < tessellated.vertices.length; i += 2) {
+                    fillVertices.push(
+                        tessellated.vertices[i],     // x
+                        tessellated.vertices[i + 1], // y
+                        0.0,                          // z
+                        ..._borderColor               // color
+                    );
+                }
+                
+                // Add triangle indices (lines now render as filled triangles)
+                tessellated.indices.forEach(idx => {
+                    fillIndices.push(lineStartIndex + idx);
+                });
             });
             break;
             
@@ -444,11 +531,6 @@ export async function batchParseGeoJSONFeaturesGPU(features, device, fillColor =
         // Only process fill, fill-extrusion, and line layers
         if (!['fill', 'fill-extrusion', 'line'].includes(layer.type)) continue;
         
-        if (!window._processingLayer) {
-            console.log('✅ Processing layer:', layer.id, 'type:', layer.type);
-            window._processingLayer = true;
-        }
-        
         let matchCount = 0;
 
         for (let i = 0; i < features.length; i++) {
@@ -456,8 +538,8 @@ export async function batchParseGeoJSONFeaturesGPU(features, device, fillColor =
             
             // IMPORTANT: Skip if geometry type doesn't match layer type
             const geomType = feature.geometry.type;
-            if (layer.type === 'line' && !geomType.includes('LineString')) {
-                continue; // Line layers only render LineString geometry
+            if (layer.type === 'line' && !geomType.includes('LineString') && !geomType.includes('Polygon')) {
+                continue; // Line layers render LineString OR Polygon boundaries
             }
             if ((layer.type === 'fill' || layer.type === 'fill-extrusion') && !geomType.includes('Polygon')) {
                 continue; // Fill layers only render Polygon geometry
@@ -540,6 +622,13 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
             
             if (fillColorValue) {
                 _fillColor = parseColor(fillColorValue);
+                
+                // Apply opacity
+                const opacityProperty = extrusionLayer ? 'fill-extrusion-opacity' : 'fill-opacity';
+                const opacityValue = getPaintProperty(fillLayer.id, opacityProperty, feature, zoom);
+                if (typeof opacityValue === 'number') {
+                    _fillColor[3] = opacityValue;
+                }
             }
         }
 
@@ -694,6 +783,39 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
             const outerRing = coordinates[0];
             const holes = coordinates.slice(1);
             
+            // SPECIAL CASE: Line layer rendering polygon boundaries (coastlines, borders)
+            if (layer && layer.type === 'line') {
+                // Treat polygon rings as LineStrings
+                const rings = [outerRing, ...holes];
+                for (const ring of rings) {
+                    // Get line style from layer
+                    const widthValue = getPaintProperty(layer.id, 'line-width', feature, zoom);
+                    const lineWidth = typeof widthValue === 'number' ? widthValue : 1;
+                    const lineCap = layer.layout?.['line-cap'] || 'butt';
+                    const lineJoin = layer.layout?.['line-join'] || 'miter';
+                    const miterLimit = layer.layout?.['line-miter-limit'] || 2;
+                    
+                    // Transform coordinates first, then tessellate
+                    const transformedRing = ring.map(coord => getTransformedCoord(coord));
+                    
+                    // Tessellate the transformed ring as a line
+                    const lineTessellation = tessellateLine(transformedRing, lineWidth, lineCap, lineJoin, miterLimit);
+                    
+                    if (lineTessellation.vertices.length > 0) {
+                        const vertexOffset = fillVertices.length / 7;
+                        // Vertices are already transformed, use them directly
+                        lineTessellation.vertices.forEach(coord => {
+                            fillVertices.push(coord[0], coord[1], 0.0, ..._borderColor);
+                            hiddenVertices.push(coord[0], coord[1], 0.0, 0, 0, 0, 1);
+                        });
+                        lineTessellation.indices.forEach(i => fillIndices.push(i + vertexOffset));
+                        isFilled = false;
+                        isLine = true;
+                    }
+                }
+                break;
+            }
+            
             // Use extrusion geometry if this is a 3D layer
             if (isExtruded && extrusionHeight > 0) {
                 const extrusion = generateExtrusion(outerRing, extrusionHeight, extrusionBase);
@@ -737,6 +859,38 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
                 const outerRing = polygon[0];
                 const holes = polygon.slice(1);
                 
+                // SPECIAL CASE: Line layer rendering polygon boundaries
+                if (layer && layer.type === 'line') {
+                    const rings = [outerRing, ...holes];
+                    for (const ring of rings) {
+                        // Get line style from layer
+                        const widthValue = getPaintProperty(layer.id, 'line-width', feature, zoom);
+                        const lineWidth = typeof widthValue === 'number' ? widthValue : 1;
+                        const lineCap = layer.layout?.['line-cap'] || 'butt';
+                        const lineJoin = layer.layout?.['line-join'] || 'miter';
+                        const miterLimit = layer.layout?.['line-miter-limit'] || 2;
+                        
+                        // Transform coordinates first, then tessellate
+                        const transformedRing = ring.map(coord => getTransformedCoord(coord));
+                        
+                        // Tessellate the transformed ring as a line
+                        const lineTessellation = tessellateLine(transformedRing, lineWidth, lineCap, lineJoin, miterLimit);
+                        
+                        if (lineTessellation.vertices.length > 0) {
+                            const vertexOffset = fillVertices.length / 7;
+                            // Vertices are already transformed, use them directly
+                            lineTessellation.vertices.forEach(coord => {
+                                fillVertices.push(coord[0], coord[1], 0.0, ..._borderColor);
+                                hiddenVertices.push(coord[0], coord[1], 0.0, 0, 0, 0, 1);
+                            });
+                            lineTessellation.indices.forEach(i => fillIndices.push(i + vertexOffset));
+                            isFilled = false;
+                            isLine = true;
+                        }
+                    }
+                    return; // Skip fill processing
+                }
+                
                 // Use extrusion geometry if this is a 3D layer
                 if (isExtruded && extrusionHeight > 0) {
                     const extrusion = generateExtrusion(outerRing, extrusionHeight, extrusionBase);
@@ -779,20 +933,90 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
         case 'LineString':
             isFilled = false;
             isLine = true;
-            const lineStartIndex = coordsToVertices(feature.geometry.coordinates, _borderColor, fillVertices);
-            for (let i = 0; i < feature.geometry.coordinates.length - 1; i++) {
-                outlineIndices.push(lineStartIndex + i, lineStartIndex + i + 1);
+            
+            // Get line width and style from layer
+            let lineWidth2 = 1;
+            let lineCap2 = 'butt';
+            let lineJoin2 = 'miter';
+            let miterLimit2 = 2;
+            
+            if (layer && layer.type === 'line') {
+                const widthValue = getPaintProperty(layer.id, 'line-width', feature, zoom);
+                lineWidth2 = typeof widthValue === 'number' ? widthValue : 1;
+                lineCap2 = layer.layout?.['line-cap'] || 'butt';
+                lineJoin2 = layer.layout?.['line-join'] || 'miter';
+                miterLimit2 = layer.layout?.['line-miter-limit'] || 2;
             }
+            
+            // Transform coordinates to screen space
+            const transformedLineCoords2 = feature.geometry.coordinates.map(coord => getTransformedCoord(coord));
+            
+            // Convert line width from pixels to world space
+            const worldWidth2 = screenWidthToWorld(lineWidth2, zoom, 512);
+            
+            // Tessellate line into triangles
+            const tessellated2 = tessellateLine(transformedLineCoords2, worldWidth2, lineCap2, lineJoin2, miterLimit2);
+            
+            // Add tessellated vertices and indices
+            const lineStartIndex2 = fillVertices.length / 7;
+            for (let i = 0; i < tessellated2.vertices.length; i += 2) {
+                fillVertices.push(
+                    tessellated2.vertices[i],     // x
+                    tessellated2.vertices[i + 1], // y
+                    0.0,                           // z
+                    ..._borderColor                // color
+                );
+            }
+            
+            // Add triangle indices (lines now render as filled triangles)
+            tessellated2.indices.forEach(idx => {
+                fillIndices.push(lineStartIndex2 + idx);
+            });
             break;
             
         case 'MultiLineString':
             isFilled = false;
             isLine = true;
+            
+            // Get line width and style from layer
+            let multiLineWidth2 = 1;
+            let multiLineCap2 = 'butt';
+            let multiLineJoin2 = 'miter';
+            let multiMiterLimit2 = 2;
+            
+            if (layer && layer.type === 'line') {
+                const widthValue = getPaintProperty(layer.id, 'line-width', feature, zoom);
+                multiLineWidth2 = typeof widthValue === 'number' ? widthValue : 1;
+                multiLineCap2 = layer.layout?.['line-cap'] || 'butt';
+                multiLineJoin2 = layer.layout?.['line-join'] || 'miter';
+                multiMiterLimit2 = layer.layout?.['line-miter-limit'] || 2;
+            }
+            
             feature.geometry.coordinates.forEach(line => {
-                const lineStartIndex = coordsToVertices(line, _borderColor, fillVertices);
-                for (let i = 0; i < line.length - 1; i++) {
-                    outlineIndices.push(lineStartIndex + i, lineStartIndex + i + 1);
+                // Transform coordinates to screen space
+                const transformedLineCoords3 = line.map(coord => getTransformedCoord(coord));
+                
+                // Convert line width from pixels to world space
+                const worldWidth3 = screenWidthToWorld(multiLineWidth2, zoom, 512);
+                
+                // Tessellate line into triangles
+                const tessellated3 = tessellateLine(transformedLineCoords3, worldWidth3, multiLineCap2, multiLineJoin2, multiMiterLimit2);
+                
+                // Add tessellated vertices and indices
+                const lineStartIndex3 = fillVertices.length / 7;
+                for (let i = 0; i < tessellated3.vertices.length; i += 2) {
+                    fillVertices.push(
+                        tessellated3.vertices[i],     // x
+                        tessellated3.vertices[i + 1], // y
+                        0.0,                           // z
+                        ..._borderColor                // color
+                    );
                 }
+                
+                // Add triangle indices (lines now render as filled triangles)
+                tessellated3.indices.forEach(idx => {
+                    fillIndices.push(lineStartIndex3 + idx);
+                });
             });
             break;
             
