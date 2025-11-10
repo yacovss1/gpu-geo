@@ -149,7 +149,13 @@ export function setupEventListeners(canvas, camera, device, hiddenTexture, tileB
                 return;
             }
 
-            const feature = tileBuffers.find(b => b.properties?.fid === featureId || b.properties?.clampedFid === featureId);
+            // Find feature across all layers
+            let feature = null;
+            for (const [layerId, buffers] of tileBuffers) {
+                feature = buffers.find(b => b.properties?.fid === featureId || b.properties?.clampedFid === featureId);
+                if (feature) break;
+            }
+            
             if (feature) {
                 // Write the raw value directly
                 device.queue.writeBuffer(pickedIdBuffer, 0, new Float32Array([featureId]));

@@ -48,8 +48,8 @@ window.mapPerformance = {
         
         // Trigger reload of visible tiles
         if (window.camera && window.device && window.tileBuffers && window.hiddenTileBuffers) {
-            window.tileBuffers.length = 0;
-            window.hiddenTileBuffers.length = 0;
+            window.tileBuffers.clear();
+            window.hiddenTileBuffers.clear();
             const visibleTiles = getVisibleTiles(window.camera.zoom, window.camera.center);
             loadVisibleTiles(visibleTiles, window.device, window.tileBuffers, window.hiddenTileBuffers);
         }
@@ -233,8 +233,8 @@ window.mapStyle = {
             resetNotFoundTiles();
             
             if (window.camera && window.device && window.tileBuffers && window.hiddenTileBuffers) {
-                window.tileBuffers.length = 0;
-                window.hiddenTileBuffers.length = 0;
+                window.tileBuffers.clear();
+                window.hiddenTileBuffers.clear();
                 
                 // Trigger a tile reload by firing the zoomend event
                 window.camera.triggerEvent('zoomend');
@@ -265,8 +265,8 @@ window.mapStyle = {
         console.log(`🎨 Setting layer ${layerId} visibility to ${visible}`);
         setLayerVisibility(layerId, visible);
         // Force re-render by clearing everything
-        tileBuffers.length = 0;
-        hiddenTileBuffers.length = 0;
+        tileBuffers.clear();
+        hiddenTileBuffers.clear();
         clearTileCache(); // Clear the tile data cache
         resetNotFoundTiles(); // Clear the 404 cache
         
@@ -367,9 +367,9 @@ async function main() {
     
     renderer.createResources(canvas, camera);
 
-    // Store loaded tiles
-    const tileBuffers = [];
-    const hiddenTileBuffers = [];
+    // Store loaded tiles grouped by layer
+    const tileBuffers = new Map();
+    const hiddenTileBuffers = new Map();
     
     // Expose global variables for performance controls
     window.device = device;
@@ -448,9 +448,9 @@ async function main() {
             // This happens automatically via camera.getMatrix() already
         }
         
-        // Create new buffers for incoming tiles
-        const newTileBuffers = [];
-        const newHiddenTileBuffers = [];
+        // Create new buffers for incoming tiles, grouped by layer
+        const newTileBuffers = new Map();
+        const newHiddenTileBuffers = new Map();
         
         if (tilesToFetch.length > 0) {
             try {
@@ -463,41 +463,21 @@ async function main() {
                 
                 // Only add new tiles, never clear existing tiles unless explicitly requested
                 // This ensures we always have full coverage even if some tiles fail to load
-                if (newTileBuffers.length > 0) {
-                    // Get current zoom level from existing tiles
-                    const currentTileZoom = tileBuffers.length > 0 ? tileBuffers[0].zoomLevel : -1;
-                    
-                    // First, calculate how much of the viewport is covered by the new tiles
-                    const newTileKeys = new Set(newTileBuffers.map(
-                        t => `${t.zoomLevel}/${t.tileX}/${t.tileY}`
-                    ));
-                    
-                    // Number of visible tiles we have now (existing + new)
-                    const coveragePct = (newTileKeys.size / visibleTiles.length) * 100;
-                    
-                    // If we have good coverage with new tiles (90%+) AND the zoom changed,
-                    // we can safely remove old tiles from previous zoom levels
-                    if (fetchZoom !== currentTileZoom && coveragePct >= 90) {
-                        console.log(`Good coverage with zoom ${fetchZoom}, removing old tiles from zoom ${currentTileZoom}`);
-                        
-                        // Remove tiles from previous zoom level only
-                        const updatedTileBuffers = tileBuffers.filter(t => 
-                            t.zoomLevel === fetchZoom || t.zoomLevel > currentTileZoom
-                        );
-                        const updatedHiddenTileBuffers = hiddenTileBuffers.filter(t => 
-                            t.zoomLevel === fetchZoom || t.zoomLevel > currentTileZoom  
-                        );
-                        
-                        // Update tile arrays with filtered tiles
-                        tileBuffers.length = 0;
-                        hiddenTileBuffers.length = 0;
-                        tileBuffers.push(...updatedTileBuffers);
-                        hiddenTileBuffers.push(...updatedHiddenTileBuffers);
+                if (newTileBuffers.size > 0) {
+                    // Merge new layer-grouped buffers into existing buffers
+                    for (const [layerId, buffers] of newTileBuffers) {
+                        if (!tileBuffers.has(layerId)) {
+                            tileBuffers.set(layerId, []);
+                        }
+                        tileBuffers.get(layerId).push(...buffers);
                     }
                     
-                    // Always add new tiles
-                    tileBuffers.push(...newTileBuffers);
-                    hiddenTileBuffers.push(...newHiddenTileBuffers);
+                    for (const [layerId, buffers] of newHiddenTileBuffers) {
+                        if (!hiddenTileBuffers.has(layerId)) {
+                            hiddenTileBuffers.set(layerId, []);
+                        }
+                        hiddenTileBuffers.get(layerId).push(...buffers);
+                    }
                 }
             } catch (error) {
                 // Error loading tiles - keep existing tiles
@@ -801,11 +781,11 @@ async function loadVisibleTiles(visibleTiles, device, newTileBuffers, newHiddenT
                 
                 PERFORMANCE_STATS.totalCoordinatesProcessed += features.length;
                 
-                // Create buffers for each parsed feature
+                // Create buffers for each parsed feature, grouped by layer
                 parsedFeatures.forEach(parsedFeature => {
                     const { 
                         vertices, hiddenVertices, fillIndices, hiddenfillIndices,
-                        outlineIndices, isFilled, isLine, properties 
+                        outlineIndices, isFilled, isLine, properties, layerId 
                     } = parsedFeature;
                     
                     if (vertices.length === 0 || (fillIndices.length === 0 && outlineIndices.length === 0)) {
@@ -829,6 +809,7 @@ async function loadVisibleTiles(visibleTiles, device, newTileBuffers, newHiddenT
                         z,
                         x,
                         y,
+                        layerId || 'default',
                         newTileBuffers,
                         newHiddenTileBuffers
                     );
@@ -891,6 +872,7 @@ function createAndAddBuffers(
     z,
     x,
     y,
+    layerId,
     newTileBuffers,
     newHiddenTileBuffers
 ) {
@@ -926,8 +908,15 @@ function createAndAddBuffers(
     });
     device.queue.writeBuffer(hiddenFillIndexBuffer, 0, hiddenfillIndices);
     
-    // Add to tile buffers
-    newTileBuffers.push({
+    // Add to tile buffers grouped by layer
+    if (!newTileBuffers.has(layerId)) {
+        newTileBuffers.set(layerId, []);
+    }
+    if (!newHiddenTileBuffers.has(layerId)) {
+        newHiddenTileBuffers.set(layerId, []);
+    }
+    
+    newTileBuffers.get(layerId).push({
         vertexBuffer,
         fillIndexBuffer,
         outlineIndexBuffer,
@@ -939,10 +928,11 @@ function createAndAddBuffers(
         zoomLevel: z,
         tileX: x,
         tileY: y,
-        vertices: vertices
+        vertices: vertices,
+        layerId: layerId
     });
     
-    newHiddenTileBuffers.push({
+    newHiddenTileBuffers.get(layerId).push({
         vertexBuffer: hiddenVertexBuffer,
         hiddenFillIndexBuffer,
         hiddenfillIndexCount: hiddenfillIndices.length,
@@ -951,6 +941,7 @@ function createAndAddBuffers(
         tileX: x,
         tileY: y,
         isFilled,
+        layerId: layerId
     });
 }
 
@@ -974,15 +965,21 @@ function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, textureView
         }
     });
     
-    hiddenTileBuffers.forEach(({ vertexBuffer, hiddenFillIndexBuffer, hiddenfillIndexCount }) => {
-        if (hiddenfillIndexCount > 0) {
-            hiddenPass.setPipeline(renderer.pipelines.hidden);
-            hiddenPass.setVertexBuffer(0, vertexBuffer);
-            hiddenPass.setIndexBuffer(hiddenFillIndexBuffer, "uint32");
-            hiddenPass.setBindGroup(0, renderer.bindGroups.picking);
-            hiddenPass.drawIndexed(hiddenfillIndexCount);
-        }
-    });
+    // Render hidden buffers layer by layer
+    for (const [layerId, buffers] of hiddenTileBuffers) {
+        // Check layer visibility
+        if (!getLayerVisibility(layerId)) continue;
+        
+        buffers.forEach(({ vertexBuffer, hiddenFillIndexBuffer, hiddenfillIndexCount }) => {
+            if (hiddenfillIndexCount > 0) {
+                hiddenPass.setPipeline(renderer.pipelines.hidden);
+                hiddenPass.setVertexBuffer(0, vertexBuffer);
+                hiddenPass.setIndexBuffer(hiddenFillIndexBuffer, "uint32");
+                hiddenPass.setBindGroup(0, renderer.bindGroups.picking);
+                hiddenPass.drawIndexed(hiddenfillIndexCount);
+            }
+        });
+    }
     
     hiddenPass.end();
     
@@ -1002,26 +999,37 @@ function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, textureView
         }
     });
     
-    tileBuffers.forEach(({ vertexBuffer, fillIndexBuffer, fillIndexCount }) => {
-        if (fillIndexCount > 0) {
-            colorPass.setPipeline(renderer.pipelines.fill);
-            colorPass.setVertexBuffer(0, vertexBuffer);
-            colorPass.setIndexBuffer(fillIndexBuffer, "uint32");
-            colorPass.setBindGroup(0, renderer.bindGroups.main);
-            colorPass.drawIndexed(fillIndexCount);
-        }
-    });
+    // Render fills layer by layer
+    for (const [layerId, buffers] of tileBuffers) {
+        // Check layer visibility
+        if (!getLayerVisibility(layerId)) continue;
+        
+        buffers.forEach(({ vertexBuffer, fillIndexBuffer, fillIndexCount }) => {
+            if (fillIndexCount > 0) {
+                colorPass.setPipeline(renderer.pipelines.fill);
+                colorPass.setVertexBuffer(0, vertexBuffer);
+                colorPass.setIndexBuffer(fillIndexBuffer, "uint32");
+                colorPass.setBindGroup(0, renderer.bindGroups.main);
+                colorPass.drawIndexed(fillIndexCount);
+            }
+        });
+    }
     
-    // Draw outlines (borders) after fills
-    tileBuffers.forEach(({ vertexBuffer, outlineIndexBuffer, outlineIndexCount }) => {
-        if (outlineIndexCount > 0) {
-            colorPass.setPipeline(renderer.pipelines.outline);
-            colorPass.setVertexBuffer(0, vertexBuffer);
-            colorPass.setIndexBuffer(outlineIndexBuffer, "uint32");
-            colorPass.setBindGroup(0, renderer.bindGroups.main);
-            colorPass.drawIndexed(outlineIndexCount);
-        }
-    });
+    // Draw outlines (borders) after fills, layer by layer
+    for (const [layerId, buffers] of tileBuffers) {
+        // Check layer visibility
+        if (!getLayerVisibility(layerId)) continue;
+        
+        buffers.forEach(({ vertexBuffer, outlineIndexBuffer, outlineIndexCount }) => {
+            if (outlineIndexCount > 0) {
+                colorPass.setPipeline(renderer.pipelines.outline);
+                colorPass.setVertexBuffer(0, vertexBuffer);
+                colorPass.setIndexBuffer(outlineIndexBuffer, "uint32");
+                colorPass.setBindGroup(0, renderer.bindGroups.main);
+                colorPass.drawIndexed(outlineIndexCount);
+            }
+        });
+    }
     
     colorPass.end();
     
@@ -1191,13 +1199,16 @@ function renderMarkersToEncoder(
 // Build feature name map from tile buffers
 function buildFeatureNameMap(tileBuffers) {
     const featureNames = new Map();
-    for (const tileBuffer of tileBuffers) {
-        if (!tileBuffer.properties) continue;
-        const clampedFid = tileBuffer.properties.clampedFid;
-        const name = tileBuffer.properties.NAME || tileBuffer.properties.ADM0_A3 || tileBuffer.properties.ISO_A3;
-        const sourceLayer = tileBuffer.properties.sourceLayer;
-        if (clampedFid && name) {
-            featureNames.set(clampedFid, { name, sourceLayer });
+    // Iterate through all layers
+    for (const [layerId, buffers] of tileBuffers) {
+        for (const tileBuffer of buffers) {
+            if (!tileBuffer.properties) continue;
+            const clampedFid = tileBuffer.properties.clampedFid;
+            const name = tileBuffer.properties.NAME || tileBuffer.properties.ADM0_A3 || tileBuffer.properties.ISO_A3;
+            const sourceLayer = tileBuffer.properties.sourceLayer;
+            if (clampedFid && name) {
+                featureNames.set(clampedFid, { name, sourceLayer });
+            }
         }
     }
     return featureNames;
@@ -1211,13 +1222,15 @@ function renderLabelsToEncoder(encoder, textureView, textRenderer, tileBuffers, 
     // Build feature name map using CLAMPED feature ID as key
     const featureNames = new Map();
     
-    for (const tileBuffer of tileBuffers) {
-        if (!tileBuffer.properties) continue;
-        const clampedFid = tileBuffer.properties.clampedFid;
-        const name = tileBuffer.properties.NAME || tileBuffer.properties.ADM0_A3 || tileBuffer.properties.ISO_A3;
-        
-        if (clampedFid && name) {
-            featureNames.set(clampedFid, name);
+    for (const [layerId, buffers] of tileBuffers) {
+        for (const tileBuffer of buffers) {
+            if (!tileBuffer.properties) continue;
+            const clampedFid = tileBuffer.properties.clampedFid;
+            const name = tileBuffer.properties.NAME || tileBuffer.properties.ADM0_A3 || tileBuffer.properties.ISO_A3;
+            
+            if (clampedFid && name) {
+                featureNames.set(clampedFid, name);
+            }
         }
     }
     
@@ -1328,19 +1341,21 @@ function renderLabels_OLD(device, textureView, textRenderer, tileBuffers, camera
     // Extract labels from visible features using the same centroid calculation as before
     const labeledFeatures = new Map();
     
-    for (const tileBuffer of tileBuffers) {
-        if (!tileBuffer.properties) continue;
-        
-        const featureId = tileBuffer.properties.fid;
-        const name = tileBuffer.properties.NAME || tileBuffer.properties.ADM0_A3 || tileBuffer.properties.ISO_A3;
-        
-        if (!featureId || !name || labeledFeatures.has(featureId)) continue;
-        
-        // Calculate centroid from vertices - these are in clip space after GPU transformation
-        const clipPos = calculateCentroid(tileBuffer.vertices);
-        if (!clipPos) continue;
-        
-        labeledFeatures.set(featureId, { name, clipPos });
+    for (const [layerId, buffers] of tileBuffers) {
+        for (const tileBuffer of buffers) {
+            if (!tileBuffer.properties) continue;
+            
+            const featureId = tileBuffer.properties.fid;
+            const name = tileBuffer.properties.NAME || tileBuffer.properties.ADM0_A3 || tileBuffer.properties.ISO_A3;
+            
+            if (!featureId || !name || labeledFeatures.has(featureId)) continue;
+            
+            // Calculate centroid from vertices - these are in clip space after GPU transformation
+            const clipPos = calculateCentroid(tileBuffer.vertices);
+            if (!clipPos) continue;
+            
+            labeledFeatures.set(featureId, { name, clipPos });
+        }
     }
     
     if (labeledFeatures.size === 0) return;
