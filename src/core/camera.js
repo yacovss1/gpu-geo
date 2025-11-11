@@ -5,7 +5,7 @@ export class Camera extends EventTarget {
         super();
         this.position = [0, 0]; // Camera position in 2D
         this.trueZoom = 1;
-        this.maxFetchZoom = 14;   // Match Carto maxzoom (tiles only go to 14)
+        this.maxFetchZoom = 14;   // Tiles max at 14
         this.maxZoom = 22;        // Max zoom level (2^22 = ~4M scale, same as MapLibre)
         this.minZoom = 0;         // Start at 0 for exponential zoom (2^0 = 1x scale)
         this.zoom = 0;            // Start at zoom 0

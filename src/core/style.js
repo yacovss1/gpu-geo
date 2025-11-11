@@ -53,28 +53,6 @@ export async function setStyle(style) {
 }
 
 /**
- * Get the background color from the style
- * @returns {Array<number>|null} RGBA array [r, g, b, a] with values 0-1
- */
-export function getBackgroundColor() {
-    if (!currentStyle || !currentStyle.layers) {
-        return null;
-    }
-    
-    const backgroundLayer = currentStyle.layers.find(l => l.type === 'background');
-    if (!backgroundLayer || !backgroundLayer.paint) {
-        return null;
-    }
-    
-    const color = backgroundLayer.paint['background-color'];
-    if (!color) {
-        return null;
-    }
-    
-    return parseColor(color);
-}
-
-/**
  * Get the current style configuration
  * @returns {Object|null}
  */
@@ -193,50 +171,11 @@ export function getSymbolLayers(sourceId) {
             textSize: layer.layout?.['text-size'] || 16,
             textFont: layer.layout?.['text-font'] || ['Open Sans Regular'],
             textAnchor: layer.layout?.['text-anchor'] || 'center',  // 9 positions: center, top, bottom, left, right, top-left, top-right, bottom-left, bottom-right
-            textTransform: layer.layout?.['text-transform'],
             textColor: layer.paint?.['text-color'] || '#000000',
             textHaloColor: layer.paint?.['text-halo-color'],
             textHaloWidth: layer.paint?.['text-halo-width'] || 0,
             filter: layer.filter
         }));
-}
-
-/**
- * Get all line layers for a specific source
- * @param {string} sourceId - Source ID
- * @returns {Array<Object>} Array of line layer configurations
- */
-export function getLineLayers(sourceId) {
-    if (!currentStyle) {
-        return [];
-    }
-
-    return currentStyle.layers
-        .filter(layer => 
-            layer.type === 'line' && 
-            layer.source === sourceId &&
-            layer.layout?.visibility !== 'none'
-        )
-        .map(layer => {
-            // Store the raw paint properties - they'll be evaluated at render time with proper zoom
-            return {
-                id: layer.id,
-                sourceLayer: layer['source-layer'],
-                minzoom: layer.minzoom || 0,
-                maxzoom: layer.maxzoom || 24,
-                lineWidth: layer.paint?.['line-width'] || 1,  // Keep raw value (number or stops object)
-                lineColor: layer.paint?.['line-color'] || '#000000',
-                lineOpacity: layer.paint?.['line-opacity'] !== undefined ? layer.paint['line-opacity'] : 1.0,
-                lineGapWidth: layer.paint?.['line-gap-width'] || 0,
-                lineOffset: layer.paint?.['line-offset'] || 0,
-                lineBlur: layer.paint?.['line-blur'] || 0,
-                lineCap: layer.layout?.['line-cap'] || 'butt',  // butt, round, square
-                lineJoin: layer.layout?.['line-join'] || 'miter',  // miter, round, bevel
-                lineMiterLimit: layer.layout?.['line-miter-limit'] || 2,
-                lineRoundLimit: layer.layout?.['line-round-limit'] || 1.05,
-                filter: layer.filter
-            };
-        });
 }
 
 /**
@@ -269,37 +208,6 @@ export function isTileInBounds(x, y, z, sourceId) {
 }
 
 /**
- * Interpolate value from stops array based on zoom level
- * Stops format: [[zoom1, value1], [zoom2, value2], ...]
- * @param {Array} stops - Array of [zoom, value] pairs
- * @param {number} zoom - Current zoom level
- * @returns {number}
- */
-function interpolateStops(stops, zoom) {
-    if (!stops || stops.length === 0) return 0;
-    
-    // If zoom is below first stop, use first stop value
-    if (zoom <= stops[0][0]) return stops[0][1];
-    
-    // If zoom is above last stop, use last stop value
-    if (zoom >= stops[stops.length - 1][0]) return stops[stops.length - 1][1];
-    
-    // Find the two stops to interpolate between
-    for (let i = 0; i < stops.length - 1; i++) {
-        const [z1, v1] = stops[i];
-        const [z2, v2] = stops[i + 1];
-        
-        if (zoom >= z1 && zoom <= z2) {
-            // Linear interpolation
-            const t = (zoom - z1) / (z2 - z1);
-            return v1 + t * (v2 - v1);
-        }
-    }
-    
-    return stops[stops.length - 1][1];
-}
-
-/**
  * Evaluate a style expression (simplified implementation)
  * @param {*} expression - Style expression (literal, get, match, etc.)
  * @param {Object} feature - GeoJSON feature
@@ -309,10 +217,6 @@ function interpolateStops(stops, zoom) {
 export function evaluateExpression(expression, feature, zoom) {
     // Handle literal values
     if (!Array.isArray(expression)) {
-        // Check if it's a stops object for zoom-based interpolation
-        if (expression && typeof expression === 'object' && expression.stops) {
-            return interpolateStops(expression.stops, zoom);
-        }
         return expression;
     }
 
@@ -405,25 +309,20 @@ export function evaluateExpression(expression, feature, zoom) {
             return args.reduce((acc, arg) => acc + evaluateExpression(arg, feature, zoom), 0);
 
         case 'in':
-            // ["in", property, value1, value2, ...] (legacy format)
-            // or ["in", value, array] (modern format)
             const value = evaluateExpression(args[0], feature, zoom);
-            
-            // Check if args[1] is an array - if so, use modern format
-            if (Array.isArray(args[1])) {
-                const array = evaluateExpression(args[1], feature, zoom);
-                return Array.isArray(array) && array.includes(value);
-            }
-            
-            // Legacy format: remaining args are the values to check against
-            const valuesToCheck = args.slice(1);
-            return valuesToCheck.includes(value);
+            const array = evaluateExpression(args[1], feature, zoom);
+            return Array.isArray(array) && array.includes(value);
 
         case 'interpolate':
             // ["interpolate", interpolation, input, stop1, output1, stop2, output2, ...]
-            // Simplified: only supports linear interpolation
-            const interpolationType = args[0];
+            const interpolationType = args[0]; // e.g., ["linear"] or ["exponential", base]
             const input2 = evaluateExpression(args[1], feature, zoom);
+            
+            // Determine interpolation base (1.0 for linear, or custom for exponential)
+            let base = 1.0;
+            if (Array.isArray(interpolationType) && interpolationType[0] === 'exponential') {
+                base = interpolationType[1] || 1.0;
+            }
             
             // Find the two stops to interpolate between
             for (let i = 2; i < args.length - 2; i += 2) {
@@ -433,9 +332,20 @@ export function evaluateExpression(expression, feature, zoom) {
                 if (input2 >= stop1 && input2 <= stop2) {
                     const output1 = args[i + 1];
                     const output2 = args[i + 3];
-                    const t = (input2 - stop1) / (stop2 - stop1);
                     
-                    // Linear interpolation for numbers
+                    // Calculate interpolation factor
+                    let t;
+                    if (base === 1.0) {
+                        // Linear interpolation
+                        t = (input2 - stop1) / (stop2 - stop1);
+                    } else {
+                        // Exponential interpolation
+                        const range = stop2 - stop1;
+                        const progress = input2 - stop1;
+                        t = (Math.pow(base, progress / range) - 1) / (Math.pow(base, 1) - 1);
+                    }
+                    
+                    // Interpolate numbers
                     if (typeof output1 === 'number' && typeof output2 === 'number') {
                         return output1 + t * (output2 - output1);
                     }

@@ -230,6 +230,11 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
     }
     processedFeatures.add(featureId);
 
+    if (!window._geomTypeLogged) {
+        console.log(`🔍 Feature geometry type: ${feature.geometry.type}`);
+        window._geomTypeLogged = true;
+    }
+
     switch (feature.geometry.type) {
         case 'Polygon':
             // Combine all rings into a single array with holes
@@ -239,31 +244,68 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
             
             // Use extrusion geometry if this is a 3D layer
             if (isExtruded && extrusionHeight > 0) {
-                const extrusion = generateExtrusion(outerRing, extrusionHeight, extrusionBase, holes);
+                if (!window._extrusionLogged) {
+                    console.log(`🏢 Taking EXTRUSION path: height=${extrusionHeight}`);
+                    window._extrusionLogged = true;
+                }
+                const extrusion = generateExtrusion(outerRing, extrusionHeight, extrusionBase, holes, zoom);
                 const vertexOffset = fillVertices.length / 7;
                 extrusion.vertices.forEach(v => fillVertices.push(v));
                 extrusion.indices.forEach(i => fillIndices.push(i + vertexOffset));
             } else {
                 // Standard 2D fill
-                // Flatten coordinates for triangulation
+                if (!window._2dFillLogged) {
+                    console.log(`📐 Taking 2D FILL path: isExtruded=${isExtruded}, height=${extrusionHeight}`);
+                    window._2dFillLogged = true;
+                }
+                // Flatten TRANSFORMED coordinates for triangulation
                 const flatCoords = [];
                 const holeIndices = [];
                 
-                // Add outer ring
+                // Add outer ring with transformed coords
                 outerRing.forEach(coord => {
-                    flatCoords.push(coord[0], coord[1]);
+                    const [x, y] = getTransformedCoord(coord);
+                    flatCoords.push(x, y);
                 });
+                
+                if (!window._coordCheckLogged && outerRing.length >= 7) {
+                    console.log(`🔍 Polygon has ${outerRing.length} vertices in GeoJSON`);
+                    console.log(`   First 5 raw coords:`, outerRing.slice(0, 5));
+                    console.log(`   Transformed to ${flatCoords.length / 2} vertices`);
+                    console.log(`   First 10 flatCoords:`, flatCoords.slice(0, 10));
+                    window._coordCheckLogged = true;
+                }
                 
                 // Add holes and store their starting indices
                 holes.forEach(hole => {
                     holeIndices.push(flatCoords.length / 2);
                     hole.forEach(coord => {
-                        flatCoords.push(coord[0], coord[1]);
+                        const [x, y] = getTransformedCoord(coord);
+                        flatCoords.push(x, y);
                     });
                 });
 
                 // Triangulate with holes
-                const triangles = earcut(flatCoords, holeIndices);
+                if (!window._preEarcutLogged) {
+                    console.log(`🔺 About to call earcut:`);
+                    console.log(`   flatCoords length: ${flatCoords.length}, first 20:`, flatCoords.slice(0, 20));
+                    console.log(`   holeIndices:`, holeIndices);
+                    window._preEarcutLogged = true;
+                }
+                
+                const triangles = earcut(flatCoords, holeIndices.length > 0 ? holeIndices : null);
+                
+                if (triangles.length === 0 && !window._earcutFailLogged) {
+                    console.log(`🔺 Earcut FAILED: ${flatCoords.length / 2} vertices, flatCoords:`, flatCoords.slice(0, 20));
+                    console.log(`   All unique?`, new Set(flatCoords).size, 'unique values out of', flatCoords.length);
+                    window._earcutFailLogged = true;
+                }
+                
+                if (!window._earcutLogged && flatCoords.length >= 18) {
+                    console.log(`🔺 Earcut: ${flatCoords.length / 2} vertices → ${triangles.length / 3} triangles`);
+                    console.log(`   First 10 coords:`, flatCoords.slice(0, 20));
+                    window._earcutLogged = true;
+                }
 
                 // Add vertices for the entire polygon
                 const allCoords = coordinates.flat(1);
@@ -289,7 +331,7 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
                 
                 // Use extrusion geometry if this is a 3D layer
                 if (isExtruded && extrusionHeight > 0) {
-                    const extrusion = generateExtrusion(outerRing, extrusionHeight, extrusionBase, holes);
+                    const extrusion = generateExtrusion(outerRing, extrusionHeight, extrusionBase, holes, zoom);
                     const vertexOffset = fillVertices.length / 7;
                     extrusion.vertices.forEach(v => fillVertices.push(v));
                     extrusion.indices.forEach(i => fillIndices.push(i + vertexOffset));
@@ -523,6 +565,12 @@ export async function batchParseGeoJSONFeaturesGPU(features, device, fillColor =
             const getTransformedCoord = (coord) => {
                 const key = `${coord[0]},${coord[1]}`;
                 const globalIndex = coordMap.get(key);
+                if (globalIndex === undefined && !window._coordLookupFailLogged) {
+                    console.log(`⚠️ Coord lookup failed for key: ${key}`);
+                    console.log(`   CoordMap size:`, coordMap.size);
+                    console.log(`   Available keys sample:`, Array.from(coordMap.keys()).slice(0, 5));
+                    window._coordLookupFailLogged = true;
+                }
                 return globalIndex !== undefined ? transformedCoords[globalIndex] : [0, 0];
             };
 
@@ -587,7 +635,6 @@ export async function batchParseGeoJSONFeaturesGPU(features, device, fillColor =
                 results.push(result);
             }
         }
-        
 
     }
 
@@ -745,14 +792,13 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
     };
 
     // Helper function to generate 3D extrusion geometry (walls + roof)
-    const generateExtrusion = (outerRing, height, base, holes = []) => {
+    const generateExtrusion = (outerRing, height, base, holes = [], zoom = 14) => {
         const vertices = [];
         const indices = [];
         
-        // Convert height from meters to clip space - MUCH SMALLER for subtle effect
-        const heightZ = height * 0.00005; // 15m = 0.00075 units (very subtle)
-        const baseZ = base * 0.00005;
-        console.log(`🏢 GPU Building: ${height}m -> Z=${heightZ.toFixed(6)}`);
+        // Barely visible at zoom 14, like specs
+        const heightZ = height * 0.0000005; // Half again
+        const baseZ = base * 0.0000005;
         
         // Generate vertical walls for outer ring
         for (let i = 0; i < outerRing.length - 1; i++) {
@@ -830,34 +876,44 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
         });
         
         // Generate roof (flat top polygon at height with holes)
+        // CRITICAL: Use transformed coordinates for triangulation to match vertex positions
         const flatCoords = [];
+        const roofVertices = [];
+        
         outerRing.forEach(coord => {
-            flatCoords.push(coord[0], coord[1]);
+            const [x, y] = getTransformedCoord(coord);
+            flatCoords.push(x, y);  // Use transformed coords for earcut
+            roofVertices.push([x, y]);
         });
         
         const holeIndices = [];
         holes.forEach(hole => {
             holeIndices.push(flatCoords.length / 2);
             hole.forEach(coord => {
-                flatCoords.push(coord[0], coord[1]);
+                const [x, y] = getTransformedCoord(coord);
+                flatCoords.push(x, y);  // Use transformed coords for earcut
+                roofVertices.push([x, y]);
             });
         });
         
-        const roofTriangles = earcut(flatCoords, holeIndices.length > 0 ? holeIndices : null);
+        // Try triangulation, skip if it fails (invalid geometry)
+        let roofTriangles;
+        try {
+            roofTriangles = earcut(flatCoords, holeIndices.length > 0 ? holeIndices : null);
+            if (!roofTriangles || roofTriangles.length === 0) {
+                console.warn('⚠️ Earcut returned no triangles');
+                return { vertices, indices }; // Return just walls
+            }
+        } catch (error) {
+            console.warn('⚠️ Earcut triangulation failed:', error.message);
+            return { vertices, indices }; // Return just walls, skip roof
+        }
+        
         const roofStartIdx = vertices.length / 7;
         
-        // Add outer ring vertices at roof height
-        outerRing.forEach(coord => {
-            const [x, y] = getTransformedCoord(coord);
+        // Add all roof vertices (already transformed)
+        roofVertices.forEach(([x, y]) => {
             vertices.push(x, y, heightZ, ..._fillColor);
-        });
-        
-        // Add hole vertices at roof height
-        holes.forEach(hole => {
-            hole.forEach(coord => {
-                const [x, y] = getTransformedCoord(coord);
-                vertices.push(x, y, heightZ, ..._fillColor);
-            });
         });
         
         roofTriangles.forEach(idx => {
@@ -918,18 +974,21 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
                 const flatCoords = [];
                 const holeIndices = [];
                 
+                // Use TRANSFORMED coordinates for earcut (clip space, not raw lon/lat)
                 outerRing.forEach(coord => {
-                    flatCoords.push(coord[0], coord[1]);
+                    const [x, y] = getTransformedCoord(coord);
+                    flatCoords.push(x, y);
                 });
                 
                 holes.forEach(hole => {
                     holeIndices.push(flatCoords.length / 2);
                     hole.forEach(coord => {
-                        flatCoords.push(coord[0], coord[1]);
+                        const [x, y] = getTransformedCoord(coord);
+                        flatCoords.push(x, y);
                     });
                 });
 
-                const triangles = earcut(flatCoords, holeIndices);
+                const triangles = earcut(flatCoords, holeIndices.length > 0 ? holeIndices : null);
                 
                 // Add vertices in the same order as flatCoords (outer + holes)
                 const allRings = [outerRing, ...holes];
@@ -993,18 +1052,21 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
                     const flatCoords = [];
                     const holeIndices = [];
                     
+                    // Use TRANSFORMED coordinates for earcut (clip space, not raw lon/lat)
                     outerRing.forEach(coord => {
-                        flatCoords.push(coord[0], coord[1]);
+                        const [x, y] = getTransformedCoord(coord);
+                        flatCoords.push(x, y);
                     });
                     
                     holes.forEach(hole => {
                         holeIndices.push(flatCoords.length / 2);
                         hole.forEach(coord => {
-                            flatCoords.push(coord[0], coord[1]);
+                            const [x, y] = getTransformedCoord(coord);
+                            flatCoords.push(x, y);
                         });
                     });
 
-                    const triangles = earcut(flatCoords, holeIndices);
+                    const triangles = earcut(flatCoords, holeIndices.length > 0 ? holeIndices : null);
                     
                     // Add vertices in the same order as flatCoords (outer + holes)
                     const allRings = [outerRing, ...holes];

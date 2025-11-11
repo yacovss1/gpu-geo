@@ -45,10 +45,10 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     // Apply scale (currently 1.0 but keeping for future flexibility)
     let scale = 1.0;
     
-    // Store rounded result (GPU precision with software rounding)
+    // Store result with full precision (no rounding)
     outputCoords[idx] = CoordinateOutput(
-        roundTo6Places(x * scale),
-        roundTo6Places(y * scale)
+        x * scale,
+        y * scale
     );
 }
 `;

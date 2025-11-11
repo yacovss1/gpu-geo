@@ -457,6 +457,8 @@ async function main() {
         const displayZoom = camera.zoom;
         let fetchZoom = event.detail?.fetchZoom || Math.min(displayZoom, camera.maxFetchZoom);
         
+        console.log(`📊 Zoom calculation: display=${displayZoom.toFixed(2)}, fetchZoom from event=${event.detail?.fetchZoom}, maxFetchZoom=${camera.maxFetchZoom}`);
+        
         // Respect style maxzoom if available
         const currentStyle = getStyle();
         if (currentStyle && currentStyle.sources) {
@@ -464,15 +466,18 @@ async function main() {
             const source = currentStyle.sources[sourceId];
             if (source && source.maxzoom !== undefined) {
                 fetchZoom = Math.min(fetchZoom, source.maxzoom);
+                console.log(`📊 After style maxzoom (${source.maxzoom}): fetchZoom=${fetchZoom}`);
             }
         }
         
-        // If fetch zoom changed (by even 1 level), mark that we should clear after loading
-        let shouldClearOldTiles = false; // DISABLED
+        // If fetch zoom changed (by even 1 level), clear old tiles immediately
+        let shouldClearOldTiles = false;
         if (lastFetchZoom !== -1 && fetchZoom !== lastFetchZoom) {
-            console.log(`� Zoom changed ${lastFetchZoom} → ${fetchZoom}, will replace tiles`);
-            shouldClearOldTiles = false; // DISABLED
-            // clearTileCache(); // DISABLED
+            console.log(`🔄 Zoom changed ${lastFetchZoom} → ${fetchZoom}, clearing old tiles`);
+            shouldClearOldTiles = true;
+            clearTileCache(); // Clear fetch cache
+            tileBuffers.clear(); // Clear GPU buffers
+            hiddenTileBuffers.clear(); // Clear hidden GPU buffers
             // Reset logging flags
             window._parsedLogged = false;
             window._lineBufferLogged = false;
@@ -498,7 +503,7 @@ async function main() {
             return;
         }
         
-        // Create database of all existing tiles (by key)
+        // Build database of existing tiles (empty if we just cleared)
         const existingTilesByKey = {};
         tileBuffers.forEach((layerTiles, layerId) => {
             layerTiles.forEach((tile, index) => {
@@ -511,43 +516,12 @@ async function main() {
             });
         });
         
-        // Create a Set of visible tile keys for fast lookup
-        const visibleTileKeys = new Set(
-            visibleTiles.map(tile => `${tile.z}/${tile.x}/${tile.y}`)
-        );
-        
-        // Remove tiles that are no longer visible or at the wrong zoom level
-        let totalRemoved = 0;
-        tileBuffers.forEach((layerTiles, layerId) => {
-            const hiddenLayerTiles = hiddenTileBuffers.get(layerId) || [];
-            
-            // Filter out tiles that aren't visible or at wrong zoom
-            const filteredTiles = layerTiles.filter((tile, index) => {
-                const key = `${tile.zoomLevel}/${tile.tileX}/${tile.tileY}`;
-                return visibleTileKeys.has(key) && tile.zoomLevel === fetchZoom;
-            });
-            
-            const filteredHidden = hiddenLayerTiles.filter((tile, index) => {
-                const key = `${tile.zoomLevel}/${tile.tileX}/${tile.tileY}`;
-                return visibleTileKeys.has(key) && tile.zoomLevel === fetchZoom;
-            });
-            
-            const removed = layerTiles.length - filteredTiles.length;
-            if (removed > 0) {
-                totalRemoved += removed;
-                tileBuffers.set(layerId, filteredTiles);
-                hiddenTileBuffers.set(layerId, filteredHidden);
-            }
-        });
-        
-        if (totalRemoved > 0) {
-            console.log(`🗑️ Removed ${totalRemoved} out-of-view tiles`);
-        }
-        
         // Only fetch tiles we don't already have
         const tilesToFetch = visibleTiles.filter(tile => 
             !existingTilesByKey[`${tile.z}/${tile.x}/${tile.y}`]
         );
+        
+        console.log(`📦 Existing tiles: ${Object.keys(existingTilesByKey).length}, Need to fetch: ${tilesToFetch.length}`);
         
         // If no tiles to fetch, still update the rendering scale for overzooming
         if (tilesToFetch.length === 0) {
@@ -852,11 +826,58 @@ function initMarkerResources(device, format, canvas, camera) {
     };
 }
 
+// Convert raw tile coordinates to lon/lat with full precision
+function convertTileCoordinates(geometry, featureType, tileX, tileY, tileZ, extent = 4096) {
+    const size = extent;
+    const x0 = extent * tileX;
+    const y0 = extent * tileY;
+    const scale = extent * (1 << tileZ);  // 2^z * extent
+    
+    // Convert point from tile coordinates to lon/lat
+    const projectPoint = (point) => {
+        const lon = 360 * (point.x + x0) / scale - 180;
+        const y2 = 180 - 360 * (point.y + y0) / scale;
+        const lat = 360 / Math.PI * Math.atan(Math.exp(y2 * Math.PI / 180)) - 90;
+        return [lon, lat];
+    };
+    
+    // Handle different geometry types
+    if (featureType === 1) {
+        // Point or MultiPoint
+        if (geometry.length === 1 && geometry[0].length === 1) {
+            // Single point
+            return projectPoint(geometry[0][0]);
+        } else {
+            // MultiPoint
+            const points = [];
+            for (const ring of geometry) {
+                for (const point of ring) {
+                    points.push(projectPoint(point));
+                }
+            }
+            return points;
+        }
+    } else if (featureType === 2) {
+        // LineString or MultiLineString
+        return geometry.map(ring => ring.map(projectPoint));
+    } else if (featureType === 3) {
+        // Polygon (outer ring + holes)
+        return geometry.map(ring => ring.map(projectPoint));
+    }
+    
+    return [];
+}
+
 // Load all visible tiles with GPU-accelerated coordinate transformation
 async function loadVisibleTiles(visibleTiles, device, newTileBuffers, newHiddenTileBuffers, abortSignal = null) {
-    console.log('🔍 loadVisibleTiles called with', visibleTiles.length, 'tiles');
+
+    
+    // Log tile coordinates for debugging
+
+    
     const tilePromises = visibleTiles.map(async (tile) => {
         const { x, y, z } = tile;
+    
         try {
             // Check if aborted before starting
             if (abortSignal?.aborted) {
@@ -896,26 +917,6 @@ async function loadVisibleTiles(visibleTiles, device, newTileBuffers, newHiddenT
                 for (let i = 0; i < layer.length; i++) {
                     const feature = layer.feature(i).toGeoJSON(x, y, z);
                     features.push(feature);
-                }
-                
-                // Debug: log coordinate range for first feature
-                if (features.length > 0 && !window._coordRangeLogged) {
-                    const firstFeature = features[0];
-                    if (firstFeature.geometry && firstFeature.geometry.coordinates) {
-                        const coords = firstFeature.geometry.coordinates;
-                        let flatCoords = [];
-                        const flatten = (c) => {
-                            if (typeof c[0] === 'number') flatCoords.push(c);
-                            else c.forEach(flatten);
-                        };
-                        flatten(coords);
-                        if (flatCoords.length > 0) {
-                            const lons = flatCoords.map(c => c[0]);
-                            const lats = flatCoords.map(c => c[1]);
-                            console.log(`📍 Tile ${z}/${x}/${y} coordinate range: lon [${Math.min(...lons).toFixed(2)}, ${Math.max(...lons).toFixed(2)}], lat [${Math.min(...lats).toFixed(2)}, ${Math.max(...lats).toFixed(2)}]`);
-                            window._coordRangeLogged = true;
-                        }
-                    }
                 }
                 
                 // IMPORTANT: Set layer name on ALL features BEFORE GPU processing
@@ -983,28 +984,17 @@ async function loadVisibleTiles(visibleTiles, device, newTileBuffers, newHiddenT
                 
                 PERFORMANCE_STATS.totalCoordinatesProcessed += features.length;
                 
-                if (!window._parsedCount) window._parsedCount = 0;
-                window._parsedCount += parsedFeatures.length;
-                if (parsedFeatures.length > 0 && !window._parsedLogged) {
-                    const lineFeatures = parsedFeatures.filter(f => f.isLine);
-                    const fillFeatures = parsedFeatures.filter(f => f.isFilled);
-                    console.log(`✅ Parsed ${parsedFeatures.length} features from ${layerName}`);
-                    console.log(`   Lines: ${lineFeatures.length}, Fills: ${fillFeatures.length}`);
-                    if (lineFeatures.length > 0) {
-                        console.log('First line feature:', {
-                            vertices: lineFeatures[0]?.vertices?.slice(0, 21),
-                            outlineIndices: lineFeatures[0]?.outlineIndices?.slice(0, 9)
-                        });
-                    }
-                    window._parsedLogged = true;
-                }
-                
                 // Create buffers for each parsed feature, grouped by layer
                 parsedFeatures.forEach(parsedFeature => {
                     const { 
                         vertices, hiddenVertices, fillIndices, hiddenfillIndices,
                         outlineIndices, isFilled, isLine, properties, layerId 
                     } = parsedFeature;
+                    
+                    if (!window._tileBufferLogged) {
+                        console.log(`📦 Adding tile ${z}/${x}/${y} to buffers: ${parsedFeatures.length} features, layer: ${layerId}`);
+                        window._tileBufferLogged = true;
+                    }
                     
                     if (vertices.length === 0 || (fillIndices.length === 0 && outlineIndices.length === 0)) {
                         if (!window._emptyGeomLogged) {
@@ -1345,69 +1335,12 @@ function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, textureView
         }
     }
     
-    // Render fills first - IN STYLE ORDER
-    if (style?.layers) {
-        for (const layer of style.layers) {
-            const layerId = layer.id;
-            
-            // Skip extrusion layers in this pass
-            if (extrusionLayers.includes(layerId)) continue;
-            
-            // Check layer visibility and zoom range
-            if (!shouldRenderLayer(layerId, renderZoom)) continue;
-            
-            // Get buffers for this layer
-            const buffers = tileBuffers.get(layerId);
-            if (!buffers) continue;
-            
-            // Use biased pipeline only if this fill has a corresponding extrusion
-            const useBias = fillsWithExtrusions.has(layerId);
-            const pipeline = useBias ? renderer.pipelines.fillWithBias : renderer.pipelines.fill;
-            
-            buffers.forEach(({ vertexBuffer, fillIndexBuffer, fillIndexCount }) => {
-                if (fillIndexCount > 0) {
-                    colorPass.setPipeline(pipeline);
-                    colorPass.setVertexBuffer(0, vertexBuffer);
-                    colorPass.setIndexBuffer(fillIndexBuffer, "uint32");
-                    colorPass.setBindGroup(0, renderer.bindGroups.main);
-                    colorPass.drawIndexed(fillIndexCount);
-                }
-            });
-        }
-    }
-    
-    // Render extrusions second (no depth bias - true depth) - IN STYLE ORDER
-    if (style?.layers) {
-        for (const layer of style.layers) {
-            const layerId = layer.id;
-            
-            // Only render if this is an extrusion layer
-            if (!extrusionLayers.includes(layerId)) continue;
-            
-            // Check layer visibility and zoom range
-            if (!shouldRenderLayer(layerId, renderZoom)) continue;
-            
-            // Get buffers for this layer
-            const buffers = tileBuffers.get(layerId);
-            if (!buffers) continue;
-            
-            buffers.forEach(({ vertexBuffer, fillIndexBuffer, fillIndexCount }) => {
-                if (fillIndexCount > 0) {
-                    colorPass.setPipeline(renderer.pipelines.extrusion);
-                    colorPass.setVertexBuffer(0, vertexBuffer);
-                    colorPass.setIndexBuffer(fillIndexBuffer, "uint32");
-                    colorPass.setBindGroup(0, renderer.bindGroups.main);
-                    colorPass.drawIndexed(fillIndexCount);
-                }
-            });
-        }
-    }
-    
-    // Draw outlines (borders) and lines after fills and extrusions - IN STYLE ORDER
+    // Render ALL geometry in true style order (fills, extrusions, and lines mixed)
     let lineDrawCount = 0;
     if (style?.layers) {
         for (const layer of style.layers) {
             const layerId = layer.id;
+            const layerType = layer.type;
             
             // Check layer visibility and zoom range
             if (!shouldRenderLayer(layerId, renderZoom)) continue;
@@ -1417,8 +1350,25 @@ function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, textureView
             if (!buffers) continue;
             
             buffers.forEach(({ vertexBuffer, fillIndexBuffer, fillIndexCount, outlineIndexBuffer, outlineIndexCount, isLine }) => {
-                // Lines are now tessellated as triangles, so they use fillIndexBuffer
-                if (isLine && fillIndexCount > 0) {
+                // Render based on layer type
+                if (layerType === 'fill-extrusion' && fillIndexCount > 0) {
+                    // 3D building extrusions
+                    colorPass.setPipeline(renderer.pipelines.extrusion);
+                    colorPass.setVertexBuffer(0, vertexBuffer);
+                    colorPass.setIndexBuffer(fillIndexBuffer, "uint32");
+                    colorPass.setBindGroup(0, renderer.bindGroups.main);
+                    colorPass.drawIndexed(fillIndexCount);
+                } else if (layerType === 'fill' && fillIndexCount > 0) {
+                    // Regular polygon fills (landuse, water, etc)
+                    const useBias = fillsWithExtrusions.has(layerId);
+                    const pipeline = useBias ? renderer.pipelines.fillWithBias : renderer.pipelines.fill;
+                    colorPass.setPipeline(pipeline);
+                    colorPass.setVertexBuffer(0, vertexBuffer);
+                    colorPass.setIndexBuffer(fillIndexBuffer, "uint32");
+                    colorPass.setBindGroup(0, renderer.bindGroups.main);
+                    colorPass.drawIndexed(fillIndexCount);
+                } else if (layerType === 'line' && isLine && fillIndexCount > 0) {
+                    // Lines (roads, waterways, boundaries)
                     lineDrawCount++;
                     colorPass.setPipeline(renderer.pipelines.fill);
                     colorPass.setVertexBuffer(0, vertexBuffer);
@@ -1426,16 +1376,6 @@ function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, textureView
                     colorPass.setBindGroup(0, renderer.bindGroups.main);
                     colorPass.drawIndexed(fillIndexCount);
                 }
-                // Polygon outlines disabled - they interfere with line rendering
-                // To enable: uncomment this block
-                // else if (!isLine && outlineIndexCount > 0) {
-                //     lineDrawCount++;
-                //     colorPass.setPipeline(renderer.pipelines.outline);
-                //     colorPass.setVertexBuffer(0, vertexBuffer);
-                //     colorPass.setIndexBuffer(outlineIndexBuffer, "uint32");
-                //     colorPass.setBindGroup(0, renderer.bindGroups.main);
-                //     colorPass.drawIndexed(outlineIndexCount);
-                // }
             });
         }
     }
