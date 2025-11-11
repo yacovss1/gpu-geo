@@ -3,7 +3,7 @@ import { Camera } from './src/core/camera.js';
 import { MapRenderer } from './src/rendering/renderer.js';
 import { parseGeoJSONFeature, fetchVectorTile, clearTileCache, resetNotFoundTiles, setTileSource } from './src/tiles/geojson.js';
 import { batchParseGeoJSONFeaturesGPU } from './src/tiles/geojsonGPU.js';
-import { getStyle, setStyle, setLayerVisibility, getLayerVisibility, getLayer } from './src/core/style.js';
+import { getStyle, setStyle, setLayerVisibility, getLayerVisibility, getLayer, parseColor } from './src/core/style.js';
 import { setupEventListeners } from './src/core/events.js';
 import { getVisibleTiles } from './src/tiles/tile-utils.js'; 
 import { createMarkerPipeline } from './src/rendering/markerPipeline.js';
@@ -394,12 +394,12 @@ async function main() {
     window.tileBuffers = tileBuffers;
     window.hiddenTileBuffers = hiddenTileBuffers;
 
-    // Load the official MapLibre style from the demotiles server
+    // Load the custom OpenFreeMap style optimized for our parser
     try {
-        //simple demo tiles for label display//
         //await window.mapStyle.loadStyleFromURL('https://demotiles.maplibre.org/style.json')
-        await window.mapStyle.loadStyleFromURL('./carto-style.json');
-        console.log('✅ MapLibre style loaded successfully');
+        
+        await window.mapStyle.loadStyleFromURL('./openfreemap-style.json')
+        console.log('✅ OpenFreeMap style loaded successfully');
     } catch (error) {
         console.warn('⚠️ Could not load style, using default colors:', error.message);
     }
@@ -500,14 +500,49 @@ async function main() {
         
         // Create database of all existing tiles (by key)
         const existingTilesByKey = {};
-        tileBuffers.forEach((tile, index) => {
-            const key = `${tile.zoomLevel}/${tile.tileX}/${tile.tileY}`;
-            existingTilesByKey[key] = {
-                tile,
-                hiddenTile: hiddenTileBuffers[index],
-                index
-            };
+        tileBuffers.forEach((layerTiles, layerId) => {
+            layerTiles.forEach((tile, index) => {
+                const key = `${tile.zoomLevel}/${tile.tileX}/${tile.tileY}`;
+                existingTilesByKey[key] = {
+                    tile,
+                    layerId,
+                    index
+                };
+            });
         });
+        
+        // Create a Set of visible tile keys for fast lookup
+        const visibleTileKeys = new Set(
+            visibleTiles.map(tile => `${tile.z}/${tile.x}/${tile.y}`)
+        );
+        
+        // Remove tiles that are no longer visible or at the wrong zoom level
+        let totalRemoved = 0;
+        tileBuffers.forEach((layerTiles, layerId) => {
+            const hiddenLayerTiles = hiddenTileBuffers.get(layerId) || [];
+            
+            // Filter out tiles that aren't visible or at wrong zoom
+            const filteredTiles = layerTiles.filter((tile, index) => {
+                const key = `${tile.zoomLevel}/${tile.tileX}/${tile.tileY}`;
+                return visibleTileKeys.has(key) && tile.zoomLevel === fetchZoom;
+            });
+            
+            const filteredHidden = hiddenLayerTiles.filter((tile, index) => {
+                const key = `${tile.zoomLevel}/${tile.tileX}/${tile.tileY}`;
+                return visibleTileKeys.has(key) && tile.zoomLevel === fetchZoom;
+            });
+            
+            const removed = layerTiles.length - filteredTiles.length;
+            if (removed > 0) {
+                totalRemoved += removed;
+                tileBuffers.set(layerId, filteredTiles);
+                hiddenTileBuffers.set(layerId, filteredHidden);
+            }
+        });
+        
+        if (totalRemoved > 0) {
+            console.log(`🗑️ Removed ${totalRemoved} out-of-view tiles`);
+        }
         
         // Only fetch tiles we don't already have
         const tilesToFetch = visibleTiles.filter(tile => 
@@ -611,33 +646,11 @@ async function main() {
             camera.panTriggerTimeout = null;
         }
         
-        // Track time to prevent excessive triggers
-        const now = performance.now();
-        if (camera.lastPanTime && (now - camera.lastPanTime < 500)) {
-            // Skip if less than 500ms since last pan event
-            return;
-        }
-        camera.lastPanTime = now;
-        
-        // Only trigger on significant movement
-        const velocityMag = Math.sqrt(
-            camera.velocity[0] * camera.velocity[0] + 
-            camera.velocity[1] * camera.velocity[1]
-        );
-        
-        if (velocityMag > 0.05) { // Much higher threshold than before
-            console.log(`Triggering tile update on pan, velocity: ${velocityMag.toFixed(3)}`);
-            
-            // Throttle pan triggers using timeout
-            if (camera.panTriggerTimeout) {
-                clearTimeout(camera.panTriggerTimeout);
-            }
-            
-            camera.panTriggerTimeout = setTimeout(() => {
-                camera.triggerEvent('zoomend');
-                camera.panTriggerTimeout = null;
-            }, 500); // Wait 500ms after pan stops before fetching tiles
-        }
+        // Trigger tile fetch after pan settles (reduced delay for better responsiveness)
+        camera.panTriggerTimeout = setTimeout(() => {
+            camera.triggerEvent('zoomend');
+            camera.panTriggerTimeout = null;
+        }, 150); // Reduced from 500ms to 150ms for faster tile loading
     });
 
     // Trigger initial tile fetch
@@ -1280,11 +1293,29 @@ function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, textureView
     
     hiddenPass.end();
     
+    // Get background color from style or use default
+    const currentMapStyle = getStyle();
+    let clearColor = { r: 0.67, g: 0.83, b: 0.87, a: 1.0 }; // Default light blue
+    if (currentMapStyle?.layers) {
+        const backgroundLayer = currentMapStyle.layers.find(l => l.type === 'background');
+        if (backgroundLayer?.paint?.['background-color']) {
+            const bgColorArray = parseColor(backgroundLayer.paint['background-color']);
+            if (bgColorArray) {
+                clearColor = {
+                    r: bgColorArray[0],
+                    g: bgColorArray[1],
+                    b: bgColorArray[2],
+                    a: bgColorArray[3]
+                };
+            }
+        }
+    }
+    
     // Second render pass: color texture with map features
     const colorPass = mapCommandEncoder.beginRenderPass({
         colorAttachments: [{
             view: renderer.textures.color.createView(),
-            clearValue: { r: 0.15, g: 0.35, b: 0.6, a: 1.0 },
+            clearValue: clearColor,
             loadOp: 'clear',
             storeOp: 'store',
         }],
@@ -1314,75 +1345,99 @@ function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, textureView
         }
     }
     
-    // Render fills first
-    for (const [layerId, buffers] of tileBuffers) {
-        // Skip extrusion layers in this pass
-        if (extrusionLayers.includes(layerId)) continue;
-        
-        // Check layer visibility and zoom range
-        if (!shouldRenderLayer(layerId, renderZoom)) continue;
-        
-        // Use biased pipeline only if this fill has a corresponding extrusion
-        const useBias = fillsWithExtrusions.has(layerId);
-        const pipeline = useBias ? renderer.pipelines.fillWithBias : renderer.pipelines.fill;
-        
-        buffers.forEach(({ vertexBuffer, fillIndexBuffer, fillIndexCount }) => {
-            if (fillIndexCount > 0) {
-                colorPass.setPipeline(pipeline);
-                colorPass.setVertexBuffer(0, vertexBuffer);
-                colorPass.setIndexBuffer(fillIndexBuffer, "uint32");
-                colorPass.setBindGroup(0, renderer.bindGroups.main);
-                colorPass.drawIndexed(fillIndexCount);
-            }
-        });
+    // Render fills first - IN STYLE ORDER
+    if (style?.layers) {
+        for (const layer of style.layers) {
+            const layerId = layer.id;
+            
+            // Skip extrusion layers in this pass
+            if (extrusionLayers.includes(layerId)) continue;
+            
+            // Check layer visibility and zoom range
+            if (!shouldRenderLayer(layerId, renderZoom)) continue;
+            
+            // Get buffers for this layer
+            const buffers = tileBuffers.get(layerId);
+            if (!buffers) continue;
+            
+            // Use biased pipeline only if this fill has a corresponding extrusion
+            const useBias = fillsWithExtrusions.has(layerId);
+            const pipeline = useBias ? renderer.pipelines.fillWithBias : renderer.pipelines.fill;
+            
+            buffers.forEach(({ vertexBuffer, fillIndexBuffer, fillIndexCount }) => {
+                if (fillIndexCount > 0) {
+                    colorPass.setPipeline(pipeline);
+                    colorPass.setVertexBuffer(0, vertexBuffer);
+                    colorPass.setIndexBuffer(fillIndexBuffer, "uint32");
+                    colorPass.setBindGroup(0, renderer.bindGroups.main);
+                    colorPass.drawIndexed(fillIndexCount);
+                }
+            });
+        }
     }
     
-    // Render extrusions second (no depth bias - true depth)
-    for (const [layerId, buffers] of tileBuffers) {
-        // Only render if this is an extrusion layer
-        if (!extrusionLayers.includes(layerId)) continue;
-        
-        // Check layer visibility and zoom range
-        if (!shouldRenderLayer(layerId, renderZoom)) continue;
-        
-        buffers.forEach(({ vertexBuffer, fillIndexBuffer, fillIndexCount }) => {
-            if (fillIndexCount > 0) {
-                colorPass.setPipeline(renderer.pipelines.extrusion);
-                colorPass.setVertexBuffer(0, vertexBuffer);
-                colorPass.setIndexBuffer(fillIndexBuffer, "uint32");
-                colorPass.setBindGroup(0, renderer.bindGroups.main);
-                colorPass.drawIndexed(fillIndexCount);
-            }
-        });
+    // Render extrusions second (no depth bias - true depth) - IN STYLE ORDER
+    if (style?.layers) {
+        for (const layer of style.layers) {
+            const layerId = layer.id;
+            
+            // Only render if this is an extrusion layer
+            if (!extrusionLayers.includes(layerId)) continue;
+            
+            // Check layer visibility and zoom range
+            if (!shouldRenderLayer(layerId, renderZoom)) continue;
+            
+            // Get buffers for this layer
+            const buffers = tileBuffers.get(layerId);
+            if (!buffers) continue;
+            
+            buffers.forEach(({ vertexBuffer, fillIndexBuffer, fillIndexCount }) => {
+                if (fillIndexCount > 0) {
+                    colorPass.setPipeline(renderer.pipelines.extrusion);
+                    colorPass.setVertexBuffer(0, vertexBuffer);
+                    colorPass.setIndexBuffer(fillIndexBuffer, "uint32");
+                    colorPass.setBindGroup(0, renderer.bindGroups.main);
+                    colorPass.drawIndexed(fillIndexCount);
+                }
+            });
+        }
     }
     
-    // Draw outlines (borders) and lines after fills and extrusions
+    // Draw outlines (borders) and lines after fills and extrusions - IN STYLE ORDER
     let lineDrawCount = 0;
-    for (const [layerId, buffers] of tileBuffers) {
-        // Check layer visibility and zoom range
-        if (!shouldRenderLayer(layerId, renderZoom)) continue;
-        
-        buffers.forEach(({ vertexBuffer, fillIndexBuffer, fillIndexCount, outlineIndexBuffer, outlineIndexCount, isLine }) => {
-            // Lines are now tessellated as triangles, so they use fillIndexBuffer
-            if (isLine && fillIndexCount > 0) {
-                lineDrawCount++;
-                colorPass.setPipeline(renderer.pipelines.fill);
-                colorPass.setVertexBuffer(0, vertexBuffer);
-                colorPass.setIndexBuffer(fillIndexBuffer, "uint32");
-                colorPass.setBindGroup(0, renderer.bindGroups.main);
-                colorPass.drawIndexed(fillIndexCount);
-            }
-            // Polygon outlines disabled - they interfere with line rendering
-            // To enable: uncomment this block
-            // else if (!isLine && outlineIndexCount > 0) {
-            //     lineDrawCount++;
-            //     colorPass.setPipeline(renderer.pipelines.outline);
-            //     colorPass.setVertexBuffer(0, vertexBuffer);
-            //     colorPass.setIndexBuffer(outlineIndexBuffer, "uint32");
-            //     colorPass.setBindGroup(0, renderer.bindGroups.main);
-            //     colorPass.drawIndexed(outlineIndexCount);
-            // }
-        });
+    if (style?.layers) {
+        for (const layer of style.layers) {
+            const layerId = layer.id;
+            
+            // Check layer visibility and zoom range
+            if (!shouldRenderLayer(layerId, renderZoom)) continue;
+            
+            // Get buffers for this layer
+            const buffers = tileBuffers.get(layerId);
+            if (!buffers) continue;
+            
+            buffers.forEach(({ vertexBuffer, fillIndexBuffer, fillIndexCount, outlineIndexBuffer, outlineIndexCount, isLine }) => {
+                // Lines are now tessellated as triangles, so they use fillIndexBuffer
+                if (isLine && fillIndexCount > 0) {
+                    lineDrawCount++;
+                    colorPass.setPipeline(renderer.pipelines.fill);
+                    colorPass.setVertexBuffer(0, vertexBuffer);
+                    colorPass.setIndexBuffer(fillIndexBuffer, "uint32");
+                    colorPass.setBindGroup(0, renderer.bindGroups.main);
+                    colorPass.drawIndexed(fillIndexCount);
+                }
+                // Polygon outlines disabled - they interfere with line rendering
+                // To enable: uncomment this block
+                // else if (!isLine && outlineIndexCount > 0) {
+                //     lineDrawCount++;
+                //     colorPass.setPipeline(renderer.pipelines.outline);
+                //     colorPass.setVertexBuffer(0, vertexBuffer);
+                //     colorPass.setIndexBuffer(outlineIndexBuffer, "uint32");
+                //     colorPass.setBindGroup(0, renderer.bindGroups.main);
+                //     colorPass.drawIndexed(outlineIndexCount);
+                // }
+            });
+        }
     }
     
     if (!window._totalLineDrawLogged && lineDrawCount > 0) {
@@ -1396,7 +1451,7 @@ function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, textureView
     const mainPass = mapCommandEncoder.beginRenderPass({
         colorAttachments: [{
             view: textureView,  // Use passed texture view instead of calling getCurrentTexture again
-            clearValue: { r: 0.15, g: 0.35, b: 0.6, a: 1.0 },
+            clearValue: clearColor,  // Use the same background color from style
             loadOp: 'load',  // Load existing content, don't clear!
             storeOp: 'store',
         }],

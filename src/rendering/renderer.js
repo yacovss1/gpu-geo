@@ -83,11 +83,14 @@ export function createRenderPipeline(device, format, topology, isHidden = false,
         depthStencil: {
             format: 'depth24plus',
             depthWriteEnabled: true,
-            depthCompare: 'less',
-            ...(depthBias !== 0 && topology !== 'line-list' ? {
-                depthBias: depthBias,
-                depthBiasSlopeScale: 1.0
-            } : {})
+            depthCompare: 'less-equal',
+            // Apply depth bias to handle tile overlaps and layer ordering
+            depthBias: depthBias,
+            // Only use slope scale for triangle topologies (not point-list or line-list)
+            ...(topology === 'triangle-list' && {
+                depthBiasSlopeScale: 4.0,
+                depthBiasClamp: 0.1
+            })
         }
     });
 }
@@ -228,6 +231,27 @@ export class MapRenderer {
         this.pipelines.hidden = createRenderPipeline(this.device, this.format, "triangle-list", true, 0);
         this.pipelines.edgeDetection = createEdgeDetectionPipeline(this.device, this.format);
         this.pipelines.debug = createDebugTexturePipeline(this.device, this.format);
+        
+        // Cache for layer-specific pipelines with depth bias
+        this.pipelines.layerCache = new Map();
+    }
+    
+    // Get or create a pipeline with specific depth bias for layer ordering
+    getPipelineForLayer(layerIndex, totalLayers, tileHash = 0) {
+        // Calculate depth bias: earlier layers get negative bias (render behind)
+        // Later layers get less negative or positive bias (render on top)
+        // Add larger tile-specific offset to prevent z-fighting between overlapping tiles
+        const layerBias = -(totalLayers - layerIndex) * 10000;  // Increased spacing
+        const tileBias = (tileHash % 100) * 10;  // 0-990 range for tile variation
+        const depthBias = layerBias + tileBias;
+        
+        const key = `layer_${depthBias}`;
+        if (!this.pipelines.layerCache.has(key)) {
+            this.pipelines.layerCache.set(key, 
+                createRenderPipeline(this.device, this.format, "triangle-list", false, depthBias)
+            );
+        }
+        return this.pipelines.layerCache.get(key);
     }
     
     createResources(canvas, camera) {

@@ -243,7 +243,17 @@ function addLineCap(vertices, indices, point, prevPoint, halfWidth, cap, isStart
  * @returns {number} World-space width
  */
 export function screenWidthToWorld(screenWidth, zoom, canvasHeight = 512) {
-    // Simple constant multiplier - lines will scale with zoom
-    // This is a workaround until we implement proper screen-space line rendering
-    return screenWidth * 0.00001;
+    // Convert screen pixels to world coordinates
+    // At zoom level z, tiles span: 2 / (2^z) world units
+    // Each tile is 512 pixels, so world units per pixel = (2 / 2^z) / 512
+    // However, we need to account for the actual tile we're rendering in
+    // Add a zoom-dependent scaling factor to keep lines thin
+    const tileWorldSize = 2.0 / Math.pow(2, zoom);
+    const worldUnitsPerPixel = tileWorldSize / 512.0;
+    
+    // Apply additional scaling to prevent lines from getting too thick
+    // Lines should get thinner as you zoom in (higher zoom = smaller scale factor)
+    const scaleFactor = 0.1; // Constant to keep lines consistently thin
+    
+    return screenWidth * worldUnitsPerPixel * scaleFactor;
 }

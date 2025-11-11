@@ -152,10 +152,10 @@ export const edgeDetectionFragmentShaderCode = `
                     } else {
                         blue = 0.6;
                     }
-                    return vec4<f32>(0.15, 0.35, blue, 1.0);
+                    return centerColor;
                 }
             }
-            return vec4<f32>(0.15, 0.35, 0.6, 1.0);  // Ocean blue
+            return centerColor;
         } else if (isSelected) {
             return vec4<f32>(1.0, 1.0, 0.0, 1.0);  // Yellow highlight
         } else if (isDifferent) {

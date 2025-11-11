@@ -53,6 +53,28 @@ export async function setStyle(style) {
 }
 
 /**
+ * Get the background color from the style
+ * @returns {Array<number>|null} RGBA array [r, g, b, a] with values 0-1
+ */
+export function getBackgroundColor() {
+    if (!currentStyle || !currentStyle.layers) {
+        return null;
+    }
+    
+    const backgroundLayer = currentStyle.layers.find(l => l.type === 'background');
+    if (!backgroundLayer || !backgroundLayer.paint) {
+        return null;
+    }
+    
+    const color = backgroundLayer.paint['background-color'];
+    if (!color) {
+        return null;
+    }
+    
+    return parseColor(color);
+}
+
+/**
  * Get the current style configuration
  * @returns {Object|null}
  */

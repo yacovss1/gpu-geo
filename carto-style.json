@@ -10,6 +10,7 @@
     }
   },
   "layers": [
+
     {
       "id": "water",
       "type": "fill",
@@ -17,7 +18,17 @@
       "source-layer": "water",
       "paint": {
         "fill-opacity": 0.5,
-        "fill-color": "#800080"
+        "fill-color": "#00ffff"
+      }
+    },
+    {
+      "id": "boundaries",
+      "type": "line",
+      "source": "carto",
+      "source-layer": "boundary",    
+      "paint": {
+        "line-width": 1,
+        "line-color": "#ff0000"
       }
     },
     {
@@ -27,11 +38,20 @@
       "source-layer": "landuse",
       "minzoom": 8,
       "paint": {
-        "fill-opacity": 0.4,
-        "fill-color": "#e8f5e9"
+        "fill-opacity": 1.0,
+        "fill-color": "#00ff00"
       }
     },
-    
+     {
+      "id": "roads-all",
+      "type": "line",
+      "source": "carto",
+      "source-layer": "transportation",
+      "paint": {
+        "line-width": 1,
+        "line-color": "#ffa500"
+      }
+    },
     {
       "id": "buildings",
       "type": "fill",
@@ -39,32 +59,12 @@
       "source-layer": "building",
       "minzoom": 13,
       "paint": {
-        "fill-color": "#ff0000",
-        "fill-opacity": 0.7
+        "fill-color": "#444444",
+        "fill-opacity": 0.9
       }
-    },
-    {
-      "id": "roads-all",
-      "type": "line",
-      "source": "carto",
-      "source-layer": "transportation",
-      "paint": {
-        "line-width": 6,
-        "line-color": "#000000"
-      }
-    },
- 
-    {
-      "id": "boundaries",
-      "type": "line",
-      "source": "carto",
-      "source-layer": "boundary",
-      "paint": {
-        "line-width": 3,
-        "line-color": "#ffc0cb"
-      }
-    },
-    {
+    },   
+   
+   {
       "id": "place-labels",
       "type": "symbol",
       "source": "carto",

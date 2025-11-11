@@ -524,7 +524,10 @@ export async function batchParseGeoJSONFeaturesGPU(features, device, fillColor =
     }
 
     // LAYER-FIRST: For each layer, process all matching features
-    for (const layer of layers) {
+    const allStyleLayers = style?.layers || [];
+    
+    for (let layerIndex = 0; layerIndex < layers.length; layerIndex++) {
+        const layer = layers[layerIndex];
         // Skip invisible layers
         if (layer.layout?.visibility === 'none') continue;
         
@@ -803,7 +806,7 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
                     
                     if (lineTessellation.vertices.length > 0) {
                         const vertexOffset = fillVertices.length / 7;
-                        // Vertices are already transformed, use them directly
+                        // Vertices are already transformed, use them directly with depth offset
                         lineTessellation.vertices.forEach(coord => {
                             fillVertices.push(coord[0], coord[1], 0.0, ..._borderColor);
                             hiddenVertices.push(coord[0], coord[1], 0.0, 0, 0, 0, 1);
@@ -878,7 +881,7 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
                         
                         if (lineTessellation.vertices.length > 0) {
                             const vertexOffset = fillVertices.length / 7;
-                            // Vertices are already transformed, use them directly
+                            // Vertices are already transformed, use them directly with depth offset
                             lineTessellation.vertices.forEach(coord => {
                                 fillVertices.push(coord[0], coord[1], 0.0, ..._borderColor);
                                 hiddenVertices.push(coord[0], coord[1], 0.0, 0, 0, 0, 1);
