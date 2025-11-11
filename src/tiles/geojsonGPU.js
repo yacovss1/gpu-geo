@@ -5,7 +5,7 @@ import { hexToRgb } from '../core/utils.js';
 import { getColorOfCountries } from '../core/utils.js';
 import { getGlobalCoordinateTransformer } from '../core/coordinateGPU.js';
 import earcut from 'earcut';
-import { tessellateLine, screenWidthToWorld } from './line-tessellation.js';
+import { tessellateLine, screenWidthToWorld } from './line-tessellation-simple.js';
 import { 
     getStyle, 
     getFeatureId as getStyleFeatureId, 
@@ -394,8 +394,8 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
                 if (lineLayer) {
                     const widthValue = getPaintProperty(lineLayer.id, 'line-width', feature, zoom);
                     lineWidth = typeof widthValue === 'number' ? widthValue : 1;
-                    lineCap = lineLayer.layout?.['line-cap'] || 'butt';
-                    lineJoin = lineLayer.layout?.['line-join'] || 'miter';
+                    lineCap = lineLayer.layout?.['line-cap'] || 'round';
+                    lineJoin = lineLayer.layout?.['line-join'] || 'round';
                     miterLimit = lineLayer.layout?.['line-miter-limit'] || 2;
                 }
             }
@@ -446,8 +446,8 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
                 if (lineLayer) {
                     const widthValue = getPaintProperty(lineLayer.id, 'line-width', feature, zoom);
                     multiLineWidth = typeof widthValue === 'number' ? widthValue : 1;
-                    multiLineCap = lineLayer.layout?.['line-cap'] || 'butt';
-                    multiLineJoin = lineLayer.layout?.['line-join'] || 'miter';
+                    multiLineCap = lineLayer.layout?.['line-cap'] || 'round';
+                    multiLineJoin = lineLayer.layout?.['line-join'] || 'round';
                     multiMiterLimit = lineLayer.layout?.['line-miter-limit'] || 2;
                 }
             }

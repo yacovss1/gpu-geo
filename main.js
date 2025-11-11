@@ -938,10 +938,11 @@ async function loadVisibleTiles(visibleTiles, device, newTileBuffers, newHiddenT
                     // Use GPU batch processing for coordinate transformation
                     const currentStyle = getStyle();
                     const sourceId = currentStyle ? Object.keys(currentStyle.sources)[0] : null;
-                    const zoom = camera.zoom;
+                    // Use the TILE's zoom level, not the camera zoom, for style evaluation
+                    const tileZoom = z;
                     
                     try {
-                        parsedFeatures = await batchParseGeoJSONFeaturesGPU(features, device, [0.0, 1.0, 0.0, 1.0], sourceId, zoom);
+                        parsedFeatures = await batchParseGeoJSONFeaturesGPU(features, device, [0.0, 1.0, 0.0, 1.0], sourceId, tileZoom);
                         if (!window._parseSuccessLogged) {
                             console.log('✅ GPU parsing succeeded:', parsedFeatures.length, 'features');
                             window._parseSuccessLogged = true;
