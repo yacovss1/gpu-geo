@@ -58,11 +58,17 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
 
         // Get extrusion properties if this is a 3D layer
         if (extrusionLayer) {
-            isExtruded = true;
-            const heightValue = getPaintProperty(extrusionLayer.id, 'fill-extrusion-height', feature, zoom);
-            const baseValue = getPaintProperty(extrusionLayer.id, 'fill-extrusion-base', feature, zoom);
-            extrusionHeight = typeof heightValue === 'number' ? heightValue : 0;
-            extrusionBase = typeof baseValue === 'number' ? baseValue : 0;
+            // Check minzoom/maxzoom constraints
+            const minZoom = extrusionLayer.minzoom !== undefined ? extrusionLayer.minzoom : 0;
+            const maxZoom = extrusionLayer.maxzoom !== undefined ? extrusionLayer.maxzoom : 24;
+            
+            if (zoom >= minZoom && zoom <= maxZoom) {
+                isExtruded = true;
+                const heightValue = getPaintProperty(extrusionLayer.id, 'fill-extrusion-height', feature, zoom);
+                const baseValue = getPaintProperty(extrusionLayer.id, 'fill-extrusion-base', feature, zoom);
+                extrusionHeight = typeof heightValue === 'number' ? heightValue : 0;
+                extrusionBase = typeof baseValue === 'number' ? baseValue : 0;
+            }
         }
 
         // Apply filter if layer has one
@@ -166,6 +172,11 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
         const vertices = [];
         const indices = [];
         
+        // Convert height from meters to clip space
+        const heightZ = height * 0.0007; // 15m = 0.0105 units
+        const baseZ = base * 0.0007;
+        console.log(`🏢 GPU Building: ${height}m -> Z=${heightZ.toFixed(5)}`);
+        
         // Generate vertical walls for each edge
         for (let i = 0; i < outerRing.length - 1; i++) {
             const p1 = outerRing[i];
@@ -176,10 +187,10 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
             const baseIdx = vertices.length / 7;
             
             // Bottom-left, bottom-right, top-right, top-left
-            vertices.push(x1, y1, base, ..._fillColor);
-            vertices.push(x2, y2, base, ..._fillColor);
-            vertices.push(x2, y2, height, ..._fillColor);
-            vertices.push(x1, y1, height, ..._fillColor);
+            vertices.push(x1, y1, baseZ, ..._fillColor);
+            vertices.push(x2, y2, baseZ, ..._fillColor);
+            vertices.push(x2, y2, heightZ, ..._fillColor);
+            vertices.push(x1, y1, heightZ, ..._fillColor);
             
             // Two triangles for wall quad
             indices.push(baseIdx, baseIdx + 1, baseIdx + 2);
@@ -197,7 +208,7 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
         
         outerRing.forEach(coord => {
             const [x, y] = getTransformedCoord(coord);
-            vertices.push(x, y, height, ..._fillColor);
+            vertices.push(x, y, heightZ, ..._fillColor);
         });
         
         roofTriangles.forEach(idx => {
@@ -228,7 +239,7 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
             
             // Use extrusion geometry if this is a 3D layer
             if (isExtruded && extrusionHeight > 0) {
-                const extrusion = generateExtrusion(outerRing, extrusionHeight, extrusionBase);
+                const extrusion = generateExtrusion(outerRing, extrusionHeight, extrusionBase, holes);
                 const vertexOffset = fillVertices.length / 7;
                 extrusion.vertices.forEach(v => fillVertices.push(v));
                 extrusion.indices.forEach(i => fillIndices.push(i + vertexOffset));
@@ -278,7 +289,7 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
                 
                 // Use extrusion geometry if this is a 3D layer
                 if (isExtruded && extrusionHeight > 0) {
-                    const extrusion = generateExtrusion(outerRing, extrusionHeight, extrusionBase);
+                    const extrusion = generateExtrusion(outerRing, extrusionHeight, extrusionBase, holes);
                     const vertexOffset = fillVertices.length / 7;
                     extrusion.vertices.forEach(v => fillVertices.push(v));
                     extrusion.indices.forEach(i => fillIndices.push(i + vertexOffset));
@@ -734,42 +745,119 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
     };
 
     // Helper function to generate 3D extrusion geometry (walls + roof)
-    const generateExtrusion = (outerRing, height, base) => {
+    const generateExtrusion = (outerRing, height, base, holes = []) => {
         const vertices = [];
         const indices = [];
         
-        // Generate vertical walls for each edge
+        // Convert height from meters to clip space - MUCH SMALLER for subtle effect
+        const heightZ = height * 0.00005; // 15m = 0.00075 units (very subtle)
+        const baseZ = base * 0.00005;
+        console.log(`🏢 GPU Building: ${height}m -> Z=${heightZ.toFixed(6)}`);
+        
+        // Generate vertical walls for outer ring
         for (let i = 0; i < outerRing.length - 1; i++) {
             const p1 = outerRing[i];
             const p2 = outerRing[i + 1];
             const [x1, y1] = getTransformedCoord(p1);
             const [x2, y2] = getTransformedCoord(p2);
             
+            // Calculate wall direction for directional lighting
+            const dx = x2 - x1;
+            const dy = y2 - y1;
+            const angle = Math.atan2(dy, dx);
+            
+            // Simulate sun from north-west
+            const sunAngle = Math.PI * 0.75;
+            const lightDot = Math.cos(angle - sunAngle);
+            
+            // Moderate lighting contrast
+            const lightFactor = 0.4 + lightDot * 0.4; // Range 0.0 to 0.8
+            
+            // Wall color with directional lighting
+            const wallColor = [
+                _fillColor[0] * lightFactor,
+                _fillColor[1] * lightFactor,
+                _fillColor[2] * lightFactor,
+                _fillColor[3]
+            ];
+            
             const baseIdx = vertices.length / 7;
             
-            // Bottom-left, bottom-right, top-right, top-left
-            vertices.push(x1, y1, base, ..._fillColor);
-            vertices.push(x2, y2, base, ..._fillColor);
-            vertices.push(x2, y2, height, ..._fillColor);
-            vertices.push(x1, y1, height, ..._fillColor);
+            // Wall vertices
+            vertices.push(x1, y1, baseZ, ...wallColor);
+            vertices.push(x2, y2, baseZ, ...wallColor);
+            vertices.push(x2, y2, heightZ, ...wallColor);
+            vertices.push(x1, y1, heightZ, ...wallColor);
             
             // Two triangles for wall quad
             indices.push(baseIdx, baseIdx + 1, baseIdx + 2);
             indices.push(baseIdx, baseIdx + 2, baseIdx + 3);
         }
         
-        // Generate roof (flat top polygon at height)
+        // Generate walls for holes (inner courtyards)
+        holes.forEach(hole => {
+            for (let i = 0; i < hole.length - 1; i++) {
+                const p1 = hole[i];
+                const p2 = hole[i + 1];
+                const [x1, y1] = getTransformedCoord(p1);
+                const [x2, y2] = getTransformedCoord(p2);
+                
+                const dx = x2 - x1;
+                const dy = y2 - y1;
+                const angle = Math.atan2(dy, dx);
+                const sunAngle = Math.PI * 0.75;
+                const lightDot = Math.cos(angle - sunAngle);
+                const lightFactor = 0.4 + lightDot * 0.4;
+                
+                const wallColor = [
+                    _fillColor[0] * lightFactor,
+                    _fillColor[1] * lightFactor,
+                    _fillColor[2] * lightFactor,
+                    _fillColor[3]
+                ];
+                
+                const baseIdx = vertices.length / 7;
+                
+                // Wall vertices (reverse winding for inner walls)
+                vertices.push(x2, y2, baseZ, ...wallColor);
+                vertices.push(x1, y1, baseZ, ...wallColor);
+                vertices.push(x1, y1, heightZ, ...wallColor);
+                vertices.push(x2, y2, heightZ, ...wallColor);
+                
+                indices.push(baseIdx, baseIdx + 1, baseIdx + 2);
+                indices.push(baseIdx, baseIdx + 2, baseIdx + 3);
+            }
+        });
+        
+        // Generate roof (flat top polygon at height with holes)
         const flatCoords = [];
         outerRing.forEach(coord => {
             flatCoords.push(coord[0], coord[1]);
         });
         
-        const roofTriangles = earcut(flatCoords, []);
+        const holeIndices = [];
+        holes.forEach(hole => {
+            holeIndices.push(flatCoords.length / 2);
+            hole.forEach(coord => {
+                flatCoords.push(coord[0], coord[1]);
+            });
+        });
+        
+        const roofTriangles = earcut(flatCoords, holeIndices.length > 0 ? holeIndices : null);
         const roofStartIdx = vertices.length / 7;
         
+        // Add outer ring vertices at roof height
         outerRing.forEach(coord => {
             const [x, y] = getTransformedCoord(coord);
-            vertices.push(x, y, height, ..._fillColor);
+            vertices.push(x, y, heightZ, ..._fillColor);
+        });
+        
+        // Add hole vertices at roof height
+        holes.forEach(hole => {
+            hole.forEach(coord => {
+                const [x, y] = getTransformedCoord(coord);
+                vertices.push(x, y, heightZ, ..._fillColor);
+            });
         });
         
         roofTriangles.forEach(idx => {

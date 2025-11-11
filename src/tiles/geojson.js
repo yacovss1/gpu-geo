@@ -65,6 +65,10 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
             l.layout?.visibility !== 'none'
         );
         
+        if (extrusionLayer) {
+            console.log(`✅ Found extrusion layer "${extrusionLayer.id}" for feature at zoom ${zoom}, minzoom: ${extrusionLayer.minzoom}`);
+        }
+        
         // Find first VISIBLE fill layer for this source-layer
         const fillLayer = layers.find(l => 
             l.type === 'fill' && 
@@ -146,16 +150,22 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
     const generateExtrusion = (allCoords, outerRing, height, base, fillColor, targetVertices, targetIndices) => {
         const startIndex = targetVertices.length / 7;
         
-        // Convert height/base from meters to clip space
-        // In Web Mercator, 1 degree latitude ≈ 111km = 111000m
-        // At equator, clip space spans -1 to 1 = 2 units for 360 degrees = ~40075km
-        // So 1 meter ≈ 2 / 40075000 = 0.00000005 clip units
-        // But we want buildings visible, so scale up based on zoom
-        // At low zoom (showing whole world), buildings should be exaggerated
-        // Use zoom level to scale height appropriately
-        const zoomScale = zoom ? Math.pow(2, zoom - 12) : 0.01; // Scale relative to zoom 12
-        const heightZ = height * 0.00002 * zoomScale; // More visible scaling
-        const baseZ = base * 0.00002 * zoomScale;
+        // Convert height from meters to clip space
+        // Make buildings clearly visible with exaggerated height
+        // With orthographic projection and near/far of ±0.1, we have 0.2 units Z depth
+        // Scale so 15m building = ~0.01 units (10% of available Z range)
+        const heightZ = height * 0.0007; // 15m = 0.0105 clip units
+        const baseZ = base * 0.0007;
+        
+        console.log(`Building extrusion: ${height}m -> Z=${heightZ.toFixed(5)}`);
+        
+        // Create darker color for walls
+        const wallColor = [
+            fillColor[0] * 0.7,
+            fillColor[1] * 0.7,
+            fillColor[2] * 0.7,
+            fillColor[3]
+        ];
         
         // Generate wall quads for each edge of outer ring only
         for (let i = 0; i < outerRing.length - 1; i++) {
@@ -167,11 +177,11 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
             // Wall quad vertices (2 triangles = 6 vertices for quad)
             const vertexOffset = (targetVertices.length / 7);
             
-            // Bottom-left, bottom-right, top-right, top-left
-            targetVertices.push(x1, y1, baseZ, ...fillColor);       // 0
-            targetVertices.push(x2, y2, baseZ, ...fillColor);       // 1
-            targetVertices.push(x2, y2, heightZ, ...fillColor);     // 2
-            targetVertices.push(x1, y1, heightZ, ...fillColor);     // 3
+            // Bottom-left, bottom-right, top-right, top-left - use WALL color
+            targetVertices.push(x1, y1, baseZ, ...wallColor);       // 0
+            targetVertices.push(x2, y2, baseZ, ...wallColor);       // 1
+            targetVertices.push(x2, y2, heightZ, ...wallColor);     // 2
+            targetVertices.push(x1, y1, heightZ, ...wallColor);     // 3
             
             // Two triangles for the wall quad
             targetIndices.push(

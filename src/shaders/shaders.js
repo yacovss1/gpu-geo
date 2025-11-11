@@ -4,7 +4,8 @@ export const vertexShaderCode = `
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) fragCoord: vec2<f32>,
-    @location(1) color: vec4<f32>
+    @location(1) color: vec4<f32>,
+    @location(2) worldZ: f32
 };
 
 @group(0) @binding(0) var<uniform> uniforms: mat4x4<f32>;
@@ -13,12 +14,9 @@ struct VertexOutput {
 fn main(@location(0) inPosition: vec3<f32>, @location(1) inColor: vec4<f32>) -> VertexOutput {
     var output: VertexOutput;
     
-    // Apply isometric projection: shift Y upward based on Z height
-    // This makes buildings appear to "stand up" visually
-    let isoPosition = vec3<f32>(inPosition.x, inPosition.y + inPosition.z * 0.3, inPosition.z);
-    
-    // Create homogeneous coordinate with modified position
-    let pos = vec4<f32>(isoPosition.xy, inPosition.z, 1.0);
+    // Very small isometric offset - just enough to be visible
+    let isoY = inPosition.y + inPosition.z * 0.1;
+    let pos = vec4<f32>(inPosition.x, isoY, inPosition.z, 1.0);
     
     // Apply camera transform
     output.position = uniforms * pos;
@@ -26,6 +24,7 @@ fn main(@location(0) inPosition: vec3<f32>, @location(1) inColor: vec4<f32>) -> 
     // Pass along coordinates for fragment shader
     output.fragCoord = output.position.xy;
     output.color = inColor;
+    output.worldZ = inPosition.z; // Pass Z to fragment shader for shading
     
     return output;
 }
@@ -33,8 +32,8 @@ fn main(@location(0) inPosition: vec3<f32>, @location(1) inColor: vec4<f32>) -> 
 
 export const fragmentShaderCode = `
 @fragment
-fn main(@location(0) fragCoord: vec2<f32>, @location(1) color: vec4<f32>) -> @location(0) vec4<f32> {
-    // Use color as-is from vertex shader
+fn main(@location(0) fragCoord: vec2<f32>, @location(1) color: vec4<f32>, @location(2) worldZ: f32) -> @location(0) vec4<f32> {
+    // Just use the color as-is - walls are already darkened in the geometry
     return color;
 }
 `;

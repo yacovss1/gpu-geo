@@ -3,13 +3,14 @@ import { mat4 } from 'gl-matrix';
 export class Camera extends EventTarget {
     constructor(viewportWidth, viewportHeight) {
         super();
-        this.position = [0, 0];
+        this.position = [0, 0]; // Camera position in 2D
         this.trueZoom = 1;
         this.maxFetchZoom = 14;   // Match Carto maxzoom (tiles only go to 14)
         this.maxZoom = 22;        // Max zoom level (2^22 = ~4M scale, same as MapLibre)
         this.minZoom = 0;         // Start at 0 for exponential zoom (2^0 = 1x scale)
         this.zoom = 0;            // Start at zoom 0
-        this.pitch = 60;          // Pitch angle in degrees (0 = top-down, 60 = tilted)
+        this.pitch = 0;           // No pitch
+        this.bearing = 0;         // Rotation around Z axis (0 = north up)
         this.zoomFactor = 1.0;    // Zoom by 1 level at a time (reasonable speed)
         this.viewportWidth = viewportWidth;
         this.viewportHeight = viewportHeight;
@@ -20,7 +21,7 @@ export class Camera extends EventTarget {
         this.zoomEndTimeout = null;
         this.zoomEndDelay = 250;
         this._cachedMatrix = null;
-        this._lastState = { pos: [...this.position], zoom: this.zoom };
+        this._lastState = { pos: [...this.position], zoom: this.zoom, pitch: this.pitch, bearing: this.bearing };
         
         // Store mouse position in NORMALIZED screen coordinates (0-1 range)
         // This way it's independent of zoom level
@@ -65,43 +66,49 @@ export class Camera extends EventTarget {
     }
 
     getMatrix() {
-        // Only recompute if position or zoom changed
+        // Only recompute if position, zoom, or pitch changed
         if (
             this._cachedMatrix &&
             this._lastState.pos[0] === this.position[0] &&
             this._lastState.pos[1] === this.position[1] &&
-            this._lastState.zoom === this.zoom
+            this._lastState.zoom === this.zoom &&
+            this._lastState.pitch === this.pitch
         ) {
             return this._cachedMatrix;
         }
 
-        // Store current zoom for debugging
-        this._zoomDebug.raw = this.zoom;
-        
-        // Use exponential zoom like MapLibre: 2^zoom
         const aspectRatio = this.viewportWidth / this.viewportHeight;
-        const matrix = mat4.create();
-        
-        // STANDARD web mercator zoom formula
-        // For Web Mercator with world in [-1, 1] normalized coordinates:
-        // scale = 2^zoom
-        // This ensures proper overzooming behavior when displayZoom > fetchZoom
         const effectiveZoom = Math.pow(2, this.zoom);
         
+        // Orthographic projection for map rendering
+        const matrix = mat4.create();
         
+        // Scale for zoom
+        mat4.scale(matrix, matrix, [effectiveZoom / aspectRatio, effectiveZoom, effectiveZoom]);
         
-        // Apply the zoom scale FIRST in the matrix (but will be applied LAST to vertices)
-        mat4.scale(matrix, matrix, [effectiveZoom / aspectRatio, effectiveZoom, 1]);
-        
-        // Translate by negative camera position (this will be applied FIRST to vertices)
+        // Translate to camera position
         mat4.translate(matrix, matrix, [-this.position[0], -this.position[1], 0]);
         
-        // Store the visual zoom for UI display
+        // Debug: Log camera setup once
+        if (!this._debugLogged) {
+            console.log('🎥 Camera setup:', {
+                position: this.position,
+                zoom: this.zoom,
+                effectiveZoom
+            });
+            this._debugLogged = true;
+        }
+        
         this._visualZoom = effectiveZoom;
         this._zoomDebug.visual = effectiveZoom;
         
         this._cachedMatrix = matrix;
-        this._lastState = { pos: [...this.position], zoom: this.zoom };
+        this._lastState = { 
+            pos: [...this.position], 
+            zoom: this.zoom,
+            pitch: this.pitch,
+            bearing: this.bearing
+        };
         
         return matrix;
     }
