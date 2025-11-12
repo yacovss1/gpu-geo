@@ -630,8 +630,8 @@ async function main() {
     // Trigger initial tile fetch
     camera.triggerEvent('zoomend');
 
-    // Set up event listeners
-    setupEventListeners(canvas, camera, device, renderer.textures.hidden, tileBuffers, renderer.buffers.pickedId);
+    // Set up event listeners - pass renderer object so texture reference stays current
+    setupEventListeners(canvas, camera, device, renderer, tileBuffers);
 
     // Marker position cache - updated after each frame
     let markerPositionCache = null;
@@ -947,7 +947,7 @@ async function loadVisibleTiles(visibleTiles, device, newTileBuffers, newHiddenT
                     const tileZoom = z;
                     
                     try {
-                        parsedFeatures = await batchParseGeoJSONFeaturesGPU(features, device, [0.0, 1.0, 0.0, 1.0], sourceId, tileZoom);
+                        parsedFeatures = await batchParseGeoJSONFeaturesGPU(features, device, [0.0, 1.0, 0.0, 1.0], sourceId, tileZoom, x, y, z);
                         if (!window._parseSuccessLogged) {
                             console.log('✅ GPU parsing succeeded:', parsedFeatures.length, 'features');
                             window._parseSuccessLogged = true;

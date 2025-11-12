@@ -96,19 +96,19 @@ export function createRenderPipeline(device, format, topology, isHidden = false,
 export function createEdgeDetectionPipeline(device, format) {
     initCachedShaders(device);
     
+    // FORCE: Recreate layout due to new binding 6 (pickedLayerId)
     // Cache bind group layout for edge detection
-    if (!cachedLayouts.edgeDetection) {
-        cachedLayouts.edgeDetection = device.createBindGroupLayout({
-            entries: [
-                { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
-                { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
-                { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
-                { binding: 3, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
-                { binding: 4, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
-                { binding: 5, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } }
-            ]
-        });
-    }
+    cachedLayouts.edgeDetection = device.createBindGroupLayout({
+        entries: [
+            { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+            { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+            { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+            { binding: 3, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+            { binding: 4, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+            { binding: 5, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+            { binding: 6, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } }
+        ]
+    });
     
     const pipelineLayout = device.createPipelineLayout({ 
         bindGroupLayouts: [cachedLayouts.edgeDetection] 
@@ -252,6 +252,12 @@ export class MapRenderer {
         });
         this.device.queue.writeBuffer(this.buffers.pickedId, 0, new Float32Array([0]));
         
+        this.buffers.pickedLayerId = this.device.createBuffer({
+            size: 4,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+        this.device.queue.writeBuffer(this.buffers.pickedLayerId, 0, new Float32Array([0]));
+        
         // Add zoom info buffer - increase to hold 4 values instead of just 2
         this.buffers.zoomInfo = this.device.createBuffer({
             size: 16, // 4 float32 values (4 bytes each)
@@ -287,7 +293,8 @@ export class MapRenderer {
                 { binding: 2, resource: this.sampler },
                 { binding: 3, resource: { buffer: this.buffers.canvasSize } },
                 { binding: 4, resource: { buffer: this.buffers.pickedId } },
-                { binding: 5, resource: { buffer: this.buffers.zoomInfo } }
+                { binding: 5, resource: { buffer: this.buffers.zoomInfo } },
+                { binding: 6, resource: { buffer: this.buffers.pickedLayerId } }
             ]
         });
         
@@ -359,7 +366,8 @@ export class MapRenderer {
                 { binding: 2, resource: this.sampler },
                 { binding: 3, resource: { buffer: this.buffers.canvasSize } },
                 { binding: 4, resource: { buffer: this.buffers.pickedId } },
-                { binding: 5, resource: { buffer: this.buffers.zoomInfo } }
+                { binding: 5, resource: { buffer: this.buffers.zoomInfo } },
+                { binding: 6, resource: { buffer: this.buffers.pickedLayerId } }
             ]
         });
         

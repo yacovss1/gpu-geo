@@ -50,8 +50,8 @@ fn main(@location(0) fragCoord: vec2<f32>, @location(1) color: vec4<f32>, @locat
 export const hiddenFragmentShaderCode = `
 @fragment
 fn main(@location(0) fragCoord: vec2<f32>, @location(1) color: vec4<f32>) -> @location(0) vec4<f32> {
-    // Use red and green channels for 16-bit feature ID encoding
-    return vec4<f32>(color.r, color.g, 0.0, 1.0);
+    // Use RGB channels: R+G for 16-bit feature ID, B for layer ID
+    return vec4<f32>(color.r, color.g, color.b, 1.0);
 }
 `;
 
@@ -85,6 +85,7 @@ export const edgeDetectionFragmentShaderCode = `
     @group(0) @binding(3) var<uniform> canvasSize: vec2<f32>;
     @group(0) @binding(4) var<uniform> pickedId: f32;
     @group(0) @binding(5) var<uniform> zoomInfo: vec4<f32>; // [displayZoom, fetchZoom, effectStrength, extremeZoom]
+    @group(0) @binding(6) var<uniform> pickedLayerId: f32;
 
     @fragment
     fn main(@location(0) texCoord: vec2<f32>) -> @location(0) vec4<f32> {
@@ -124,8 +125,14 @@ export const edgeDetectionFragmentShaderCode = `
             abs(id - downId) > 0.1
         );
         
-        // More lenient comparison for selection
-        let isSelected = hasFeature && (abs(id - pickedId) < 1.0);
+        // Decode layer IDs from blue channel
+        let layerId = centerPixel.b * 255.0;
+        let pickedLayerIdValue = pickedLayerId;  // From uniform
+        
+        // Exact match for selection - both feature ID and layer ID must match
+        let isSelected = hasFeature && 
+                        (abs(id - pickedId) < 0.01) && 
+                        (abs(layerId - pickedLayerIdValue) < 0.01);
 
         // CRITICAL FIX: Delay pattern changes until much higher zoom levels (20+)
         if (!hasFeature) {

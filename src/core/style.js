@@ -481,7 +481,7 @@ export function parseColor(color) {
  * @param {string} sourceId - Source ID
  * @returns {number|string}
  */
-export function getFeatureId(feature, sourceId) {
+export function getFeatureId(feature, sourceId, featureIndex = 0) {
     const promoteId = getSourcePromoteId(sourceId);
     
     if (promoteId) {
@@ -510,16 +510,17 @@ export function getFeatureId(feature, sourceId) {
         return feature.id;
     }
 
-    // Generate a stable ID from feature properties (uses name-based hash for countries)
-    return generateFeatureId(feature);
+    // Generate a stable ID from feature properties (uses feature index as fallback)
+    return generateFeatureId(feature, featureIndex);
 }
 
 /**
  * Generate a stable feature ID from feature properties
  * @param {Object} feature - GeoJSON feature
+ * @param {number} fallbackIndex - Optional index to use if hashing fails
  * @returns {number}
  */
-function generateFeatureId(feature) {
+function generateFeatureId(feature, fallbackIndex = 0) {
     // Prioritize country name for deterministic IDs (same as geojson.js)
     const countryName = feature.properties?.NAME || feature.properties?.ADM0_A3 || feature.properties?.ISO_A3;
     if (countryName) {
@@ -532,14 +533,31 @@ function generateFeatureId(feature) {
         return ((Math.abs(hash) % 9973) + 1);
     }
     
-    // Fallback: hash all properties for non-country features  
-    const str = JSON.stringify(feature.properties || {});
+    // If we have a fallback index (from batch processing), use it directly
+    // This ensures each feature in a tile gets a unique ID
+    if (fallbackIndex > 0) {
+        return (fallbackIndex % 65533) + 1; // Keep in 16-bit range
+    }
+    
+    // Fallback: hash properties + geometry for unique ID per feature
+    // Include geometry coordinates to ensure different features don't collide
+    const propsStr = JSON.stringify(feature.properties || {});
+    const coordsStr = JSON.stringify(feature.geometry?.coordinates || []).slice(0, 200); // Limit to first 200 chars of coords
+    const str = propsStr + coordsStr;
+    
     let hash = 0;
     for (let i = 0; i < str.length; i++) {
         const char = str.charCodeAt(i);
         hash = ((hash << 5) - hash) + char;
         hash = hash & hash; // Convert to 32-bit integer
     }
-    // Map to 1-9973 range (prime number for better distribution)
-    return ((Math.abs(hash) % 9973) + 1);
+    // Map to 1-65534 range for 16-bit encoding
+    const id = ((Math.abs(hash) % 65533) + 1);
+    
+    if (!window._fidDebugLogged && Math.random() < 0.01) {
+        console.log(`Generated FID: ${id} for feature with hash ${hash}, props:`, feature.properties, `coords sample: ${coordsStr.slice(0, 50)}`);
+        window._fidDebugLogged = true;
+    }
+    
+    return id;
 }

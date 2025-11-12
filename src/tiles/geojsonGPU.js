@@ -237,13 +237,14 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
     const processedFeatures = new Set();
     const featureId = getFeatureId();
     
-    // Clamp feature ID to valid range for 16-bit encoding (1-65534)
-    const clampedFeatureId = Math.max(1, Math.min(65534, featureId));
+    // Ensure feature ID is in valid range for 16-bit encoding (1-65534)
+    // Use modulo instead of clamping to avoid collisions at max value
+    const clampedFeatureId = ((Math.abs(featureId) - 1) % 65533) + 1;
     
-    if (processedFeatures.has(featureId)) {
+    if (processedFeatures.has(clampedFeatureId)) {
         return null;
     }
-    processedFeatures.add(featureId);
+    processedFeatures.add(clampedFeatureId);
 
     if (!window._geomTypeLogged) {
         console.log(`🔍 Feature geometry type: ${feature.geometry.type}`);
@@ -321,7 +322,8 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
                 const fillStartIndex = coordsToVertices(allCoords, _fillColor, fillVertices);
                 const hiddenStartIndex = coordsToIdVertices(allCoords, 
                     clampedFeatureId,  // Use clamped ID for consistency
-                    hiddenVertices
+                    hiddenVertices,
+                    layer?.id || 'unknown'
                 );
 
                 // Add triangle indices
@@ -349,7 +351,8 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
                     const allCoords = polygon.flat(1);
                     const hiddenStartIndex = coordsToIdVertices(allCoords, 
                         clampedFeatureId,
-                        hiddenVertices
+                        hiddenVertices,
+                        layer?.id || 'unknown'
                     );
                     
                     // Triangulate the footprint for hidden buffer indices
@@ -395,7 +398,8 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
                     const fillStartIndex = coordsToVertices(allCoords, _fillColor, fillVertices);
                     const hiddenStartIndex = coordsToIdVertices(allCoords, 
                         featureId,
-                        hiddenVertices
+                        hiddenVertices,
+                        layer?.id || 'unknown'
                     );
 
                     // Add triangle indices
@@ -538,7 +542,7 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
         }
     };
 }
-export async function batchParseGeoJSONFeaturesGPU(features, device, fillColor = [0.0, 0.0, 0.0, 1.0], sourceId = null, zoom = 0) {
+export async function batchParseGeoJSONFeaturesGPU(features, device, fillColor = [0.0, 0.0, 0.0, 1.0], sourceId = null, zoom = 0, tileX = 0, tileY = 0, tileZ = 0) {
     if (features.length === 0) return [];
 
     // Get style layers for filtering
@@ -660,8 +664,8 @@ export async function batchParseGeoJSONFeaturesGPU(features, device, fillColor =
                 return globalIndex !== undefined ? transformedCoords[globalIndex] : [0, 0];
             };
 
-            // Parse feature for THIS SPECIFIC LAYER
-            const result = await parseFeatureWithTransformedCoords(feature, getTransformedCoord, fillColor, sourceId, zoom, layer);
+            // Parse feature for THIS SPECIFIC LAYER (pass tile coords + feature index for unique IDs)
+            const result = await parseFeatureWithTransformedCoords(feature, getTransformedCoord, fillColor, sourceId, zoom, layer, tileX, tileY, tileZ, i);
             if (result) {
                 // Add layerId to result
                 result.layerId = layer.id;
@@ -675,7 +679,7 @@ export async function batchParseGeoJSONFeaturesGPU(features, device, fillColor =
 }
 
 // Helper function to parse a feature when coordinates are already transformed
-async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, fillColor, sourceId = null, zoom = 0, layer = null) {
+async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, fillColor, sourceId = null, zoom = 0, layer = null, tileX = 0, tileY = 0, tileZ = 0, featureIndex = 0) {
     const fillVertices = [];
     const hiddenVertices = [];
     const fillIndices = [];
@@ -781,20 +785,45 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
         _fillColor = getColorOfCountries(countryCode, [0.7, 0.7, 0.7, 1.0]);
     }
 
-    // Get feature ID using style configuration or fallback
+    // Get feature ID using tile coords + index for uniqueness across all tiles
     const getFeatureId = () => {
         if (style && sourceId) {
-            return getStyleFeatureId(feature, sourceId);
+            const baseId = getStyleFeatureId(feature, sourceId, featureIndex);
+            // If it returned a generated ID (not from properties), make it unique per tile
+            if (!feature.properties?.fid && !feature.id) {
+                // Create a highly unique hash using:
+                // 1. Tile coordinates (z, x, y)
+                // 2. Feature index within tile
+                // 3. First AND last coordinates for better geometry uniqueness
+                const coords = feature.geometry?.coordinates?.[0]?.[0] || [[0, 0]];
+                const firstCoord = coords[0] || [0, 0];
+                const lastCoord = coords[coords.length - 1] || firstCoord;
+                
+                // Hash both first and last coordinates
+                const firstHash = Math.abs((firstCoord[0] * 10000 + firstCoord[1] * 10000) | 0);
+                const lastHash = Math.abs((lastCoord[0] * 10000 + lastCoord[1] * 10000) | 0);
+                
+                // Combine everything with prime number multipliers to reduce collisions
+                const combined = (tileZ * 7919) + (tileX * 1009) + (tileY * 127) + (featureIndex * 31) + (firstHash % 997) + (lastHash % 991);
+                return (combined % 65533) + 1;
+            }
+            return baseId;
         }
         // Legacy fallback
-        const rawId = parseInt(feature.properties?.fid || feature.id) || 1;
-        return rawId;
+        const coords = feature.geometry?.coordinates?.[0]?.[0] || [[0, 0]];
+        const firstCoord = coords[0] || [0, 0];
+        const lastCoord = coords[coords.length - 1] || firstCoord;
+        const firstHash = Math.abs((firstCoord[0] * 10000 + firstCoord[1] * 10000) | 0);
+        const lastHash = Math.abs((lastCoord[0] * 10000 + lastCoord[1] * 10000) | 0);
+        const combined = (tileZ * 7919) + (tileX * 1009) + (tileY * 127) + (featureIndex * 31) + (firstHash % 997) + (lastHash % 991);
+        return (combined % 65533) + 1;
     };
 
     const featureId = getFeatureId();
     
-    // Clamp feature ID to valid range for 16-bit encoding (1-65534)
-    const clampedFeatureId = Math.max(1, Math.min(65534, featureId));
+    // Ensure feature ID is in valid range for 16-bit encoding (1-65534)
+    // Use modulo instead of clamping to avoid collisions at max value
+    const clampedFeatureId = ((Math.abs(featureId) - 1) % 65533) + 1;
 
     // Vertex creation functions (same as above)
     const coordsToVertices = (coords, color, targetArray) => {
@@ -806,7 +835,7 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
         return vertexStartIndex;
     };
 
-    const coordsToIdVertices = (coords, featureId, targetArray) => {
+    const coordsToIdVertices = (coords, featureId, targetArray, layerId = '') => {
         const vertexStartIndex = targetArray.length / 7;
         
         // Encode feature ID as 16-bit across red and green channels
@@ -817,9 +846,17 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
         const normalizedR = highByte / 255.0;
         const normalizedG = lowByte / 255.0;
         
+        // Encode layer ID hash in blue channel (8-bit, 0-255)
+        let layerHash = 0;
+        for (let i = 0; i < layerId.length; i++) {
+            layerHash = ((layerHash << 5) - layerHash) + layerId.charCodeAt(i);
+            layerHash = layerHash & layerHash;
+        }
+        const normalizedB = ((Math.abs(layerHash) % 255) + 1) / 255.0; // 1-255 to avoid 0
+        
         coords.forEach(coord => {
             const [x, y] = getTransformedCoord(coord);
-            targetArray.push(x, y, 0.0, normalizedR, normalizedG, 0.0, 1.0);
+            targetArray.push(x, y, 0.0, normalizedR, normalizedG, normalizedB, 1.0);
         });
         return vertexStartIndex;
     };
@@ -1012,7 +1049,7 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
                 // Also create hidden vertices for the footprint so markers can be computed
                 const allCoords = [outerRing, ...holes].flat(1);
                 const hiddenStartIndex = coordsToIdVertices(allCoords, 
-                    clampedFeatureId, hiddenVertices);
+                    clampedFeatureId, hiddenVertices, layer?.id || 'unknown');
                 
                 // Triangulate the footprint for hidden buffer indices
                 const flatCoords = [];
@@ -1058,7 +1095,7 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
                 const allCoords = allRings.flat(1);
                 const fillStartIndex = coordsToVertices(allCoords, _fillColor, fillVertices);
                 const hiddenStartIndex = coordsToIdVertices(allCoords, 
-                    featureId, hiddenVertices);
+                    featureId, hiddenVertices, layer?.id || 'unknown');
 
                 triangles.forEach(index => {
                     fillIndices.push(fillStartIndex + index);
@@ -1115,7 +1152,7 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
                     const allRings = [outerRing, ...holes];
                     const allCoords = allRings.flat(1);
                     const hiddenStartIndex = coordsToIdVertices(allCoords, 
-                        clampedFeatureId, hiddenVertices);
+                        clampedFeatureId, hiddenVertices, layer?.id || 'unknown');
                     
                     // Triangulate the footprint for hidden buffer indices
                     const flatCoords = [];
@@ -1161,7 +1198,7 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
                     const allCoords = allRings.flat(1);
                     const fillStartIndex = coordsToVertices(allCoords, _fillColor, fillVertices);
                     const hiddenStartIndex = coordsToIdVertices(allCoords, 
-                        featureId, hiddenVertices);
+                        featureId, hiddenVertices, layer?.id || 'unknown');
 
                     triangles.forEach(index => {
                         fillIndices.push(fillStartIndex + index);

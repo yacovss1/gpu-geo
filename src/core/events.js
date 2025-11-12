@@ -2,7 +2,7 @@
 let sharedReadBuffer = null;
 let bufferIsMapped = false; // Track buffer mapping state
 
-export function setupEventListeners(canvas, camera, device, hiddenTexture, tileBuffers, pickedIdBuffer) {
+export function setupEventListeners(canvas, camera, device, renderer, tileBuffers) {
     let isPanning = false;
     let lastX = 0;
     let lastY = 0;
@@ -114,7 +114,7 @@ export function setupEventListeners(canvas, camera, device, hiddenTexture, tileB
         const commandEncoder = device.createCommandEncoder();
         commandEncoder.copyTextureToBuffer(
             {
-                texture: hiddenTexture,
+                texture: renderer.textures.hidden,  // Always use current texture from renderer
                 origin: { x: pixelX, y: pixelY, z: 0 },
                 mipLevel: 0,
                 aspect: 'all'
@@ -140,6 +140,7 @@ export function setupEventListeners(canvas, camera, device, hiddenTexture, tileB
             // BGRA format: B=data[0], G=data[1], R=data[2], A=data[3]
             const redChannel = data[2];   // High byte
             const greenChannel = data[1]; // Low byte
+            const blueChannel = data[0];  // Layer ID
             const featureId = redChannel * 256 + greenChannel;
             
             // Ignore clicks on ocean (where there's no feature)
@@ -157,11 +158,13 @@ export function setupEventListeners(canvas, camera, device, hiddenTexture, tileB
             }
             
             if (feature) {
-                // Write the raw value directly
-                device.queue.writeBuffer(pickedIdBuffer, 0, new Float32Array([featureId]));
+                // Write the raw values directly - feature ID and layer ID
+                device.queue.writeBuffer(renderer.buffers.pickedId, 0, new Float32Array([featureId]));
+                device.queue.writeBuffer(renderer.buffers.pickedLayerId, 0, new Float32Array([blueChannel]));
             } else {
                 // Clear selection
-                device.queue.writeBuffer(pickedIdBuffer, 0, new Float32Array([0]));
+                device.queue.writeBuffer(renderer.buffers.pickedId, 0, new Float32Array([0]));
+                device.queue.writeBuffer(renderer.buffers.pickedLayerId, 0, new Float32Array([0]));
             }
 
             sharedReadBuffer.unmap();
