@@ -41,7 +41,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Feature ID from red+green channels (16-bit encoding)
     // R = high byte, G = low byte  
     let fid: u32 = u32(pixel.r * 255.0) * 256u + u32(pixel.g * 255.0);
-    if (fid == 0u || fid >= 10000u) { return; }
+    if (fid == 0u || fid >= 65535u) { return; }
     
     let x = gid.x;
     let y = gid.y;
@@ -262,32 +262,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let width = f32(dims.x);
     let height = f32(dims.y);
     
-    // For very large features, use bounding box center to avoid overflow
-    // u32 max is ~4.3 billion, so sumX could overflow if count * avgX > 4.3B
-    // If count > 100,000 pixels, risk of overflow is high - use bbox instead
-    var centerX: f32;
-    var centerY: f32;
+    // Use center quadrant for default positioning
+    var position = calculateCentroid(&quadrants[idx].center);
     
-    if (count > 100000u) {
-        // Use bounding box midpoint for large features to avoid overflow
-        let minX = atomicLoad(&accumulators[idx].minX);
-        let maxX = atomicLoad(&accumulators[idx].maxX);
-        let minY = atomicLoad(&accumulators[idx].minY);
-        let maxY = atomicLoad(&accumulators[idx].maxY);
-        centerX = f32(minX + maxX) / 2.0;
-        centerY = f32(minY + maxY) / 2.0;
-    } else {
-        // Use center quadrant for default positioning
-        var position = calculateCentroid(&quadrants[idx].center);
-        
-        // Validate position
-        if (position.x < 0.0 || position.y < 0.0) {
-            return; // Invalid position
-        }
-        
-        centerX = position.x;
-        centerY = position.y;
+    // Validate position
+    if (position.x < 0.0 || position.y < 0.0) {
+        return; // Invalid position
     }
+    
+    var centerX = position.x;
+    var centerY = position.y;
     
     // CRITICAL: Verify the computed centroid is actually ON the feature
     let sampleX = i32(centerX);

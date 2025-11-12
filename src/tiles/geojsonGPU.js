@@ -237,8 +237,8 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
     const processedFeatures = new Set();
     const featureId = getFeatureId();
     
-    // Clamp feature ID to valid range for rendering (1-9999)
-    const clampedFeatureId = Math.max(1, Math.min(9999, featureId));
+    // Clamp feature ID to valid range for 16-bit encoding (1-65534)
+    const clampedFeatureId = Math.max(1, Math.min(65534, featureId));
     
     if (processedFeatures.has(featureId)) {
         return null;
@@ -344,6 +344,30 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
                     const vertexOffset = fillVertices.length / 7;
                     extrusion.vertices.forEach(v => fillVertices.push(v));
                     extrusion.indices.forEach(i => fillIndices.push(i + vertexOffset));
+                    
+                    // Also create hidden vertices for the footprint so markers can be computed
+                    const allCoords = polygon.flat(1);
+                    const hiddenStartIndex = coordsToIdVertices(allCoords, 
+                        clampedFeatureId,
+                        hiddenVertices
+                    );
+                    
+                    // Triangulate the footprint for hidden buffer indices
+                    const flatCoords = [];
+                    outerRing.forEach(coord => {
+                        flatCoords.push(coord[0], coord[1]);
+                    });
+                    const holeIndices = [];
+                    holes.forEach(hole => {
+                        holeIndices.push(flatCoords.length / 2);
+                        hole.forEach(coord => {
+                            flatCoords.push(coord[0], coord[1]);
+                        });
+                    });
+                    const triangles = earcut(flatCoords, holeIndices);
+                    triangles.forEach(index => {
+                        hiddenfillIndices.push(hiddenStartIndex + index);
+                    });
                 } else {
                     // Standard 2D fill
                     // Flatten coordinates for triangulation
@@ -769,8 +793,8 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
 
     const featureId = getFeatureId();
     
-    // Clamp feature ID to valid range for rendering (1-9999)
-    const clampedFeatureId = Math.max(1, Math.min(9999, featureId));
+    // Clamp feature ID to valid range for 16-bit encoding (1-65534)
+    const clampedFeatureId = Math.max(1, Math.min(65534, featureId));
 
     // Vertex creation functions (same as above)
     const coordsToVertices = (coords, color, targetArray) => {
@@ -984,6 +1008,30 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
                 const vertexOffset = fillVertices.length / 7;
                 extrusion.vertices.forEach(v => fillVertices.push(v));
                 extrusion.indices.forEach(i => fillIndices.push(i + vertexOffset));
+                
+                // Also create hidden vertices for the footprint so markers can be computed
+                const allCoords = [outerRing, ...holes].flat(1);
+                const hiddenStartIndex = coordsToIdVertices(allCoords, 
+                    clampedFeatureId, hiddenVertices);
+                
+                // Triangulate the footprint for hidden buffer indices
+                const flatCoords = [];
+                outerRing.forEach(coord => {
+                    const [x, y] = getTransformedCoord(coord);
+                    flatCoords.push(x, y);
+                });
+                const holeIndices = [];
+                holes.forEach(hole => {
+                    holeIndices.push(flatCoords.length / 2);
+                    hole.forEach(coord => {
+                        const [x, y] = getTransformedCoord(coord);
+                        flatCoords.push(x, y);
+                    });
+                });
+                const triangles = earcut(flatCoords, holeIndices.length > 0 ? holeIndices : null);
+                triangles.forEach(index => {
+                    hiddenfillIndices.push(hiddenStartIndex + index);
+                });
             } else {
                 // Standard 2D fill
                 const flatCoords = [];
@@ -1062,6 +1110,31 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
                     const vertexOffset = fillVertices.length / 7;
                     extrusion.vertices.forEach(v => fillVertices.push(v));
                     extrusion.indices.forEach(i => fillIndices.push(i + vertexOffset));
+                    
+                    // Also create hidden vertices for the footprint so markers can be computed
+                    const allRings = [outerRing, ...holes];
+                    const allCoords = allRings.flat(1);
+                    const hiddenStartIndex = coordsToIdVertices(allCoords, 
+                        clampedFeatureId, hiddenVertices);
+                    
+                    // Triangulate the footprint for hidden buffer indices
+                    const flatCoords = [];
+                    outerRing.forEach(coord => {
+                        const [x, y] = getTransformedCoord(coord);
+                        flatCoords.push(x, y);
+                    });
+                    const holeIndices = [];
+                    holes.forEach(hole => {
+                        holeIndices.push(flatCoords.length / 2);
+                        hole.forEach(coord => {
+                            const [x, y] = getTransformedCoord(coord);
+                            flatCoords.push(x, y);
+                        });
+                    });
+                    const triangles = earcut(flatCoords, holeIndices.length > 0 ? holeIndices : null);
+                    triangles.forEach(index => {
+                        hiddenfillIndices.push(hiddenStartIndex + index);
+                    });
                 } else {
                     // Standard 2D fill
                     const flatCoords = [];
@@ -1197,6 +1270,11 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
             // console.warn(`Unsupported GeoJSON type: ${feature.geometry.type}`);
     }
 
+    // Debug: Log if building has hidden geometry
+    if (feature.layer?.name === 'building' && hiddenfillIndices.length > 0 && !window._buildingHiddenIndicesLogged) {
+        console.log(`🏢 Building feature has ${hiddenfillIndices.length} hidden indices, ${hiddenVertices.length / 7} hidden vertices, fid: ${featureId} → ${clampedFeatureId}`);
+        window._buildingHiddenIndicesLogged = true;
+    }
     
     return {
         vertices: new Float32Array(fillVertices),

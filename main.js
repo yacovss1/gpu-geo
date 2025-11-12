@@ -3,7 +3,7 @@ import { Camera } from './src/core/camera.js';
 import { MapRenderer } from './src/rendering/renderer.js';
 import { parseGeoJSONFeature, fetchVectorTile, clearTileCache, resetNotFoundTiles, setTileSource } from './src/tiles/geojson.js';
 import { batchParseGeoJSONFeaturesGPU } from './src/tiles/geojsonGPU.js';
-import { getStyle, setStyle, setLayerVisibility, getLayerVisibility, getLayer, parseColor } from './src/core/style.js';
+import { getStyle, setStyle, setLayerVisibility, getLayerVisibility, getLayer, parseColor, getSymbolLayers } from './src/core/style.js';
 import { setupEventListeners } from './src/core/events.js';
 import { getVisibleTiles } from './src/tiles/tile-utils.js'; 
 import { createMarkerPipeline } from './src/rendering/markerPipeline.js';
@@ -12,7 +12,7 @@ import { GPUTextRenderer } from './src/text/gpuTextRenderer.js';
 
 // Define constants at file scope to ensure they're available everywhere
 // 9-quadrant labeling system (center + 8 directional positions)
-const MAX_FEATURES = 10000; // Scaled up from 256, can go to 65536 with 16-bit encoding
+const MAX_FEATURES = 65535; // 16-bit encoding supports 1-65534, use 65535 as array size
 const ACCUMULATOR_BUFFER_SIZE = MAX_FEATURES * 28; // Pass 1: 7 u32 per feature (sumX, sumY, count, minX, minY, maxX, maxY) = 28 bytes
 const QUADRANT_BUFFER_SIZE = MAX_FEATURES * 108; // Pass 2: 9 quadrants × 3 u32 each = 108 bytes per feature
 const REGIONS_BUFFER_SIZE = MAX_FEATURES * 16;   // For 4 atomic u32s per feature  
@@ -658,7 +658,7 @@ async function main() {
         // MUST submit map first so hidden texture is populated before compute reads it
         device.queue.submit([mapEncoder.finish()]);
         
-        // Only compute markers/labels at zoom 4+ to avoid GPU overload
+        // Only compute markers/labels at zoom 14+ to avoid GPU overload
         if (camera.zoom >= 4) {
             // Compute marker positions (submits 3 passes internally, reads from hidden texture)
             createComputeMarkerEncoder(
@@ -679,7 +679,7 @@ async function main() {
         // Create encoder for marker and label render passes
         const overlayEncoder = device.createCommandEncoder();
         
-        // Only render markers/labels at zoom 4+
+        // Only render markers/labels at zoom 14+
         if (camera.zoom >= 4) {
             // Render markers
             renderMarkersToEncoder(overlayEncoder, textureView, device, markerPipeline, markerBindGroup, markerBuffer);
@@ -712,7 +712,12 @@ async function main() {
             const sourceId = style && style.sources ? Object.keys(style.sources).find(key => style.sources[key].type === 'vector') : null;
             
             // Upload label data to GPU
-            textRenderer.uploadLabelData(featureNames, camera, sourceId);
+            const labelCount = textRenderer.uploadLabelData(featureNames, camera, sourceId);
+            
+            if (!window._labelUploadLogged) {
+                console.log(`📤 Uploaded ${labelCount} labels to GPU`);
+                window._labelUploadLogged = true;
+            }
             
             // Render all labels in one GPU call
             textRenderer.render(overlayEncoder, textureView, markerBuffer);
@@ -1020,6 +1025,17 @@ async function loadVisibleTiles(visibleTiles, device, newTileBuffers, newHiddenT
                         window._lineBufferLogged = true;
                     }
                     
+                    if (layerId === 'building-3d' && !window._buildingBufferLogged) {
+                        console.log('🏢 Creating BUILDING buffer:', {
+                            layerId,
+                            vertices: vertices.length,
+                            hiddenVertices: hiddenVertices.length,
+                            fillIndices: fillIndices.length,
+                            hiddenfillIndices: hiddenfillIndices.length
+                        });
+                        window._buildingBufferLogged = true;
+                    }
+                    
                     createAndAddBuffers(
                         device,
                         vertices,
@@ -1271,6 +1287,22 @@ function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, textureView
         // Check layer visibility and zoom range
         if (!shouldRenderLayer(layerId, renderZoom)) continue;
         
+        // CRITICAL: Only render hidden geometry for layers that have symbol layers
+        // This prevents filling the 65k feature limit with non-label features
+        const layer = getLayer(layerId);
+        const sourceId = layer?.source;
+        const sourceLayer = layer?.['source-layer'];
+        const symbolLayers = sourceId ? getSymbolLayers(sourceId) : [];
+        const hasSymbolLayer = symbolLayers.some(sl => sl.sourceLayer === sourceLayer);
+        
+        if (!window._hiddenCheckLogged) {
+            console.log(`Hidden check for ${layerId}: source-layer=${sourceLayer}, symbolLayers=`, symbolLayers.map(sl => sl.sourceLayer), `hasMatch=${hasSymbolLayer}`);
+        }
+        
+        if (!hasSymbolLayer) {
+            continue;
+        }
+        
         buffers.forEach(({ vertexBuffer, hiddenFillIndexBuffer, hiddenfillIndexCount }) => {
             if (hiddenfillIndexCount > 0) {
                 hiddenPass.setPipeline(renderer.pipelines.hidden);
@@ -1281,6 +1313,8 @@ function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, textureView
             }
         });
     }
+    
+    window._hiddenCheckLogged = true;
     
     hiddenPass.end();
     
@@ -1555,19 +1589,114 @@ function renderMarkersToEncoder(
 // Build feature name map from tile buffers
 function buildFeatureNameMap(tileBuffers) {
     const featureNames = new Map();
+    const style = getStyle();
+    const symbolLayers = style?.layers?.filter(l => l.type === 'symbol') || [];
+    
+    if (!window._symbolLayersLogged) {
+        console.log('📝 Symbol layers:', symbolLayers.map(l => ({ id: l.id, sourceLayer: l['source-layer'] })));
+        window._symbolLayersLogged = true;
+    }
+    
+    // Debug: what layers do we have in tileBuffers?
+    if (!window._tileBufferLayersLogged) {
+        const layersInBuffers = Array.from(tileBuffers.keys());
+        console.log('📦 Layers in tileBuffers:', layersInBuffers);
+        
+        // Check if we have building features
+        for (const [layerId, buffers] of tileBuffers) {
+            const firstBuffer = buffers[0];
+            if (firstBuffer?.properties?.sourceLayer === 'building') {
+                console.log('🏢 Found building layer:', layerId, 'with', buffers.length, 'buffers');
+                console.log('🏢 First building properties:', firstBuffer.properties);
+                break;
+            }
+        }
+        window._tileBufferLayersLogged = true;
+    }
+    
     // Iterate through all layers
     for (const [layerId, buffers] of tileBuffers) {
         for (const tileBuffer of buffers) {
             if (!tileBuffer.properties) continue;
             const clampedFid = tileBuffer.properties.clampedFid;
-            const name = tileBuffer.properties.NAME || tileBuffer.properties.name || tileBuffer.properties.ADM0_A3 || tileBuffer.properties.ISO_A3;
             const sourceLayer = tileBuffer.properties.sourceLayer;
-            if (clampedFid && name) {
-                featureNames.set(clampedFid, { name, sourceLayer, properties: tileBuffer.properties });
+            
+            // Find matching symbol layer for this feature's source-layer
+            const matchingSymbolLayer = symbolLayers.find(layer => 
+                layer['source-layer'] === sourceLayer
+            );
+            
+            let labelText = null;
+            
+            if (matchingSymbolLayer && matchingSymbolLayer.layout?.['text-field']) {
+                // Evaluate text-field expression
+                const textField = matchingSymbolLayer.layout['text-field'];
+                labelText = evaluateTextField(textField, tileBuffer.properties);
+                
+                if (!window._buildingLabelLogged && sourceLayer === 'building') {
+                    console.log('🏢 Building label matched:', {
+                        sourceLayer,
+                        matchingLayer: matchingSymbolLayer.id,
+                        textField,
+                        properties: tileBuffer.properties,
+                        labelText
+                    });
+                    window._buildingLabelLogged = true;
+                }
+            } else {
+                // Fallback to legacy name properties
+                labelText = tileBuffer.properties.NAME || tileBuffer.properties.name || 
+                           tileBuffer.properties.ADM0_A3 || tileBuffer.properties.ISO_A3;
+            }
+            
+            if (clampedFid && labelText) {
+                featureNames.set(clampedFid, { name: labelText, sourceLayer, properties: tileBuffer.properties });
             }
         }
     }
+    
+    if (!window._featureNamesLogged) {
+        console.log('📝 Total features with names:', featureNames.size);
+        const buildingLabels = Array.from(featureNames.values()).filter(f => f.sourceLayer === 'building');
+        console.log('🏢 Building labels:', buildingLabels.length);
+        if (buildingLabels.length > 0) {
+            console.log('🏢 First building label:', buildingLabels[0]);
+        }
+        window._featureNamesLogged = true;
+    }
+    
     return featureNames;
+}
+
+// Simple evaluator for text-field expressions
+function evaluateTextField(textField, properties) {
+    if (typeof textField === 'string') {
+        return textField;
+    }
+    
+    if (Array.isArray(textField)) {
+        const [operation, ...args] = textField;
+        
+        switch (operation) {
+            case 'get':
+                return properties[args[0]];
+            
+            case 'to-string':
+                const value = evaluateTextField(args[0], properties);
+                return value != null ? String(value) : '';
+            
+            case 'concat':
+                return args.map(arg => {
+                    const val = evaluateTextField(arg, properties);
+                    return val != null ? String(val) : '';
+                }).join('');
+            
+            default:
+                return null;
+        }
+    }
+    
+    return textField;
 }
 
 function renderLabelsToEncoder(encoder, textureView, textRenderer, tileBuffers, markerPositions, camera) {
