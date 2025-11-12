@@ -14,12 +14,21 @@ struct VertexOutput {
 fn main(@location(0) inPosition: vec3<f32>, @location(1) inColor: vec4<f32>) -> VertexOutput {
     var output: VertexOutput;
     
-    // Very small isometric offset - just enough to be visible
-    let isoY = inPosition.y + inPosition.z * 0.1;
-    let pos = vec4<f32>(inPosition.x, isoY, inPosition.z, 1.0);
-    
+    // Isometric offset - shift Y based on Z height for visual effect
+    let isoY = inPosition.y - inPosition.z * 0.3;
+    let pos = vec4<f32>(inPosition.x, isoY, 0.0, 1.0);
+
     // Apply camera transform
     output.position = uniforms * pos;
+    
+    // CRITICAL: Set depth AFTER transformation for proper Z-ordering
+    // Depth comparison is 'less', so SMALLER depth = closer to camera
+    // Strategy: All flat features get depth ~0.95, buildings get much smaller depth
+    // This ensures ANY building geometry (even base at z=0.0001) renders over flat features
+    let baseDepth = 0.95;
+    // Add tiny offset for flat features to prevent z-fighting between overlapping polys
+    let flatOffset = select(0.0, 0.00001, inPosition.z < 0.00001);
+    output.position.z = baseDepth - (inPosition.z * 10.0) + flatOffset;
     
     // Pass along coordinates for fragment shader
     output.fragCoord = output.position.xy;

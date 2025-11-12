@@ -172,11 +172,17 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
         const vertices = [];
         const indices = [];
         
-        // Convert height from meters to clip space
-        const heightZ = height * 0.0007; // 15m = 0.0105 units
-        const baseZ = base * 0.0007;
-        console.log(`🏢 GPU Building: ${height}m -> Z=${heightZ.toFixed(5)}`);
+        // Convert meters to world space units
+        // At zoom 0, the entire world spans -1 to 1 (2 units total)
+        // Earth circumference ≈ 40,000,000m, so at zoom 0: 1 unit = 20,000,000m
+        // Scale factor: meters * (2.0 / 40000000) = meters * 0.00000005
+        // But we want height to scale with zoom level, so we use a zoom-independent metric
+        // Buildings should be visible but not dominate - use a moderate scale
+        const metersToWorld = 0.00000008; // Tuned for visibility
+        const heightZ = height * metersToWorld;
+        const baseZ = base * metersToWorld;
         
+       
         // Generate vertical walls for each edge
         for (let i = 0; i < outerRing.length - 1; i++) {
             const p1 = outerRing[i];
@@ -198,16 +204,25 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
         }
         
         // Generate roof (flat top polygon at height)
+        // CRITICAL: Use transformed coordinates for BOTH earcut AND vertices
         const flatCoords = [];
+        const transformedRoofCoords = [];
+        
         outerRing.forEach(coord => {
-            flatCoords.push(coord[0], coord[1]);
+            const [x, y] = getTransformedCoord(coord);
+            flatCoords.push(x, y);  // Use transformed coords for earcut
+            transformedRoofCoords.push([x, y]);
         });
         
         const roofTriangles = earcut(flatCoords, []);
         const roofStartIdx = vertices.length / 7;
         
-        outerRing.forEach(coord => {
-            const [x, y] = getTransformedCoord(coord);
+        if (!window._roofDebug) {
+            console.log(`🟢 ROOF: ${roofTriangles.length/3} triangles, heightZ=${heightZ.toFixed(6)}, vertices at z=${heightZ.toFixed(6)}`);
+            window._roofDebug = true;
+        }
+        
+        transformedRoofCoords.forEach(([x, y]) => {
             vertices.push(x, y, heightZ, ..._fillColor);
         });
         
@@ -244,14 +259,8 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
             
             // Use extrusion geometry if this is a 3D layer
             if (isExtruded && extrusionHeight > 0) {
-                if (!window._extrusionLogged) {
-                    console.log(`🏢 Taking EXTRUSION path: height=${extrusionHeight}`);
-                    window._extrusionLogged = true;
-                }
-                const extrusion = generateExtrusion(outerRing, extrusionHeight, extrusionBase, holes, zoom);
-                const vertexOffset = fillVertices.length / 7;
-                extrusion.vertices.forEach(v => fillVertices.push(v));
-                extrusion.indices.forEach(i => fillIndices.push(i + vertexOffset));
+                // Skip - batch parser handles buildings
+                return null;
             } else {
                 // Standard 2D fill
                 if (!window._2dFillLogged) {
@@ -792,13 +801,15 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
     };
 
     // Helper function to generate 3D extrusion geometry (walls + roof)
+    // Helper function to generate 3D extrusion geometry (walls + roof) with holes support
     const generateExtrusion = (outerRing, height, base, holes = [], zoom = 14) => {
         const vertices = [];
         const indices = [];
         
-        // Barely visible at zoom 14, like specs
-        const heightZ = height * 0.0000005; // Half again
-        const baseZ = base * 0.0000005;
+        // Convert meters to world space units (same as above)
+        const metersToWorld = 0.00000008; // Tuned for visibility
+        const heightZ = height * metersToWorld;
+        const baseZ = base * metersToWorld;
         
         // Generate vertical walls for outer ring
         for (let i = 0; i < outerRing.length - 1; i++) {
@@ -965,6 +976,10 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
             
             // Use extrusion geometry if this is a 3D layer
             if (isExtruded && extrusionHeight > 0) {
+                if (!window._batchExtrusionLogged) {
+                    console.log(`🏢 BATCH Taking EXTRUSION path: height=${extrusionHeight}`);
+                    window._batchExtrusionLogged = true;
+                }
                 const extrusion = generateExtrusion(outerRing, extrusionHeight, extrusionBase);
                 const vertexOffset = fillVertices.length / 7;
                 extrusion.vertices.forEach(v => fillVertices.push(v));
