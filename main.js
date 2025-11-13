@@ -48,6 +48,20 @@ window.mapPerformance = {
         
         // Trigger reload of visible tiles
         if (window.camera && window.device && window.tileBuffers && window.hiddenTileBuffers) {
+            // CRITICAL FIX: Destroy GPU buffers before clearing
+            window.tileBuffers.forEach((buffers) => {
+                buffers.forEach(tile => {
+                    if (tile.vertexBuffer) tile.vertexBuffer.destroy();
+                    if (tile.fillIndexBuffer) tile.fillIndexBuffer.destroy();
+                });
+            });
+            window.hiddenTileBuffers.forEach((buffers) => {
+                buffers.forEach(tile => {
+                    if (tile.vertexBuffer) tile.vertexBuffer.destroy();
+                    if (tile.hiddenFillIndexBuffer) tile.hiddenFillIndexBuffer.destroy();
+                });
+            });
+            
             window.tileBuffers.clear();
             window.hiddenTileBuffers.clear();
             const visibleTiles = getVisibleTiles(window.camera.zoom, window.camera.center);
@@ -233,6 +247,20 @@ window.mapStyle = {
             resetNotFoundTiles();
             
             if (window.camera && window.device && window.tileBuffers && window.hiddenTileBuffers) {
+                // CRITICAL FIX: Destroy GPU buffers before clearing
+                window.tileBuffers.forEach((buffers) => {
+                    buffers.forEach(tile => {
+                        if (tile.vertexBuffer) tile.vertexBuffer.destroy();
+                        if (tile.fillIndexBuffer) tile.fillIndexBuffer.destroy();
+                    });
+                });
+                window.hiddenTileBuffers.forEach((buffers) => {
+                    buffers.forEach(tile => {
+                        if (tile.vertexBuffer) tile.vertexBuffer.destroy();
+                        if (tile.hiddenFillIndexBuffer) tile.hiddenFillIndexBuffer.destroy();
+                    });
+                });
+                
                 window.tileBuffers.clear();
                 window.hiddenTileBuffers.clear();
                 
@@ -264,6 +292,21 @@ window.mapStyle = {
     setLayerVisibility: (layerId, visible) => {
         console.log(`🎨 Setting layer ${layerId} visibility to ${visible}`);
         setLayerVisibility(layerId, visible);
+        
+        // CRITICAL FIX: Destroy GPU buffers before clearing
+        tileBuffers.forEach((buffers) => {
+            buffers.forEach(tile => {
+                if (tile.vertexBuffer) tile.vertexBuffer.destroy();
+                if (tile.fillIndexBuffer) tile.fillIndexBuffer.destroy();
+            });
+        });
+        hiddenTileBuffers.forEach((buffers) => {
+            buffers.forEach(tile => {
+                if (tile.vertexBuffer) tile.vertexBuffer.destroy();
+                if (tile.hiddenFillIndexBuffer) tile.hiddenFillIndexBuffer.destroy();
+            });
+        });
+        
         // Force re-render by clearing everything
         tileBuffers.clear();
         hiddenTileBuffers.clear();
@@ -472,9 +515,28 @@ async function main() {
         // If fetch zoom changed (by even 1 level), clear old tiles immediately
         let shouldClearOldTiles = false;
         if (lastFetchZoom !== -1 && fetchZoom !== lastFetchZoom) {
-            console.log(`🔄 Zoom changed ${lastFetchZoom} → ${fetchZoom}, clearing old tiles`);
+            console.log(`🔄 Zoom changed ${lastFetchZoom} → ${fetchZoom}, destroying all GPU buffers`);
             shouldClearOldTiles = true;
             clearTileCache(); // Clear fetch cache
+            
+            // CRITICAL FIX: Destroy GPU buffers before clearing
+            let destroyedCount = 0;
+            tileBuffers.forEach((buffers) => {
+                buffers.forEach(tile => {
+                    if (tile.vertexBuffer) tile.vertexBuffer.destroy();
+                    if (tile.fillIndexBuffer) tile.fillIndexBuffer.destroy();
+                    destroyedCount += 2;
+                });
+            });
+            hiddenTileBuffers.forEach((buffers) => {
+                buffers.forEach(tile => {
+                    if (tile.vertexBuffer) tile.vertexBuffer.destroy();
+                    if (tile.hiddenFillIndexBuffer) tile.hiddenFillIndexBuffer.destroy();
+                    destroyedCount += 2;
+                });
+            });
+            console.log(`♻️ Destroyed ${destroyedCount} GPU buffers on zoom change`);
+            
             tileBuffers.clear(); // Clear GPU buffers
             hiddenTileBuffers.clear(); // Clear hidden GPU buffers
             // Reset logging flags
@@ -558,18 +620,120 @@ async function main() {
                     // SMART CLEARING: Remove tiles from wrong zoom levels only
                     if (shouldClearOldTiles && lastFetchZoom !== fetchZoom) {
                         console.log(`🗑️ Removing tiles from old zoom ${lastFetchZoom}, keeping zoom ${fetchZoom}`);
+                        
+                        // CRITICAL FIX: Destroy GPU buffers before removing tiles
+                        let destroyedBuffers = 0;
+                        
                         // Filter out tiles that aren't at current fetchZoom
                         for (const [layerId, buffers] of tileBuffers) {
-                            const filtered = buffers.filter(tile => tile.zoomLevel === fetchZoom);
-                            if (filtered.length !== buffers.length) {
-                                console.log(`  Layer ${layerId}: ${buffers.length} → ${filtered.length} tiles`);
-                                tileBuffers.set(layerId, filtered);
+                            const toKeep = [];
+                            const toDestroy = [];
+                            
+                            buffers.forEach(tile => {
+                                if (tile.zoomLevel === fetchZoom) {
+                                    toKeep.push(tile);
+                                } else {
+                                    toDestroy.push(tile);
+                                }
+                            });
+                            
+                            // Destroy GPU buffers for removed tiles
+                            toDestroy.forEach(tile => {
+                                if (tile.vertexBuffer) tile.vertexBuffer.destroy();
+                                if (tile.fillIndexBuffer) tile.fillIndexBuffer.destroy();
+                                destroyedBuffers += 2;
+                            });
+                            
+                            if (toDestroy.length > 0) {
+                                console.log(`  Layer ${layerId}: ${buffers.length} → ${toKeep.length} tiles (destroyed ${toDestroy.length * 2} buffers)`);
+                                tileBuffers.set(layerId, toKeep);
                             }
                         }
+                        
                         // Same for hidden buffers
                         for (const [layerId, buffers] of hiddenTileBuffers) {
-                            const filtered = buffers.filter(tile => tile.zoomLevel === fetchZoom);
-                            hiddenTileBuffers.set(layerId, filtered);
+                            const toKeep = [];
+                            const toDestroy = [];
+                            
+                            buffers.forEach(tile => {
+                                if (tile.zoomLevel === fetchZoom) {
+                                    toKeep.push(tile);
+                                } else {
+                                    toDestroy.push(tile);
+                                }
+                            });
+                            
+                            // Destroy GPU buffers for removed hidden tiles
+                            toDestroy.forEach(tile => {
+                                if (tile.vertexBuffer) tile.vertexBuffer.destroy();
+                                if (tile.hiddenFillIndexBuffer) tile.hiddenFillIndexBuffer.destroy();
+                                destroyedBuffers += 2;
+                            });
+                            
+                            if (toDestroy.length > 0) {
+                                hiddenTileBuffers.set(layerId, toKeep);
+                            }
+                        }
+                        
+                        if (destroyedBuffers > 0) {
+                            console.log(`♻️ Freed ${destroyedBuffers} GPU buffers from memory`);
+                        }
+                    } else if (!shouldClearOldTiles && lastFetchZoom === fetchZoom) {
+                        // PAN at same zoom: Remove off-screen tiles to prevent memory accumulation
+                        const visibleTileKeys = new Set(visibleTiles.map(t => `${t.z}/${t.x}/${t.y}`));
+                        let offscreenDestroyed = 0;
+                        
+                        for (const [layerId, buffers] of tileBuffers) {
+                            const toKeep = [];
+                            const toDestroy = [];
+                            
+                            buffers.forEach(tile => {
+                                const key = `${tile.zoomLevel}/${tile.tileX}/${tile.tileY}`;
+                                if (visibleTileKeys.has(key)) {
+                                    toKeep.push(tile);
+                                } else {
+                                    toDestroy.push(tile);
+                                }
+                            });
+                            
+                            // Destroy off-screen tile buffers
+                            toDestroy.forEach(tile => {
+                                if (tile.vertexBuffer) tile.vertexBuffer.destroy();
+                                if (tile.fillIndexBuffer) tile.fillIndexBuffer.destroy();
+                                offscreenDestroyed += 2;
+                            });
+                            
+                            if (toDestroy.length > 0) {
+                                tileBuffers.set(layerId, toKeep);
+                            }
+                        }
+                        
+                        for (const [layerId, buffers] of hiddenTileBuffers) {
+                            const toKeep = [];
+                            const toDestroy = [];
+                            
+                            buffers.forEach(tile => {
+                                const key = `${tile.zoomLevel}/${tile.tileX}/${tile.tileY}`;
+                                if (visibleTileKeys.has(key)) {
+                                    toKeep.push(tile);
+                                } else {
+                                    toDestroy.push(tile);
+                                }
+                            });
+                            
+                            toDestroy.forEach(tile => {
+                                if (tile.vertexBuffer) tile.vertexBuffer.destroy();
+                                if (tile.hiddenFillIndexBuffer) tile.hiddenFillIndexBuffer.destroy();
+                                offscreenDestroyed += 2;
+                            });
+                            
+                            if (toDestroy.length > 0) {
+                                hiddenTileBuffers.set(layerId, toKeep);
+                            }
+                        }
+                        
+                        if (offscreenDestroyed > 0) {
+                            console.log(`♻️ Freed ${offscreenDestroyed} off-screen tile buffers during pan`);
                         }
                     }
                     

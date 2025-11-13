@@ -349,4 +349,20 @@ export class GPUTextRenderer {
         
         renderPass.end();
     }
+    
+    /**
+     * Cleanup GPU resources
+     */
+    destroy() {
+        if (this.fontAtlas) this.fontAtlas.destroy();
+        if (this.labelBuffer) this.labelBuffer.destroy();
+        if (this.textBuffer) this.textBuffer.destroy();
+        if (this.charMetricsBuffer) this.charMetricsBuffer.destroy();
+        
+        this.fontAtlas = null;
+        this.labelBuffer = null;
+        this.textBuffer = null;
+        this.charMetricsBuffer = null;
+        this.initialized = false;
+    }
 }
