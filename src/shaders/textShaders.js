@@ -146,10 +146,11 @@ fn vertexMain(
         uv = vec2<f32>(metrics.u0, metrics.v0);
     }
     
-    // Offset text slightly above the marker point, adding height for 3D buildings
-    let heightZ = marker.height * 0.0007;
-    let isoOffsetY = -heightZ;
-    let finalPos = marker.center + vec2<f32>(xOffset, 0.035 + isoOffsetY) + corner;
+    // Offset text slightly above the marker point
+    // The marker.center already has the isometric offset applied in the compute shader
+    // (matching building rendering: isoY = y - z * 0.3)
+    // So we just need to position the text slightly above the marker
+    let finalPos = marker.center + vec2<f32>(xOffset, 0.035) + corner;
     output.position = vec4<f32>(finalPos, 0.0, 1.0);
     output.texCoord = uv;
     

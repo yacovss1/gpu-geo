@@ -33,10 +33,10 @@ fn main(input: VertexInput) -> VertexOutput {
     }
     
     // Marker center is already in clip space (-1 to 1) from compute shader
-    // Apply isometric offset for height (convert meters to world Z, same as buildings)
-    let heightZ = marker.height * 0.0007;
+    // The isometric offset has already been applied in the compute shader
+    // to match the building rendering (isoY = y - z * 0.3)
     let isoX = marker.center.x;
-    let isoY = marker.center.y - heightZ;
+    let isoY = marker.center.y;
     
     // Use fixed marker size in screen space
     let markerSize = 0.02;

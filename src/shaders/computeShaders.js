@@ -327,9 +327,18 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let clipX = (centerX / width) * 2.0 - 1.0;
     let clipY = (centerY / height) * 2.0 - 1.0;
     
-    // Store marker position
-    markers[idx].center = vec2<f32>(clipX, clipY);
-    markers[idx].height = heights[idx];
+    // CRITICAL: Apply isometric offset for height (matching building vertex shader)
+    // Buildings use: isoY = y - z * 0.3
+    // So we need to shift the Y position based on height to match
+    let buildingHeight = heights[idx];
+    let isoOffsetY = buildingHeight * 0.3;
+    
+    // Store marker position with isometric offset applied in clip space
+    // Note: In clip space, we need to convert the world-space offset to clip space
+    // The factor 0.0007 approximates the world-to-clip conversion for height
+    let clipSpaceOffset = isoOffsetY * 0.0007;
+    markers[idx].center = vec2<f32>(clipX, clipY - clipSpaceOffset);
+    markers[idx].height = buildingHeight;
     markers[idx].featureId = idx;
     
     // Set color from feature - use a simple scheme based on feature ID
