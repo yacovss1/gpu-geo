@@ -1,11 +1,12 @@
 import { initWebGPU } from './src/core/webgpu-init.js';
 import { Camera } from './src/core/camera.js';
 import { MapRenderer } from './src/rendering/renderer.js';
+import { TileManager } from './src/tiles/TileManager.js';
 import { parseGeoJSONFeature, fetchVectorTile, clearTileCache, resetNotFoundTiles, setTileSource } from './src/tiles/geojson.js';
 import { batchParseGeoJSONFeaturesGPU } from './src/tiles/geojsonGPU.js';
 import { getStyle, setStyle, setLayerVisibility, getLayerVisibility, getLayer, parseColor, getSymbolLayers, getPaintProperty } from './src/core/style.js';
 import { setupEventListeners } from './src/core/events.js';
-import { getVisibleTiles } from './src/tiles/tile-utils.js'; 
+import { getVisibleTiles } from './src/tiles/tile-utils.js';
 import { createMarkerPipeline } from './src/rendering/markerPipeline.js';
 import { createAccumulatorPipeline, createQuadrantPipeline, createCenterPipeline } from './src/rendering/markerCompute.js';
 import { GPUTextRenderer } from './src/text/gpuTextRenderer.js';
@@ -247,6 +248,9 @@ window.mapStyle = {
             resetNotFoundTiles();
             
             if (window.camera && window.device && window.tileBuffers && window.hiddenTileBuffers) {
+                // CRITICAL FIX: Wait for GPU to finish before destroying buffers
+                await window.device.queue.onSubmittedWorkDone();
+                
                 // CRITICAL FIX: Destroy GPU buffers before clearing
                 window.tileBuffers.forEach((buffers) => {
                     buffers.forEach(tile => {
@@ -289,9 +293,12 @@ window.mapStyle = {
     },
     
     // Layer visibility controls
-    setLayerVisibility: (layerId, visible) => {
+    setLayerVisibility: async (layerId, visible) => {
         console.log(`🎨 Setting layer ${layerId} visibility to ${visible}`);
         setLayerVisibility(layerId, visible);
+        
+        // CRITICAL FIX: Wait for GPU to finish before destroying buffers
+        await device.queue.onSubmittedWorkDone();
         
         // CRITICAL FIX: Destroy GPU buffers before clearing
         tileBuffers.forEach((buffers) => {
@@ -390,7 +397,7 @@ async function main() {
     camera.zoom = 1;
     
     // Handle window resize
-    window.addEventListener('resize', () => {
+    window.addEventListener('resize', async () => {
         const dpr = window.devicePixelRatio || 1;
         const width = window.innerWidth;
         const height = window.innerHeight;
@@ -413,8 +420,8 @@ async function main() {
         // Update canvas size buffer
         device.queue.writeBuffer(renderer.buffers.canvasSize, 0, new Float32Array([canvas.width, canvas.height]));
         
-        // Recreate textures and bind groups
-        renderer.createTextures(canvas.width, canvas.height);
+        // Recreate textures and bind groups (wait for GPU to finish first)
+        await renderer.createTextures(canvas.width, canvas.height);
         renderer.updateTextureBindGroups();
     });
     
@@ -425,17 +432,17 @@ async function main() {
     // Start at world center [0, 0] (Greenwich/Equator)
     camera.position = [0, 0];
     
-    renderer.createResources(canvas, camera);
+    await renderer.createResources(canvas, camera);
 
-    // Store loaded tiles grouped by layer
-    const tileBuffers = new Map();
-    const hiddenTileBuffers = new Map();
+    // Initialize TileManager
+    const tileManager = new TileManager(device, PERFORMANCE_STATS);
     
-    // Expose global variables for performance controls
+    // Expose global variables for performance controls and backwards compatibility
     window.device = device;
     window.camera = camera;
-    window.tileBuffers = tileBuffers;
-    window.hiddenTileBuffers = hiddenTileBuffers;
+    window.tileBuffers = tileManager.visibleTileBuffers;
+    window.hiddenTileBuffers = tileManager.hiddenTileBuffers;
+    window.tileManager = tileManager;
 
     // Load the custom OpenFreeMap style optimized for our parser
     try {
@@ -518,6 +525,9 @@ async function main() {
             console.log(`🔄 Zoom changed ${lastFetchZoom} → ${fetchZoom}, destroying all GPU buffers`);
             shouldClearOldTiles = true;
             clearTileCache(); // Clear fetch cache
+            
+            // CRITICAL FIX: Wait for GPU to finish before destroying buffers
+            await device.queue.onSubmittedWorkDone();
             
             // CRITICAL FIX: Destroy GPU buffers before clearing
             let destroyedCount = 0;
@@ -868,8 +878,9 @@ async function main() {
                 window._heightsBuffer
             );
             
-            // DEBUG: Read back marker buffer to see what was computed
-            if (!window._markerDebugLogged) {
+            // DEBUG: Read back marker buffer disabled due to WebGPU validation errors
+            // The async buffer mapping conflicts with the render pipeline texture lifecycle
+            if (false && !window._markerDebugLogged) {
                 const markerReadBuffer = device.createBuffer({
                     size: 4 * 8 * 10, // First 10 markers
                     usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ

@@ -233,9 +233,9 @@ export class MapRenderer {
         this.pipelines.debug = createDebugTexturePipeline(this.device, this.format);
     }
     
-    createResources(canvas, camera) {
+    async createResources(canvas, camera) {
         // Create textures - ENSURE they match canvas dimensions exactly
-        this.createTextures(canvas.width, canvas.height);
+        await this.createTextures(canvas.width, canvas.height);
         
         // Create uniform buffers
         this.buffers.uniform = this.device.createBuffer({
@@ -311,10 +311,15 @@ export class MapRenderer {
     }
     
     // Add method to create textures with specific dimensions
-    createTextures(width, height) {
+    async createTextures(width, height) {
         // Store current dimensions
         this.textureWidth = width;
         this.textureHeight = height;
+        
+        // Wait for GPU to finish any pending operations before destroying textures
+        if (this.textures.hidden) {
+            await this.device.queue.onSubmittedWorkDone();
+        }
         
         if (this.textures.hidden) {
             this.textures.hidden.destroy();
