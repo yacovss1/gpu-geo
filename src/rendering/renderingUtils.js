@@ -1,0 +1,385 @@
+/**
+ * RenderingUtils - Core rendering functions for map, markers, and compute passes
+ * 
+ * Responsibilities:
+ * - Render map with hidden texture and edge detection
+ * - Create compute marker encoders (3-pass centroid calculation)
+ * - Render markers to encoder
+ * - Initialize marker resources (pipelines, buffers)
+ * - Read marker buffer data
+ */
+
+import { getStyle, getLayer, parseColor } from '../core/style.js';
+
+// Constants for marker computation
+const MAX_FEATURES = 65535;
+const MARKER_BUFFER_SIZE = MAX_FEATURES * 40;
+
+/**
+ * Render the map with hidden texture and edge detection
+ */
+export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, textureView, camera, shouldRenderLayer) {
+    const mapCommandEncoder = device.createCommandEncoder();
+    
+    // First render pass: hidden texture for feature IDs (MSAA enabled)
+    const hiddenPass = mapCommandEncoder.beginRenderPass({
+        colorAttachments: [{
+            view: renderer.textures.hiddenMSAA.createView(),
+            resolveTarget: renderer.textures.hidden.createView(),
+            clearValue: { r: 0, g: 0, b: 0, a: 1 },
+            loadOp: 'clear',
+            storeOp: 'store',
+        }],
+        depthStencilAttachment: {
+            view: renderer.textures.depth.createView(),
+            depthClearValue: 1.0,
+            depthLoadOp: 'clear',
+            depthStoreOp: 'store',
+        }
+    });
+    
+    const renderZoom = camera.zoom;
+    
+    // Render hidden buffers layer by layer
+    for (const [layerId, buffers] of hiddenTileBuffers) {
+        if (!shouldRenderLayer(layerId, renderZoom)) continue;
+        
+        buffers.forEach(({ vertexBuffer, hiddenFillIndexBuffer, hiddenfillIndexCount }) => {
+            if (hiddenfillIndexCount > 0) {
+                hiddenPass.setPipeline(renderer.pipelines.hidden);
+                hiddenPass.setVertexBuffer(0, vertexBuffer);
+                hiddenPass.setIndexBuffer(hiddenFillIndexBuffer, "uint32");
+                hiddenPass.setBindGroup(0, renderer.bindGroups.picking);
+                hiddenPass.drawIndexed(hiddenfillIndexCount);
+            }
+        });
+    }
+    
+    hiddenPass.end();
+    
+    // Get background color from style
+    const currentMapStyle = getStyle();
+    let clearColor = { r: 0.67, g: 0.83, b: 0.87, a: 1.0 };
+    if (currentMapStyle?.layers) {
+        const backgroundLayer = currentMapStyle.layers.find(l => l.type === 'background');
+        if (backgroundLayer?.paint?.['background-color']) {
+            const bgColorArray = parseColor(backgroundLayer.paint['background-color']);
+            if (bgColorArray) {
+                clearColor = {
+                    r: bgColorArray[0],
+                    g: bgColorArray[1],
+                    b: bgColorArray[2],
+                    a: bgColorArray[3]
+                };
+            }
+        }
+    }
+    
+    // Second render pass: color texture with map features (MSAA enabled)
+    const colorPass = mapCommandEncoder.beginRenderPass({
+        colorAttachments: [{
+            view: renderer.textures.colorMSAA.createView(),
+            resolveTarget: renderer.textures.color.createView(),
+            clearValue: clearColor,
+            loadOp: 'clear',
+            storeOp: 'store',
+        }],
+        depthStencilAttachment: {
+            view: renderer.textures.depth.createView(),
+            depthClearValue: 1.0,
+            depthLoadOp: 'clear',
+            depthStoreOp: 'store',
+        }
+    });
+    
+    // Get style to check for fills with extrusions (need depth bias)
+    const style = getStyle();
+    const fillsWithExtrusions = new Set();
+    if (style?.layers) {
+        for (const extrusionLayer of style.layers.filter(l => l.type === 'fill-extrusion')) {
+            const matchingFills = style.layers.filter(l => 
+                l.type === 'fill' &&
+                l.source === extrusionLayer.source &&
+                l['source-layer'] === extrusionLayer['source-layer']
+            );
+            matchingFills.forEach(f => fillsWithExtrusions.add(f.id));
+        }
+    }
+    
+    // Render ALL geometry in true style order
+    if (style?.layers) {
+        for (const layer of style.layers) {
+            const layerId = layer.id;
+            const layerType = layer.type;
+            
+            if (!shouldRenderLayer(layerId, renderZoom)) continue;
+            
+            const buffers = tileBuffers.get(layerId);
+            if (!buffers) continue;
+            
+            buffers.forEach(({ vertexBuffer, fillIndexBuffer, fillIndexCount, isLine }) => {
+                if (layerType === 'fill-extrusion' && fillIndexCount > 0) {
+                    colorPass.setPipeline(renderer.pipelines.extrusion);
+                    colorPass.setVertexBuffer(0, vertexBuffer);
+                    colorPass.setIndexBuffer(fillIndexBuffer, "uint32");
+                    colorPass.setBindGroup(0, renderer.bindGroups.main);
+                    colorPass.drawIndexed(fillIndexCount);
+                } else if (layerType === 'fill' && fillIndexCount > 0) {
+                    const useBias = fillsWithExtrusions.has(layerId);
+                    const pipeline = useBias ? renderer.pipelines.fillWithBias : renderer.pipelines.fill;
+                    colorPass.setPipeline(pipeline);
+                    colorPass.setVertexBuffer(0, vertexBuffer);
+                    colorPass.setIndexBuffer(fillIndexBuffer, "uint32");
+                    colorPass.setBindGroup(0, renderer.bindGroups.main);
+                    colorPass.drawIndexed(fillIndexCount);
+                } else if (layerType === 'line' && isLine && fillIndexCount > 0) {
+                    colorPass.setPipeline(renderer.pipelines.fill);
+                    colorPass.setVertexBuffer(0, vertexBuffer);
+                    colorPass.setIndexBuffer(fillIndexBuffer, "uint32");
+                    colorPass.setBindGroup(0, renderer.bindGroups.main);
+                    colorPass.drawIndexed(fillIndexCount);
+                }
+            });
+        }
+    }
+    
+    colorPass.end();
+    
+    // Third render pass: Apply edge detection to screen
+    const mainPass = mapCommandEncoder.beginRenderPass({
+        colorAttachments: [{
+            view: textureView,
+            clearValue: clearColor,
+            loadOp: 'load',
+            storeOp: 'store',
+        }],
+    });
+    
+    mainPass.setPipeline(renderer.pipelines.edgeDetection);
+    mainPass.setBindGroup(0, renderer.bindGroups.edgeDetection);
+    mainPass.draw(3);
+    mainPass.end();
+    
+    return mapCommandEncoder;
+}
+
+/**
+ * Create compute marker encoder (3-pass centroid calculation)
+ */
+export function createComputeMarkerEncoder(
+    device,
+    renderer,
+    accumulatorPipeline,
+    quadrantPipeline,
+    centerPipeline,
+    accumulatorBuffer,
+    quadrantBuffer,
+    markerBuffer,
+    dimsBuffer,
+    canvas,
+    regionsBuffer,
+    heightsBuffer
+) {
+    const ACCUMULATOR_BUFFER_SIZE = MAX_FEATURES * 28;
+    const QUADRANT_BUFFER_SIZE = MAX_FEATURES * 108;
+    
+    // Reset buffers
+    device.queue.writeBuffer(accumulatorBuffer, 0, new Uint8Array(ACCUMULATOR_BUFFER_SIZE));
+    device.queue.writeBuffer(quadrantBuffer, 0, new Uint8Array(QUADRANT_BUFFER_SIZE));
+    
+    // Update dimensions
+    const hiddenWidth = renderer.textures.hidden.width;
+    const hiddenHeight = renderer.textures.hidden.height;
+    device.queue.writeBuffer(dimsBuffer, 0, new Uint32Array([hiddenWidth, hiddenHeight]));
+    
+    const workgroupCountX = Math.ceil(canvas.width / 16);
+    const workgroupCountY = Math.ceil(canvas.height / 16);
+    
+    // Pass 1: Accumulate centroid and bounding box
+    const encoder1 = device.createCommandEncoder();
+    const computePass1 = encoder1.beginComputePass();
+    computePass1.setPipeline(accumulatorPipeline);
+    computePass1.setBindGroup(0, device.createBindGroup({
+        layout: accumulatorPipeline.getBindGroupLayout(0),
+        entries: [
+            { binding: 0, resource: renderer.textures.hidden.createView() },
+            { binding: 1, resource: { buffer: accumulatorBuffer } }
+        ]
+    }));
+    computePass1.dispatchWorkgroups(workgroupCountX, workgroupCountY);
+    computePass1.end();
+    device.queue.submit([encoder1.finish()]);
+    
+    // Pass 2: Calculate quadrant centroids
+    const encoder2 = device.createCommandEncoder();
+    const computePass2 = encoder2.beginComputePass();
+    computePass2.setPipeline(quadrantPipeline);
+    computePass2.setBindGroup(0, device.createBindGroup({
+        layout: quadrantPipeline.getBindGroupLayout(0),
+        entries: [
+            { binding: 0, resource: renderer.textures.hidden.createView() },
+            { binding: 1, resource: { buffer: accumulatorBuffer } },
+            { binding: 2, resource: { buffer: quadrantBuffer } }
+        ]
+    }));
+    computePass2.dispatchWorkgroups(workgroupCountX, workgroupCountY);
+    computePass2.end();
+    device.queue.submit([encoder2.finish()]);
+    
+    // Pass 3: Calculate final marker positions
+    const encoder3 = device.createCommandEncoder();
+    const computePass3 = encoder3.beginComputePass();
+    computePass3.setPipeline(centerPipeline);
+    computePass3.setBindGroup(0, device.createBindGroup({
+        layout: centerPipeline.getBindGroupLayout(0),
+        entries: [
+            { binding: 0, resource: { buffer: accumulatorBuffer } },
+            { binding: 1, resource: { buffer: quadrantBuffer } },
+            { binding: 2, resource: { buffer: markerBuffer } },
+            { binding: 3, resource: { buffer: dimsBuffer } },
+            { binding: 4, resource: renderer.textures.hidden.createView() },
+            { binding: 5, resource: { buffer: heightsBuffer } }
+        ]
+    }));
+    const workgroupCount3 = Math.ceil(10000 / 64);
+    computePass3.dispatchWorkgroups(workgroupCount3);
+    computePass3.end();
+    device.queue.submit([encoder3.finish()]);
+}
+
+// Cache the triangle buffer so we don't recreate it every frame
+let cachedTriangleBuffer = null;
+
+/**
+ * Render markers using pre-computed positions
+ */
+export function renderMarkersToEncoder(
+    encoder,
+    textureView,
+    device,
+    markerPipeline,
+    markerBuffer,
+    markerBindGroupLayout,
+    cameraUniformBuffer
+) {
+    // Create triangle buffer once and reuse it
+    if (!cachedTriangleBuffer) {
+        const triangleData = new Float32Array([
+            -0.5,  0.5,  // Top-left
+             0.5,  0.5,  // Top-right
+             0.0, -0.5   // Bottom point (pointing down)
+        ]);
+        
+        const bufferSize = Math.max(256, triangleData.byteLength);
+        cachedTriangleBuffer = device.createBuffer({
+            size: bufferSize,
+            usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+            mappedAtCreation: true
+        });
+        new Float32Array(cachedTriangleBuffer.getMappedRange()).set(triangleData);
+        cachedTriangleBuffer.unmap();
+    }
+    
+    const markerPass = encoder.beginRenderPass({
+        colorAttachments: [{
+            view: textureView,
+            loadOp: 'load',
+            storeOp: 'store'
+        }]
+    });
+    
+    markerPass.setPipeline(markerPipeline);
+    markerPass.setVertexBuffer(0, cachedTriangleBuffer);
+    markerPass.setVertexBuffer(1, markerBuffer);
+    markerPass.setBindGroup(0, device.createBindGroup({
+        layout: markerBindGroupLayout,
+        entries: [
+            { binding: 0, resource: { buffer: cameraUniformBuffer } },
+            { binding: 1, resource: { buffer: markerBuffer } }
+        ]
+    }));
+    markerPass.draw(3, MAX_FEATURES, 0, 0);
+    markerPass.end();
+}
+
+/**
+ * Read marker buffer synchronously (for next frame caching)
+ */
+export async function readMarkerBufferSync(device, markerBuffer) {
+    try {
+        const readBuffer = device.createBuffer({
+            size: MARKER_BUFFER_SIZE,
+            usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+        });
+        
+        const copyEncoder = device.createCommandEncoder();
+        copyEncoder.copyBufferToBuffer(markerBuffer, 0, readBuffer, 0, MARKER_BUFFER_SIZE);
+        device.queue.submit([copyEncoder.finish()]);
+        
+        await readBuffer.mapAsync(GPUMapMode.READ);
+        const data = new Float32Array(readBuffer.getMappedRange()).slice();
+        readBuffer.unmap();
+        readBuffer.destroy();
+        
+        return data;
+    } catch (err) {
+        console.error('Error reading markers:', err);
+        return null;
+    }
+}
+
+/**
+ * Initialize marker resources (pipelines, buffers)
+ */
+export function initMarkerResources(device, format, canvas, camera, createAccumulatorPipeline, createQuadrantPipeline, createCenterPipeline, createMarkerPipeline) {
+    const ACCUMULATOR_BUFFER_SIZE = MAX_FEATURES * 28;
+    const QUADRANT_BUFFER_SIZE = MAX_FEATURES * 108;
+    const REGIONS_BUFFER_SIZE = MAX_FEATURES * 16;
+    
+    // Create compute pipelines
+    const accumulatorPipeline = createAccumulatorPipeline(device);
+    const quadrantPipeline = createQuadrantPipeline(device);
+    const centerPipeline = createCenterPipeline(device);
+    
+    // Create storage buffers
+    const accumulatorBuffer = device.createBuffer({
+        size: ACCUMULATOR_BUFFER_SIZE,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    
+    const quadrantBuffer = device.createBuffer({
+        size: QUADRANT_BUFFER_SIZE,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    
+    const markerBuffer = device.createBuffer({
+        size: MARKER_BUFFER_SIZE,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_SRC,
+    });
+    
+    const dimsBuffer = device.createBuffer({
+        size: 8,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    device.queue.writeBuffer(dimsBuffer, 0, new Uint32Array([canvas.width, canvas.height]));
+    
+    const { pipeline: markerPipeline, bindGroupLayout: markerBindGroupLayout } = createMarkerPipeline(device, format);
+    
+    const regionsBuffer = device.createBuffer({
+        size: REGIONS_BUFFER_SIZE,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+
+    return {
+        accumulatorPipeline,
+        quadrantPipeline,
+        centerPipeline,
+        markerPipeline,
+        markerBuffer,
+        accumulatorBuffer,
+        quadrantBuffer,
+        dimsBuffer,
+        regionsBuffer,
+        markerBindGroupLayout
+    };
+}

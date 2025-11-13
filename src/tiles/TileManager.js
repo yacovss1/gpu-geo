@@ -167,24 +167,35 @@ export class TileManager {
     async parseVectorTile(vectorTile, x, y, z) {
         const parsedFeatures = [];
         
+        // Get current style for sourceId
+        const { getStyle } = await import('../core/style.js');
+        const currentStyle = getStyle();
+        const sourceId = currentStyle ? Object.keys(currentStyle.sources)[0] : null;
+        
         if (this.performanceStats.gpuEnabled) {
-            // GPU path
+            // GPU path - process all layers together
             const features = [];
             for (const layerName in vectorTile.layers) {
                 const layer = vectorTile.layers[layerName];
                 for (let i = 0; i < layer.length; i++) {
-                    features.push(layer.feature(i));
+                    const rawFeature = layer.feature(i);
+                    const feature = rawFeature.toGeoJSON(x, y, z);
+                    // Set layer name for style matching
+                    feature.layer = { name: layerName };
+                    features.push(feature);
                 }
             }
             
+            // batchParseGeoJSONFeaturesGPU(features, device, fillColor, sourceId, zoom, tileX, tileY, tileZ)
             const result = await batchParseGeoJSONFeaturesGPU(
                 features,
                 this.device,
-                [0.0, 0.0, 0.0, 1.0],
-                null, // sourceId
-                z,
-                x,
-                y
+                [0.0, 0.0, 0.0, 1.0], // fillColor
+                sourceId,
+                z,    // zoom
+                x,    // tileX
+                y,    // tileY
+                z     // tileZ
             );
             
             parsedFeatures.push(...result);
@@ -194,8 +205,10 @@ export class TileManager {
             for (const layerName in vectorTile.layers) {
                 const layer = vectorTile.layers[layerName];
                 for (let i = 0; i < layer.length; i++) {
-                    const feature = layer.feature(i);
-                    const parsed = parseGeoJSONFeature(feature, [0.0, 0.0, 0.0, 1.0], null, z);
+                    const rawFeature = layer.feature(i);
+                    const feature = rawFeature.toGeoJSON(x, y, z);
+                    feature.layer = { name: layerName };
+                    const parsed = parseGeoJSONFeature(feature, [0.0, 0.0, 0.0, 1.0], sourceId, z);
                     if (parsed) {
                         parsedFeatures.push(parsed);
                     }
