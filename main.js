@@ -1650,7 +1650,17 @@ function buildFeatureNameMap(tileBuffers) {
             }
             
             if (clampedFid && labelText) {
-                featureNames.set(clampedFid, { name: labelText, sourceLayer, properties: tileBuffer.properties });
+                // Extract building height for 3D label placement
+                const height = tileBuffer.properties?.height || 0;
+                const base_height = tileBuffer.properties?.min_height || 0;
+                const totalHeight = (height + base_height) || 0;
+                
+                featureNames.set(clampedFid, { 
+                    name: labelText, 
+                    sourceLayer, 
+                    properties: tileBuffer.properties,
+                    height: totalHeight
+                });
             }
         }
     }

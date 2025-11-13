@@ -158,6 +158,13 @@ export function setupEventListeners(canvas, camera, device, renderer, tileBuffer
             }
             
             if (feature) {
+                // Log feature properties on click
+                console.log('🎯 Clicked feature:', {
+                    featureId,
+                    properties: feature.properties,
+                    sourceLayer: feature.properties?.sourceLayer
+                });
+                
                 // Write the raw values directly - feature ID and layer ID
                 device.queue.writeBuffer(renderer.buffers.pickedId, 0, new Float32Array([featureId]));
                 device.queue.writeBuffer(renderer.buffers.pickedLayerId, 0, new Float32Array([blueChannel]));

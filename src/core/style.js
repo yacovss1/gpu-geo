@@ -505,13 +505,34 @@ export function getFeatureId(feature, sourceId, featureIndex = 0) {
         }
     }
 
-    // Fall back to feature.id if present
-    if (feature.id !== undefined) {
+    // Fall back to feature.id if present (check both top-level and in properties)
+    if (feature.id !== undefined && feature.id !== null) {
+        if (!window._featureIdLogged && Math.random() < 0.001) {
+            console.log(`✅ Using feature.id: ${feature.id} for`, feature.properties);
+            window._featureIdLogged = true;
+        }
         return feature.id;
+    }
+    
+    // Also check properties.id which some tile sources use
+    if (feature.properties?.id !== undefined && feature.properties?.id !== null) {
+        const propId = feature.properties.id;
+        // Clamp to 16-bit range while maintaining consistency across tiles
+        const clamped = ((propId - 1) % 65533) + 1;
+        if (!window._propIdLogged && Math.random() < 0.01) {
+            console.log(`🔍 Using properties.id: ${propId} → clamped to ${clamped} for class=${feature.properties?.class}`);
+            window._propIdLogged = true;
+        }
+        return clamped;
     }
 
     // Generate a stable ID from feature properties (uses feature index as fallback)
-    return generateFeatureId(feature, featureIndex);
+    const generated = generateFeatureId(feature, featureIndex);
+    if (!window._genIdLogged && Math.random() < 0.01) {
+        console.log(`⚠️ Generated ID: ${generated} for class=${feature.properties?.class}, no properties.id found`);
+        window._genIdLogged = true;
+    }
+    return generated;
 }
 
 /**
@@ -521,15 +542,62 @@ export function getFeatureId(feature, sourceId, featureIndex = 0) {
  * @returns {number}
  */
 function generateFeatureId(feature, fallbackIndex = 0) {
-    // Prioritize country name for deterministic IDs (same as geojson.js)
-    const countryName = feature.properties?.NAME || feature.properties?.ADM0_A3 || feature.properties?.ISO_A3;
-    if (countryName) {
+    // Prioritize stable name fields that persist across tiles
+    const stableName = feature.properties?.NAME || 
+                      feature.properties?.name ||
+                      feature.properties?.ADM0_A3 || 
+                      feature.properties?.ISO_A3 ||
+                      feature.properties?.name_en ||
+                      feature.properties?.name_int;
+    
+    if (stableName) {
         let hash = 0;
-        for (let i = 0; i < countryName.length; i++) {
-            hash = ((hash << 5) - hash) + countryName.charCodeAt(i);
+        for (let i = 0; i < stableName.length; i++) {
+            hash = ((hash << 5) - hash) + stableName.charCodeAt(i);
             hash = hash & hash;
         }
         // Better distribution: use prime number 9973 instead of 9999
+        return ((Math.abs(hash) % 9973) + 1);
+    }
+    
+    // For features without names, try to use class/type + approximate position
+    // This helps features spanning tiles get the same ID
+    const featureClass = feature.properties?.class || feature.properties?.type;
+    if (featureClass) {
+        // Special handling for water: use VERY coarse grouping or just class alone at low zoom
+        if (featureClass === 'lake' || featureClass === 'ocean' || featureClass === 'water') {
+            // At low zoom, just use the class - all nearby water merges
+            // This prevents tile boundary seams but may merge adjacent lakes
+            const str = `${featureClass}`;
+            let hash = 0;
+            for (let i = 0; i < str.length; i++) {
+                hash = ((hash << 5) - hash) + str.charCodeAt(i);
+                hash = hash & hash;
+            }
+            return ((Math.abs(hash) % 100) + 1); // Limited range for water
+        }
+        
+        // For non-water, use position-based grouping
+        const coords = feature.geometry?.coordinates;
+        let approxLon = 0, approxLat = 0;
+        
+        if (coords && coords.length > 0) {
+            let c = coords;
+            while (Array.isArray(c[0])) {
+                c = c[0];
+            }
+            if (c.length >= 2) {
+                approxLon = Math.floor(c[0] / 5) * 5;
+                approxLat = Math.floor(c[1] / 5) * 5;
+            }
+        }
+        
+        const str = `${featureClass}_${approxLon}_${approxLat}`;
+        let hash = 0;
+        for (let i = 0; i < str.length; i++) {
+            hash = ((hash << 5) - hash) + str.charCodeAt(i);
+            hash = hash & hash;
+        }
         return ((Math.abs(hash) % 9973) + 1);
     }
     
@@ -554,8 +622,8 @@ function generateFeatureId(feature, fallbackIndex = 0) {
     // Map to 1-65534 range for 16-bit encoding
     const id = ((Math.abs(hash) % 65533) + 1);
     
-    if (!window._fidDebugLogged && Math.random() < 0.01) {
-        console.log(`Generated FID: ${id} for feature with hash ${hash}, props:`, feature.properties, `coords sample: ${coordsStr.slice(0, 50)}`);
+    if (!window._fidDebugLogged) {
+        console.log(`⚠️ Generated geometry-based FID: ${id} for feature with hash ${hash}, props:`, feature.properties, `coords sample: ${coordsStr.slice(0, 100)}`);
         window._fidDebugLogged = true;
     }
     

@@ -100,6 +100,14 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
     // Get feature ID using style configuration or fallback
     const getFeatureId = () => {
         if (style && sourceId) {
+            if (!window._debugPropId && Math.random() < 0.01) {
+                console.log('🧪 geojsonGPU getFeatureId check:', {
+                    hasPropertiesId: feature.properties?.id !== undefined,
+                    propertiesId: feature.properties?.id,
+                    class: feature.properties?.class
+                });
+                window._debugPropId = true;
+            }
             return getStyleFeatureId(feature, sourceId);
         }
         // Legacy fallback
@@ -788,9 +796,19 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
     // Get feature ID using tile coords + index for uniqueness across all tiles
     const getFeatureId = () => {
         if (style && sourceId) {
+            if (!window._debugBatchPropId && Math.random() < 0.01) {
+                console.log('🧪 BATCH getFeatureId check:', {
+                    hasPropertiesId: feature.properties?.id !== undefined,
+                    propertiesId: feature.properties?.id,
+                    class: feature.properties?.class,
+                    featureIndex
+                });
+                window._debugBatchPropId = true;
+            }
             const baseId = getStyleFeatureId(feature, sourceId, featureIndex);
             // If it returned a generated ID (not from properties), make it unique per tile
-            if (!feature.properties?.fid && !feature.id) {
+            // Check if the feature has a stable ID from the tile data
+            if (!feature.properties?.id && !feature.properties?.fid && !feature.id) {
                 // Create a highly unique hash using:
                 // 1. Tile coordinates (z, x, y)
                 // 2. Feature index within tile
