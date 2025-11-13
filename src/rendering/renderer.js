@@ -1,5 +1,5 @@
 import { 
-    vertexShaderCode, fragmentShaderCode, hiddenFragmentShaderCode,
+    vertexShaderCode, fragmentShaderCode, hiddenFragmentShaderCode, hiddenVertexShaderCode,
     edgeDetectionVertexShaderCode, edgeDetectionFragmentShaderCode,
     debugVertexShaderCode, debugFragmentShaderCode 
 } from '../shaders/shaders.js';
@@ -9,6 +9,7 @@ import { GPUTextRenderer } from '../text/gpuTextRenderer.js';
 let cachedShaders = { 
     vertex: null, 
     fragment: null, 
+    hiddenVertex: null,
     hiddenFragment: null, 
     edgeDetectionVertex: null, 
     edgeDetectionFragment: null,
@@ -24,6 +25,7 @@ function initCachedShaders(device) {
     if (!cachedShaders.initialized) {
         cachedShaders.vertex = device.createShaderModule({ code: vertexShaderCode });
         cachedShaders.fragment = device.createShaderModule({ code: fragmentShaderCode });
+        cachedShaders.hiddenVertex = device.createShaderModule({ code: hiddenVertexShaderCode });
         cachedShaders.hiddenFragment = device.createShaderModule({ code: hiddenFragmentShaderCode });
         cachedShaders.edgeDetectionVertex = device.createShaderModule({ code: edgeDetectionVertexShaderCode });
         cachedShaders.edgeDetectionFragment = device.createShaderModule({ code: edgeDetectionFragmentShaderCode });
@@ -55,7 +57,7 @@ export function createRenderPipeline(device, format, topology, isHidden = false,
     return device.createRenderPipeline({
         layout: pipelineLayout,
         vertex: {
-            module: cachedShaders.vertex,
+            module: isHidden ? cachedShaders.hiddenVertex : cachedShaders.vertex,
             entryPoint: "main",
             buffers: [{
                 arrayStride: 28,
@@ -88,7 +90,8 @@ export function createRenderPipeline(device, format, topology, isHidden = false,
                 depthBias: depthBias,
                 depthBiasSlopeScale: 1.0
             } : {})
-        }
+        },
+        multisample: { count: 4 }  // Enable 4x MSAA for anti-aliasing
     });
 }
 
@@ -126,7 +129,7 @@ export function createEdgeDetectionPipeline(device, format) {
             targets: [{ format }] 
         },
         primitive: { topology: "triangle-list" },
-        multisample: { count: 1 }
+        multisample: { count: 1 }  // No MSAA for post-process
     });
 }
 
@@ -323,6 +326,18 @@ export class MapRenderer {
             usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC | GPUTextureUsage.TEXTURE_BINDING,
         });
         
+        // Create MSAA hidden texture
+        if (this.textures.hiddenMSAA) {
+            this.textures.hiddenMSAA.destroy();
+        }
+        
+        this.textures.hiddenMSAA = this.device.createTexture({
+            size: [width, height, 1],
+            format: this.format,
+            sampleCount: 4,
+            usage: GPUTextureUsage.RENDER_ATTACHMENT,
+        });
+        
         if (this.textures.color) {
             this.textures.color.destroy();
         }
@@ -333,6 +348,18 @@ export class MapRenderer {
             usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
         });
         
+        // Create MSAA color texture (4x multisampling)
+        if (this.textures.colorMSAA) {
+            this.textures.colorMSAA.destroy();
+        }
+        
+        this.textures.colorMSAA = this.device.createTexture({
+            size: [width, height, 1],
+            format: this.format,
+            sampleCount: 4,
+            usage: GPUTextureUsage.RENDER_ATTACHMENT,
+        });
+        
         // Create depth texture for 3D rendering
         if (this.textures.depth) {
             this.textures.depth.destroy();
@@ -341,6 +368,7 @@ export class MapRenderer {
         this.textures.depth = this.device.createTexture({
             size: [width, height, 1],
             format: 'depth24plus',
+            sampleCount: 4,  // Match MSAA sample count
             usage: GPUTextureUsage.RENDER_ATTACHMENT,
         });
     }

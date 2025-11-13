@@ -66,50 +66,109 @@ export class Camera extends EventTarget {
     }
 
     getMatrix() {
-        // Only recompute if position, zoom, or pitch changed
+        // Only recompute if position, zoom, pitch, or bearing changed
         if (
             this._cachedMatrix &&
             this._lastState.pos[0] === this.position[0] &&
             this._lastState.pos[1] === this.position[1] &&
             this._lastState.zoom === this.zoom &&
-            this._lastState.pitch === this.pitch
+            this._lastState.pitch === this.pitch &&
+            this._lastState.bearing === this.bearing
         ) {
             return this._cachedMatrix;
         }
 
         const aspectRatio = this.viewportWidth / this.viewportHeight;
         const effectiveZoom = Math.pow(2, this.zoom);
+
+        // When there's no pitch, use the original simple approach
+        if (this.pitch === 0 && this.bearing === 0) {
+            const matrix = mat4.create();
+            mat4.scale(matrix, matrix, [effectiveZoom / aspectRatio, effectiveZoom, effectiveZoom]);
+            mat4.translate(matrix, matrix, [-this.position[0], -this.position[1], 0]);
+            
+            this._visualZoom = effectiveZoom;
+            this._zoomDebug.visual = effectiveZoom;
+            this._cachedMatrix = matrix;
+            this._lastState = { 
+                pos: [...this.position], 
+                zoom: this.zoom,
+                pitch: this.pitch,
+                bearing: this.bearing
+            };
+            return matrix;
+        }
+
+        // With pitch/bearing: use proper view-projection separation
+        // Compute orthographic extents in world units
+        const halfWidth = aspectRatio / effectiveZoom;
+        const halfHeight = 1.0 / effectiveZoom;
         
-        // Orthographic projection for map rendering
-        const matrix = mat4.create();
+        // Projection: standard orthographic
+        const proj = mat4.create();
+        mat4.ortho(
+            proj, 
+            -halfWidth, 
+            halfWidth, 
+            -halfHeight, 
+            halfHeight, 
+            -10.0,   // near plane - conservative for 2D-ish content
+            10.0     // far plane
+        );
+
+        // View matrix: translate then rotate
+        const view = mat4.create();
+        mat4.identity(view);
         
-        // Scale for zoom
-        mat4.scale(matrix, matrix, [effectiveZoom / aspectRatio, effectiveZoom, effectiveZoom]);
+        // Move camera back along Z when tilted so we can see more
+        const pitchRadians = (this.pitch * Math.PI) / 180;
+        if (this.pitch > 0) {
+            const pullback = Math.tan(pitchRadians) * 0.5; // Pull camera back based on tilt
+            mat4.translate(view, view, [0, 0, pullback]);
+        }
+        
+        // Apply rotations
+        if (this.pitch > 0) {
+            mat4.rotateX(view, view, -pitchRadians);
+        }
+        
+        if (this.bearing !== 0) {
+            const bearingRadians = (this.bearing * Math.PI) / 180;
+            mat4.rotateZ(view, view, -bearingRadians);
+        }
         
         // Translate to camera position
-        mat4.translate(matrix, matrix, [-this.position[0], -this.position[1], 0]);
-        
-        // Debug: Log camera setup once
-        if (!this._debugLogged) {
-            console.log('🎥 Camera setup:', {
+        mat4.translate(view, view, [-this.position[0], -this.position[1], 0]);
+
+        // final matrix = projection * view
+        const matrix = mat4.create();
+        mat4.multiply(matrix, proj, view);
+
+        // Debug: Log camera setup when pitch changes
+        if (this._lastState.pitch !== this.pitch || !this._debugLogged) {
+            console.log('🎥 Camera:', {
                 position: this.position,
                 zoom: this.zoom,
-                effectiveZoom
+                pitch: this.pitch,
+                bearing: this.bearing,
+                effectiveZoom,
+                halfWidth,
+                halfHeight
             });
             this._debugLogged = true;
         }
-        
+
         this._visualZoom = effectiveZoom;
         this._zoomDebug.visual = effectiveZoom;
-        
+
         this._cachedMatrix = matrix;
-        this._lastState = { 
-            pos: [...this.position], 
+        this._lastState = {
+            pos: [...this.position],
             zoom: this.zoom,
             pitch: this.pitch,
             bearing: this.bearing
         };
-        
+
         return matrix;
     }
 
@@ -366,6 +425,28 @@ export class Camera extends EventTarget {
             maxTileY: viewMaxY,
             zoom
         };
+    }
+
+    setPitch(pitchDegrees) {
+        // Clamp pitch between 0 (top-down) and 60 degrees (maximum tilt)
+        this.pitch = Math.max(0, Math.min(60, pitchDegrees));
+        this._cachedMatrix = null; // Invalidate cache
+        this.triggerEvent('pitch', { pitch: this.pitch });
+    }
+
+    adjustPitch(deltaDegrees) {
+        this.setPitch(this.pitch + deltaDegrees);
+    }
+
+    setBearing(bearingDegrees) {
+        // Normalize bearing to 0-360 range
+        this.bearing = ((bearingDegrees % 360) + 360) % 360;
+        this._cachedMatrix = null; // Invalidate cache
+        this.triggerEvent('bearing', { bearing: this.bearing });
+    }
+
+    adjustBearing(deltaDegrees) {
+        this.setBearing(this.bearing + deltaDegrees);
     }
 }
 

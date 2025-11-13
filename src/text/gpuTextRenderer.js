@@ -84,10 +84,11 @@ export class GPUTextRenderer {
 
             const dataBindGroupLayout = this.device.createBindGroupLayout({
                 entries: [
-                    { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } }, // markers
-                    { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } }, // labels
-                    { binding: 2, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } }, // text
-                    { binding: 3, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } }, // char metrics
+                    { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } },          // camera matrix
+                    { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } }, // markers
+                    { binding: 2, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } }, // labels
+                    { binding: 3, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } }, // text
+                    { binding: 4, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } }, // char metrics
                 ]
             });
 
@@ -313,19 +314,20 @@ export class GPUTextRenderer {
     /**
      * Render all labels in a single GPU draw call
      */
-    render(encoder, textureView, markerBuffer) {
+    render(encoder, textureView, markerBuffer, cameraUniformBuffer) {
         if (!this.initialized || this.labelCount === 0) {
             return;
         }
 
-        // Create data bind group with marker buffer
+        // Create data bind group with marker buffer and camera uniform
         const dataBindGroup = this.device.createBindGroup({
             layout: this.pipeline.getBindGroupLayout(1),
             entries: [
-                { binding: 0, resource: { buffer: markerBuffer } },
-                { binding: 1, resource: { buffer: this.labelBuffer } },
-                { binding: 2, resource: { buffer: this.textBuffer } },
-                { binding: 3, resource: { buffer: this.charMetricsBuffer } }
+                { binding: 0, resource: { buffer: cameraUniformBuffer } },
+                { binding: 1, resource: { buffer: markerBuffer } },
+                { binding: 2, resource: { buffer: this.labelBuffer } },
+                { binding: 3, resource: { buffer: this.textBuffer } },
+                { binding: 4, resource: { buffer: this.charMetricsBuffer } }
             ]
         });
 

@@ -44,10 +44,11 @@ struct VertexOutput {
 @group(0) @binding(0) var texSampler: sampler;
 @group(0) @binding(1) var fontAtlas: texture_2d<f32>;
 
-@group(1) @binding(0) var<storage> markers: array<Marker>;
-@group(1) @binding(1) var<storage> labels: array<Label>;
-@group(1) @binding(2) var<storage> textData: array<u32>;
-@group(1) @binding(3) var<storage> charMetrics: array<CharMetrics>;
+@group(1) @binding(0) var<uniform> cameraMatrix: mat4x4<f32>;
+@group(1) @binding(1) var<storage> markers: array<Marker>;
+@group(1) @binding(2) var<storage> labels: array<Label>;
+@group(1) @binding(3) var<storage> textData: array<u32>;
+@group(1) @binding(4) var<storage> charMetrics: array<CharMetrics>;
 
 @vertex
 fn vertexMain(
@@ -146,12 +147,16 @@ fn vertexMain(
         uv = vec2<f32>(metrics.u0, metrics.v0);
     }
     
-    // Offset text slightly above the marker point
-    // The marker.center already has the isometric offset applied in the compute shader
-    // (matching building rendering: isoY = y - z * 0.3)
-    // So we just need to position the text slightly above the marker
-    let finalPos = marker.center + vec2<f32>(xOffset, 0.035) + corner;
-    output.position = vec4<f32>(finalPos, 0.0, 1.0);
+    // Position text slightly above the marker
+    // Marker position already has isometric offset applied (from hidden texture)
+    let labelOffset = 0.035;
+    
+    output.position = vec4<f32>(
+        marker.center.x + xOffset + corner.x,
+        marker.center.y + labelOffset + corner.y,
+        0.5,
+        1.0
+    );
     output.texCoord = uv;
     
     return output;

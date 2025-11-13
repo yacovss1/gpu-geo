@@ -49,9 +49,47 @@ fn main(@location(0) fragCoord: vec2<f32>, @location(1) color: vec4<f32>, @locat
 
 export const hiddenFragmentShaderCode = `
 @fragment
-fn main(@location(0) fragCoord: vec2<f32>, @location(1) color: vec4<f32>) -> @location(0) vec4<f32> {
-    // Use RGB channels: R+G for 16-bit feature ID, B for layer ID
-    return vec4<f32>(color.r, color.g, color.b, 1.0);
+fn main(@location(0) fragCoord: vec2<f32>, @location(1) color: vec4<f32>, @location(2) worldZ: f32) -> @location(0) vec4<f32> {
+    // Use RGB channels: R+G for 16-bit feature ID, B for Z-height encoding
+    // Encode Z height (0-100m range) into blue channel for roof detection
+    let normalizedZ = clamp(worldZ / 0.07, 0.0, 1.0); // 0.07 = 100m in clip units (100 * 0.0007)
+    return vec4<f32>(color.r, color.g, normalizedZ, 1.0);
+}
+`;
+
+// Hidden buffer vertex shader - MUST apply SAME isometric offset as visible rendering
+// This ensures the 2D screen position matches exactly between visible and hidden
+export const hiddenVertexShaderCode = `
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) fragCoord: vec2<f32>,
+    @location(1) color: vec4<f32>,
+    @location(2) worldZ: f32
+};
+
+@group(0) @binding(0) var<uniform> uniforms: mat4x4<f32>;
+
+@vertex
+fn main(@location(0) inPosition: vec3<f32>, @location(1) inColor: vec4<f32>) -> VertexOutput {
+    var output: VertexOutput;
+    
+    // Apply SAME isometric offset as visible rendering
+    let isoY = inPosition.y - inPosition.z * 0.3;
+    let pos = vec4<f32>(inPosition.x, isoY, 0.0, 1.0);
+
+    // Apply camera transform
+    output.position = uniforms * pos;
+    
+    // Set depth same as visible geometry
+    let baseDepth = 0.95;
+    let flatOffset = select(0.0, 0.00001, inPosition.z < 0.00001);
+    output.position.z = baseDepth - (inPosition.z * 10.0) + flatOffset;
+    
+    output.fragCoord = output.position.xy;
+    output.color = inColor;
+    output.worldZ = inPosition.z;
+    
+    return output;
 }
 `;
 

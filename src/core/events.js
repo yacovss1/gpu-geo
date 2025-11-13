@@ -1,9 +1,19 @@
+// Event handlers for map interactions
+//
+// Controls:
+// - Left mouse drag: Pan the map
+// - Right mouse drag: Adjust pitch (tilt) and bearing (rotation)
+// - Mouse wheel: Zoom in/out
+// - Arrow keys: Up/Down = pitch, Left/Right = bearing
+// - R key: Reset camera to top-down view (pitch=0, bearing=0)
+//
 // At module scope, add a shared read buffer for click events. Note: Ensure its size (16) matches usage.
 let sharedReadBuffer = null;
 let bufferIsMapped = false; // Track buffer mapping state
 
 export function setupEventListeners(canvas, camera, device, renderer, tileBuffers) {
     let isPanning = false;
+    let isPitching = false; // Track if we're adjusting pitch with right mouse button
     let lastX = 0;
     let lastY = 0;
 
@@ -63,14 +73,30 @@ export function setupEventListeners(canvas, camera, device, renderer, tileBuffer
 
     // Start panning on mouse down
     canvas.addEventListener('mousedown', (event) => {
-        isPanning = true;
-        lastX = event.clientX;
-        lastY = event.clientY;
+        if (event.button === 0) { // Left mouse button
+            isPanning = true;
+            lastX = event.clientX;
+            lastY = event.clientY;
+        } else if (event.button === 2) { // Right mouse button for pitch/bearing
+            isPitching = true;
+            lastX = event.clientX;
+            lastY = event.clientY;
+            event.preventDefault(); // Prevent context menu
+        }
     });
 
-    // Stop panning on mouse up
-    canvas.addEventListener('mouseup', () => {
-        isPanning = false;
+    // Stop panning/pitching on mouse up
+    canvas.addEventListener('mouseup', (event) => {
+        if (event.button === 0) {
+            isPanning = false;
+        } else if (event.button === 2) {
+            isPitching = false;
+        }
+    });
+
+    // Prevent context menu on right click
+    canvas.addEventListener('contextmenu', (event) => {
+        event.preventDefault();
     });
 
     // Pan the camera on mouse move
@@ -84,6 +110,17 @@ export function setupEventListeners(canvas, camera, device, renderer, tileBuffer
             const dx = (event.clientX - lastX) / canvas.clientWidth * effectiveZoom;
             const dy = (lastY - event.clientY) / canvas.clientHeight * effectiveZoom;
             camera.pan(dx, dy);
+            lastX = event.clientX;
+            lastY = event.clientY;
+        } else if (isPitching) {
+            // Adjust pitch with vertical mouse movement
+            const dy = event.clientY - lastY;
+            camera.adjustPitch(dy * 0.3); // Scale factor for smooth control
+            
+            // Adjust bearing with horizontal mouse movement
+            const dx = event.clientX - lastX;
+            camera.adjustBearing(dx * 0.3);
+            
             lastX = event.clientX;
             lastY = event.clientY;
         }
@@ -188,6 +225,41 @@ export function setupEventListeners(canvas, camera, device, renderer, tileBuffer
                 }
                 bufferIsMapped = false;
             }
+        }
+    });
+
+    // Keyboard controls for pitch and bearing
+    window.addEventListener('keydown', (event) => {
+        const step = 2; // Degrees per key press
+        
+        switch(event.key) {
+            case 'ArrowUp':
+                event.preventDefault();
+                camera.adjustPitch(step);
+                console.log(`⬆️ Pitch: ${camera.pitch.toFixed(1)}°`);
+                break;
+            case 'ArrowDown':
+                event.preventDefault();
+                camera.adjustPitch(-step);
+                console.log(`⬇️ Pitch: ${camera.pitch.toFixed(1)}°`);
+                break;
+            case 'ArrowLeft':
+                event.preventDefault();
+                camera.adjustBearing(-step);
+                console.log(`⬅️ Bearing: ${camera.bearing.toFixed(1)}°`);
+                break;
+            case 'ArrowRight':
+                event.preventDefault();
+                camera.adjustBearing(step);
+                console.log(`➡️ Bearing: ${camera.bearing.toFixed(1)}°`);
+                break;
+            case 'r':
+            case 'R':
+                // Reset pitch and bearing
+                camera.setPitch(0);
+                camera.setBearing(0);
+                console.log('🔄 Reset camera to top-down view');
+                break;
         }
     });
 }

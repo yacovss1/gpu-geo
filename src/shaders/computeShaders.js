@@ -18,7 +18,8 @@
 // Pass 3: Generate final marker position from selected quadrant
 
 export const accumulatorShaderCode = `
-// Pass 1: Calculate overall centroid and bounding box only
+// Pass 1: Calculate centroid for TOP surface only (highest Z pixels)
+// This ensures markers appear on building roofs, not at ground level
 struct FeatureAccumulator {
     sumX: atomic<u32>,
     sumY: atomic<u32>,
@@ -39,23 +40,29 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let pixel = textureLoad(hiddenTex, vec2<i32>(gid.xy), 0);
     
     // Feature ID from red+green channels (16-bit encoding)
-    // R = high byte, G = low byte  
     let fid: u32 = u32(pixel.r * 255.0) * 256u + u32(pixel.g * 255.0);
     if (fid == 0u || fid >= 65535u) { return; }
     
-    let x = gid.x;
-    let y = gid.y;
+    // Z-height in blue channel: 0 = ground, higher = building roof
+    let pixelZ = pixel.b;
     
-    // Accumulate for centroid
-    atomicAdd(&accumulators[fid].count, 1u);
-    atomicAdd(&accumulators[fid].sumX, x);
-    atomicAdd(&accumulators[fid].sumY, y);
+    // Accept pixels with any measurable height (building edges/faces)
+    // and flat features (ground level)
+    let hasHeight = pixelZ > 0.001;
+    let isFlatFeature = pixelZ <= 0.001;
     
-    // Update bounding box
-    atomicMin(&accumulators[fid].minX, x);
-    atomicMin(&accumulators[fid].minY, y);
-    atomicMax(&accumulators[fid].maxX, x);
-    atomicMax(&accumulators[fid].maxY, y);
+    if (hasHeight || isFlatFeature) {
+        let x = gid.x;
+        let y = gid.y;
+        
+        atomicAdd(&accumulators[fid].count, 1u);
+        atomicAdd(&accumulators[fid].sumX, x);
+        atomicAdd(&accumulators[fid].sumY, y);
+        atomicMin(&accumulators[fid].minX, x);
+        atomicMin(&accumulators[fid].minY, y);
+        atomicMax(&accumulators[fid].maxX, x);
+        atomicMax(&accumulators[fid].maxY, y);
+    }
 }
 `;
 
@@ -109,7 +116,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Feature ID from red+green channels (16-bit encoding)
     // R = high byte, G = low byte
     let fid: u32 = u32(pixel.r * 255.0) * 256u + u32(pixel.g * 255.0);
-    if (fid == 0u || fid >= 10000u) { return; }
+    if (fid == 0u || fid >= 65535u) { return; }
+    
+    // Z-height in blue channel: 0 = ground, higher = building roof
+    let pixelZ = pixel.b;
+    
+    // Accept pixels with any measurable height (building edges/faces)
+    // and flat features (ground level) - same filter as Pass 1
+    let hasHeight = pixelZ > 0.001;
+    let isFlatFeature = pixelZ <= 0.001;
+    
+    if (!hasHeight && !isFlatFeature) { return; }
     
     let x = gid.x;
     let y = gid.y;
@@ -248,7 +265,7 @@ fn calculateCentroid(quad: ptr<storage, QuadrantData, read_write>) -> vec2<f32> 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let idx: u32 = gid.x;
-    if (idx >= 10000u) { return; } // Updated to match MAX_FEATURES
+    if (idx >= 65535u) { return; } // Match feature ID limit
     
     // Initialize marker with default values
     markers[idx].center = vec2<f32>(0.0, 0.0);
@@ -323,21 +340,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     
-    // Convert to clip space (-1 to 1)
+    // Convert screen pixels to clip space (-1 to 1)
     let clipX = (centerX / width) * 2.0 - 1.0;
     let clipY = (centerY / height) * 2.0 - 1.0;
     
-    // CRITICAL: Apply isometric offset for height (matching building vertex shader)
-    // Buildings use: isoY = y - z * 0.3
-    // So we need to shift the Y position based on height to match
+    // Store marker in clip space (markers will be drawn in screen space)
+    // The vertex shader will apply the isometric offset
     let buildingHeight = heights[idx];
-    let isoOffsetY = buildingHeight * 0.3;
-    
-    // Store marker position with isometric offset applied in clip space
-    // Note: In clip space, we need to convert the world-space offset to clip space
-    // The factor 0.0007 approximates the world-to-clip conversion for height
-    let clipSpaceOffset = isoOffsetY * 0.0007;
-    markers[idx].center = vec2<f32>(clipX, clipY - clipSpaceOffset);
+    markers[idx].center = vec2<f32>(clipX, clipY);
     markers[idx].height = buildingHeight;
     markers[idx].featureId = idx;
     

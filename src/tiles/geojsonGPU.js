@@ -20,7 +20,6 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
     const fillVertices = [];
     const hiddenVertices = [];
     const fillIndices = [];
-    const outlineIndices = [];
     const hiddenfillIndices = [];
     let isFilled = true;
     let isLine = true;
@@ -538,7 +537,6 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
         vertices: new Float32Array(fillVertices),
         hiddenVertices: new Float32Array(hiddenVertices),
         fillIndices: new Uint32Array(fillIndices),
-        outlineIndices: new Uint32Array(outlineIndices),
         hiddenfillIndices: new Uint32Array(hiddenfillIndices),
         isFilled,
         isLine,
@@ -691,7 +689,6 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
     const fillVertices = [];
     const hiddenVertices = [];
     const fillIndices = [];
-    const outlineIndices = [];
     const hiddenfillIndices = [];
     let isFilled = true;
     let isLine = true;
@@ -853,7 +850,7 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
         return vertexStartIndex;
     };
 
-    const coordsToIdVertices = (coords, featureId, targetArray, layerId = '') => {
+    const coordsToIdVertices = (coords, featureId, targetArray, layerId = '', zPosition = 0.0, zEncoding = 0.0) => {
         const vertexStartIndex = targetArray.length / 7;
         
         // Encode feature ID as 16-bit across red and green channels
@@ -864,17 +861,13 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
         const normalizedR = highByte / 255.0;
         const normalizedG = lowByte / 255.0;
         
-        // Encode layer ID hash in blue channel (8-bit, 0-255)
-        let layerHash = 0;
-        for (let i = 0; i < layerId.length; i++) {
-            layerHash = ((layerHash << 5) - layerHash) + layerId.charCodeAt(i);
-            layerHash = layerHash & layerHash;
-        }
-        const normalizedB = ((Math.abs(layerHash) % 255) + 1) / 255.0; // 1-255 to avoid 0
+        // Encode Z-height in blue channel for roof detection (use zEncoding if provided)
+        const heightToEncode = zEncoding > 0.0 ? zEncoding : zPosition;
+        const normalizedB = Math.min(1.0, heightToEncode / 0.07); // Normalize to 0-1 range
         
         coords.forEach(coord => {
             const [x, y] = getTransformedCoord(coord);
-            targetArray.push(x, y, 0.0, normalizedR, normalizedG, normalizedB, 1.0);
+            targetArray.push(x, y, zPosition, normalizedR, normalizedG, normalizedB, 1.0);
         });
         return vertexStartIndex;
     };
@@ -992,11 +985,11 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
             roofTriangles = earcut(flatCoords, holeIndices.length > 0 ? holeIndices : null);
             if (!roofTriangles || roofTriangles.length === 0) {
                 console.warn('⚠️ Earcut returned no triangles');
-                return { vertices, indices }; // Return just walls
+                return { vertices, indices, roofVertices: [], roofIndices: [] }; // Return just walls
             }
         } catch (error) {
             console.warn('⚠️ Earcut triangulation failed:', error.message);
-            return { vertices, indices }; // Return just walls, skip roof
+            return { vertices, indices, roofVertices: [], roofIndices: [] }; // Return just walls, skip roof
         }
         
         const roofStartIdx = vertices.length / 7;
@@ -1010,7 +1003,13 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
             indices.push(roofStartIdx + idx);
         });
         
-        return { vertices, indices };
+        // Return roof geometry separately so hidden buffer can use EXACT same triangulation
+        return { 
+            vertices, 
+            indices,
+            roofVertices,      // Array of [x, y] transformed coordinates
+            roofIndices: roofTriangles  // Triangle indices for roof
+        };
     };
 
     // Process geometry (same logic as parseGeoJSONFeatureGPU)
@@ -1059,34 +1058,40 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
                     console.log(`🏢 BATCH Taking EXTRUSION path: height=${extrusionHeight}`);
                     window._batchExtrusionLogged = true;
                 }
-                const extrusion = generateExtrusion(outerRing, extrusionHeight, extrusionBase);
+                const extrusion = generateExtrusion(outerRing, extrusionHeight, extrusionBase, holes);
                 const vertexOffset = fillVertices.length / 7;
                 extrusion.vertices.forEach(v => fillVertices.push(v));
                 extrusion.indices.forEach(i => fillIndices.push(i + vertexOffset));
                 
-                // Also create hidden vertices for the footprint so markers can be computed
-                const allCoords = [outerRing, ...holes].flat(1);
-                const hiddenStartIndex = coordsToIdVertices(allCoords, 
-                    clampedFeatureId, hiddenVertices, layer?.id || 'unknown');
+                // TRIVIAL: Use the EXACT SAME roof geometry for hidden as visible
+                // extrusion.roofVertices contains the transformed coordinates already
+                const heightZ = extrusionHeight * 0.0007;
+                const hiddenStartIndex = hiddenVertices.length / 7;
                 
-                // Triangulate the footprint for hidden buffer indices
-                const flatCoords = [];
-                outerRing.forEach(coord => {
-                    const [x, y] = getTransformedCoord(coord);
-                    flatCoords.push(x, y);
-                });
-                const holeIndices = [];
-                holes.forEach(hole => {
-                    holeIndices.push(flatCoords.length / 2);
-                    hole.forEach(coord => {
-                        const [x, y] = getTransformedCoord(coord);
-                        flatCoords.push(x, y);
+                console.log(`🔧 Roof data: roofVertices=${extrusion.roofVertices?.length || 0}, roofIndices=${extrusion.roofIndices?.length || 0}, heightZ=${heightZ.toFixed(4)}`);
+                
+                // Encode feature ID for hidden buffer
+                const safeId = Math.max(1, Math.min(65534, clampedFeatureId || 1));
+                const highByte = Math.floor(safeId / 256);
+                const lowByte = safeId % 256;
+                const normalizedR = highByte / 255.0;
+                const normalizedG = lowByte / 255.0;
+                const normalizedB = Math.min(1.0, heightZ / 0.07);
+                
+                // Push roof vertices to hidden buffer at same height as visible
+                if (extrusion.roofVertices && extrusion.roofVertices.length > 0) {
+                    extrusion.roofVertices.forEach(([x, y]) => {
+                        hiddenVertices.push(x, y, heightZ, normalizedR, normalizedG, normalizedB, 1.0);
                     });
-                });
-                const triangles = earcut(flatCoords, holeIndices.length > 0 ? holeIndices : null);
-                triangles.forEach(index => {
-                    hiddenfillIndices.push(hiddenStartIndex + index);
-                });
+                    
+                    // Use the same triangulation indices
+                    extrusion.roofIndices.forEach(index => {
+                        hiddenfillIndices.push(hiddenStartIndex + index);
+                    });
+                    console.log(`✅ Added ${extrusion.roofVertices.length} roof vertices to hidden buffer for feature ${clampedFeatureId}`);
+                } else {
+                    console.warn(`⚠️ No roof vertices available for feature ${clampedFeatureId}`);
+                }
             } else {
                 // Standard 2D fill
                 const flatCoords = [];
@@ -1161,33 +1166,30 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
                 
                 // Use extrusion geometry if this is a 3D layer
                 if (isExtruded && extrusionHeight > 0) {
-                    const extrusion = generateExtrusion(outerRing, extrusionHeight, extrusionBase);
+                    const extrusion = generateExtrusion(outerRing, extrusionHeight, extrusionBase, holes);
                     const vertexOffset = fillVertices.length / 7;
                     extrusion.vertices.forEach(v => fillVertices.push(v));
                     extrusion.indices.forEach(i => fillIndices.push(i + vertexOffset));
                     
-                    // Also create hidden vertices for the footprint so markers can be computed
-                    const allRings = [outerRing, ...holes];
-                    const allCoords = allRings.flat(1);
-                    const hiddenStartIndex = coordsToIdVertices(allCoords, 
-                        clampedFeatureId, hiddenVertices, layer?.id || 'unknown');
+                    // TRIVIAL: Use the EXACT SAME roof geometry for hidden as visible
+                    const heightZ = extrusionHeight * 0.0007;
+                    const hiddenStartIndex = hiddenVertices.length / 7;
                     
-                    // Triangulate the footprint for hidden buffer indices
-                    const flatCoords = [];
-                    outerRing.forEach(coord => {
-                        const [x, y] = getTransformedCoord(coord);
-                        flatCoords.push(x, y);
+                    // Encode feature ID for hidden buffer
+                    const safeId = Math.max(1, Math.min(65534, clampedFeatureId || 1));
+                    const highByte = Math.floor(safeId / 256);
+                    const lowByte = safeId % 256;
+                    const normalizedR = highByte / 255.0;
+                    const normalizedG = lowByte / 255.0;
+                    const normalizedB = Math.min(1.0, heightZ / 0.07);
+                    
+                    // Push roof vertices to hidden buffer at same height as visible
+                    extrusion.roofVertices.forEach(([x, y]) => {
+                        hiddenVertices.push(x, y, heightZ, normalizedR, normalizedG, normalizedB, 1.0);
                     });
-                    const holeIndices = [];
-                    holes.forEach(hole => {
-                        holeIndices.push(flatCoords.length / 2);
-                        hole.forEach(coord => {
-                            const [x, y] = getTransformedCoord(coord);
-                            flatCoords.push(x, y);
-                        });
-                    });
-                    const triangles = earcut(flatCoords, holeIndices.length > 0 ? holeIndices : null);
-                    triangles.forEach(index => {
+                    
+                    // Use the same triangulation indices
+                    extrusion.roofIndices.forEach(index => {
                         hiddenfillIndices.push(hiddenStartIndex + index);
                     });
                 } else {
@@ -1335,7 +1337,6 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
         vertices: new Float32Array(fillVertices),
         hiddenVertices: new Float32Array(hiddenVertices),
         fillIndices: new Uint32Array(fillIndices),
-        outlineIndices: new Uint32Array(outlineIndices),
         hiddenfillIndices: new Uint32Array(hiddenfillIndices),
         isFilled,
         isLine,

@@ -703,6 +703,27 @@ async function main() {
                 regionsBuffer,
                 window._heightsBuffer
             );
+            
+            // DEBUG: Read back marker buffer to see what was computed
+            if (!window._markerDebugLogged) {
+                const markerReadBuffer = device.createBuffer({
+                    size: 4 * 8 * 10, // First 10 markers
+                    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+                });
+                const debugEncoder = device.createCommandEncoder();
+                debugEncoder.copyBufferToBuffer(markerBuffer, 0, markerReadBuffer, 0, markerReadBuffer.size);
+                device.queue.submit([debugEncoder.finish()]);
+                
+                await markerReadBuffer.mapAsync(GPUMapMode.READ);
+                const markerData = new Float32Array(markerReadBuffer.getMappedRange());
+                console.log('🎯 First 10 marker positions:');
+                for (let i = 0; i < 10; i++) {
+                    const offset = i * 8; // Marker struct is 8 floats
+                    console.log(`  Marker ${i}: center=(${markerData[offset].toFixed(3)}, ${markerData[offset+1].toFixed(3)}), height=${markerData[offset+2].toFixed(3)}`);
+                }
+                markerReadBuffer.unmap();
+                window._markerDebugLogged = true;
+            }
         }
         
         // Create encoder for marker and label render passes
@@ -711,7 +732,7 @@ async function main() {
         // Only render markers/labels at zoom 14+ 
         if (camera.zoom >= 4) {
             // Render markers
-            renderMarkersToEncoder(overlayEncoder, textureView, device, markerPipeline, markerBuffer, markerBindGroupLayout);
+            renderMarkersToEncoder(overlayEncoder, textureView, device, markerPipeline, markerBuffer, markerBindGroupLayout, renderer.buffers.uniform);
             
             // Build feature names for labels (already done above for heights)
             const featureNames = buildFeatureNameMap(tileBuffers, camera.zoom);
@@ -738,7 +759,7 @@ async function main() {
             }
             
             // Render all labels in one GPU call
-            textRenderer.render(overlayEncoder, textureView, markerBuffer);
+            textRenderer.render(overlayEncoder, textureView, markerBuffer, renderer.buffers.uniform);
         }
         
         // Submit overlay rendering (map and compute already submitted)
@@ -1001,7 +1022,7 @@ async function loadVisibleTiles(visibleTiles, device, newTileBuffers, newHiddenT
                 parsedFeatures.forEach(parsedFeature => {
                     const { 
                         vertices, hiddenVertices, fillIndices, hiddenfillIndices,
-                        outlineIndices, isFilled, isLine, properties, layerId 
+                        isFilled, isLine, properties, layerId 
                     } = parsedFeature;
                     
                     if (!window._tileBufferLogged) {
@@ -1009,12 +1030,11 @@ async function loadVisibleTiles(visibleTiles, device, newTileBuffers, newHiddenT
                         window._tileBufferLogged = true;
                     }
                     
-                    if (vertices.length === 0 || (fillIndices.length === 0 && outlineIndices.length === 0)) {
+                    if (vertices.length === 0 || fillIndices.length === 0) {
                         if (!window._emptyGeomLogged) {
                             console.log('⚠️ EMPTY GEOMETRY:', { 
                                 verts: vertices.length, 
-                                fillIdx: fillIndices.length, 
-                                outIdx: outlineIndices.length,
+                                fillIdx: fillIndices.length,
                                 isLine,
                                 layerId 
                             });
@@ -1027,7 +1047,7 @@ async function loadVisibleTiles(visibleTiles, device, newTileBuffers, newHiddenT
                         console.log('📏 Creating LINE buffer:', {
                             layerId,
                             vertices: vertices.length,
-                            outlineIndices: outlineIndices.length
+                            fillIndices: fillIndices.length
                         });
                         window._lineBufferLogged = true;
                     }
@@ -1048,7 +1068,6 @@ async function loadVisibleTiles(visibleTiles, device, newTileBuffers, newHiddenT
                         vertices,
                         hiddenVertices,
                         fillIndices,
-                        outlineIndices,
                         hiddenfillIndices,
                         isFilled,
                         isLine,
@@ -1165,7 +1184,6 @@ function createAndAddBuffers(
     vertices,
     hiddenVertices,
     fillIndices,
-    outlineIndices,
     hiddenfillIndices,
     isFilled,
     isLine,
@@ -1177,6 +1195,11 @@ function createAndAddBuffers(
     newTileBuffers,
     newHiddenTileBuffers
 ) {
+    if (layerId === 'building-3d' && !window._createBufferLogged) {
+        console.log(`🔧 createAndAddBuffers for ${layerId}: hiddenfillIndices.length=${hiddenfillIndices.length}, hiddenVertices.length=${hiddenVertices.length}`);
+        window._createBufferLogged = true;
+    }
+    
     // Create vertex buffer
     const vertexBuffer = device.createBuffer({
         size: alignBufferSize(vertices.byteLength),
@@ -1184,11 +1207,26 @@ function createAndAddBuffers(
     });
     device.queue.writeBuffer(vertexBuffer, 0, padToAlignment(vertices));
     
-    const hiddenVertexBuffer = device.createBuffer({
-        size: alignBufferSize(hiddenVertices.byteLength),
-        usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
-    });
-    device.queue.writeBuffer(hiddenVertexBuffer, 0, padToAlignment(hiddenVertices));
+    // HYBRID APPROACH: 
+    // - For 3D buildings: use VISIBLE buffer (complex geometry creates edge artifacts for edge detection)
+    // - For flat features: use HIDDEN buffer (simple filled surface for clean marker computation)
+    const use3DGeometry = layerId.includes('building') || layerId.includes('extrusion');
+    
+    // Only create hidden buffers for flat features (buildings reuse visible buffers)
+    let hiddenVertexBuffer, hiddenFillIndexBuffer;
+    if (!use3DGeometry) {
+        hiddenVertexBuffer = device.createBuffer({
+            size: alignBufferSize(hiddenVertices.byteLength),
+            usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+        });
+        device.queue.writeBuffer(hiddenVertexBuffer, 0, padToAlignment(hiddenVertices));
+        
+        hiddenFillIndexBuffer = device.createBuffer({
+            size: alignBufferSize(hiddenfillIndices.byteLength),
+            usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
+        });
+        device.queue.writeBuffer(hiddenFillIndexBuffer, 0, padToAlignment(hiddenfillIndices));
+    }
     
     // Create index buffers (already Uint32Array from parsing)
     const fillIndexBuffer = device.createBuffer({
@@ -1196,18 +1234,6 @@ function createAndAddBuffers(
         usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
     });
     device.queue.writeBuffer(fillIndexBuffer, 0, padToAlignment(fillIndices));
-    
-    const outlineIndexBuffer = device.createBuffer({
-        size: alignBufferSize(outlineIndices.byteLength),
-        usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
-    });
-    device.queue.writeBuffer(outlineIndexBuffer, 0, padToAlignment(outlineIndices));
-    
-    const hiddenFillIndexBuffer = device.createBuffer({
-        size: alignBufferSize(hiddenfillIndices.byteLength),
-        usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
-    });
-    device.queue.writeBuffer(hiddenFillIndexBuffer, 0, padToAlignment(hiddenfillIndices));
     
     // Add to tile buffers grouped by layer
     if (!newTileBuffers.has(layerId)) {
@@ -1220,9 +1246,7 @@ function createAndAddBuffers(
     newTileBuffers.get(layerId).push({
         vertexBuffer,
         fillIndexBuffer,
-        outlineIndexBuffer,
         fillIndexCount: fillIndices.length,
-        outlineIndexCount: outlineIndices.length,
         isFilled,
         isLine,
         properties,
@@ -1233,10 +1257,16 @@ function createAndAddBuffers(
         layerId: layerId
     });
     
+    // DEBUG: Check what we're adding to hidden buffer
+    if (layerId.includes('water') && !window._waterHiddenLogged) {
+        console.log(`💧 Water hidden buffer: fillIndices=${fillIndices.length}, hiddenfillIndices=${hiddenfillIndices.length}, isFilled=${isFilled}`);
+        window._waterHiddenLogged = true;
+    }
+    
     newHiddenTileBuffers.get(layerId).push({
-        vertexBuffer: hiddenVertexBuffer,
-        hiddenFillIndexBuffer,
-        hiddenfillIndexCount: hiddenfillIndices.length,
+        vertexBuffer: use3DGeometry ? vertexBuffer : hiddenVertexBuffer,
+        hiddenFillIndexBuffer: use3DGeometry ? fillIndexBuffer : hiddenFillIndexBuffer,
+        hiddenfillIndexCount: use3DGeometry ? fillIndices.length : hiddenfillIndices.length,
         properties,
         zoomLevel: z,
         tileX: x,
@@ -1250,10 +1280,11 @@ function createAndAddBuffers(
 function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, textureView, camera) {
     const mapCommandEncoder = device.createCommandEncoder();
     
-    // First render pass: hidden texture for feature IDs
+    // First render pass: hidden texture for feature IDs (MSAA enabled)
     const hiddenPass = mapCommandEncoder.beginRenderPass({
         colorAttachments: [{
-            view: renderer.textures.hidden.createView(),
+            view: renderer.textures.hiddenMSAA.createView(),  // Render to MSAA texture
+            resolveTarget: renderer.textures.hidden.createView(),  // Resolve to regular texture
             clearValue: { r: 0, g: 0, b: 0, a: 1 },
             loadOp: 'clear',
             storeOp: 'store',
@@ -1287,6 +1318,7 @@ function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, textureView
             const layer = getLayer(layerId);
             console.log(`  ${layerId}: ${shouldRender ? '✅' : '❌'} (minzoom: ${layer?.minzoom || 0}, maxzoom: ${layer?.maxzoom || 24})`);
         }
+        console.log('🔍 Hidden tile buffer layer IDs:', Array.from(hiddenTileBuffers.keys()));
         window._zoomFilterLogged = true;
     }
     
@@ -1294,34 +1326,40 @@ function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, textureView
         // Check layer visibility and zoom range
         if (!shouldRenderLayer(layerId, renderZoom)) continue;
         
-        // CRITICAL: Only render hidden geometry for layers that have symbol layers
-        // This prevents filling the 65k feature limit with non-label features
+        // Render ALL hidden geometry for picking to work
+        // The geometry will be at roof height if the layer is extruded
         const layer = getLayer(layerId);
-        const sourceId = layer?.source;
-        const sourceLayer = layer?.['source-layer'];
-        const symbolLayers = sourceId ? getSymbolLayers(sourceId) : [];
-        const hasSymbolLayer = symbolLayers.some(sl => sl.sourceLayer === sourceLayer);
+        const isExtruded = layer?.paint?.['fill-extrusion-height'] !== undefined;
         
         if (!window._hiddenCheckLogged) {
-            console.log(`Hidden check for ${layerId}: source-layer=${sourceLayer}, symbolLayers=`, symbolLayers.map(sl => sl.sourceLayer), `hasMatch=${hasSymbolLayer}`);
-        }
-        
-        if (!hasSymbolLayer) {
-            continue;
+            console.log(`Hidden rendering ${layerId}: isExtruded=${isExtruded}`);
         }
         
         buffers.forEach(({ vertexBuffer, hiddenFillIndexBuffer, hiddenfillIndexCount }) => {
             if (hiddenfillIndexCount > 0) {
+                if (!window._hiddenRenderLogged) {
+                    console.log(`🎯 Rendering hidden buffer for ${layerId}: ${hiddenfillIndexCount} indices`);
+                    console.log(`   Buffer details:`, {
+                        vertexBuffer: vertexBuffer.label || 'unlabeled',
+                        indexBuffer: hiddenFillIndexBuffer.label || 'unlabeled',
+                        indexCount: hiddenfillIndexCount
+                    });
+                }
                 hiddenPass.setPipeline(renderer.pipelines.hidden);
                 hiddenPass.setVertexBuffer(0, vertexBuffer);
                 hiddenPass.setIndexBuffer(hiddenFillIndexBuffer, "uint32");
                 hiddenPass.setBindGroup(0, renderer.bindGroups.picking);
                 hiddenPass.drawIndexed(hiddenfillIndexCount);
+            } else {
+                if (!window._hiddenRenderLogged) {
+                    console.log(`⚠️ Skipping ${layerId}: hiddenfillIndexCount = 0`);
+                }
             }
         });
     }
     
     window._hiddenCheckLogged = true;
+    window._hiddenRenderLogged = true;
     
     hiddenPass.end();
     
@@ -1343,10 +1381,11 @@ function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, textureView
         }
     }
     
-    // Second render pass: color texture with map features
+    // Second render pass: color texture with map features (MSAA enabled)
     const colorPass = mapCommandEncoder.beginRenderPass({
         colorAttachments: [{
-            view: renderer.textures.color.createView(),
+            view: renderer.textures.colorMSAA.createView(),  // Render to MSAA texture
+            resolveTarget: renderer.textures.color.createView(),  // Resolve to regular texture
             clearValue: clearColor,
             loadOp: 'clear',
             storeOp: 'store',
@@ -1391,7 +1430,7 @@ function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, textureView
             const buffers = tileBuffers.get(layerId);
             if (!buffers) continue;
             
-            buffers.forEach(({ vertexBuffer, fillIndexBuffer, fillIndexCount, outlineIndexBuffer, outlineIndexCount, isLine }) => {
+            buffers.forEach(({ vertexBuffer, fillIndexBuffer, fillIndexCount, isLine }) => {
                 // Render based on layer type
                 if (layerType === 'fill-extrusion' && fillIndexCount > 0) {
                     // 3D building extrusions
@@ -1555,7 +1594,8 @@ function renderMarkersToEncoder(
     device,
     markerPipeline,
     markerBuffer,
-    markerBindGroupLayout
+    markerBindGroupLayout,
+    cameraUniformBuffer  // ADD camera uniform
 ) {
     // Render triangles for markers (pointing downward)
     const triangleData = new Float32Array([
@@ -1586,7 +1626,10 @@ function renderMarkersToEncoder(
     
     const markerDataBindGroup = device.createBindGroup({
         layout: markerBindGroupLayout,
-        entries: [{ binding: 0, resource: { buffer: markerBuffer } }]
+        entries: [
+            { binding: 0, resource: { buffer: cameraUniformBuffer } },  // Camera matrix
+            { binding: 1, resource: { buffer: markerBuffer } }           // Marker data
+        ]
     });
     
     markerPass.setBindGroup(0, markerDataBindGroup);

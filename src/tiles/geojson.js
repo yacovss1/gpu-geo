@@ -97,6 +97,8 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
             
             extrusionHeight = heightValue !== undefined ? heightValue : 0;
             extrusionBase = baseValue !== undefined ? baseValue : 0;
+            
+            console.log(`📐 Extrusion props: height=${extrusionHeight}m, base=${extrusionBase}m, layer="${extrusionLayer.id}"`);
         }
 
         // Apply filter if layer has one
@@ -147,7 +149,7 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
     };
     
     // Helper to generate extruded building geometry (walls + roof)
-    const generateExtrusion = (allCoords, outerRing, height, base, fillColor, targetVertices, targetIndices) => {
+    const generateExtrusion = (allCoords, outerRing, height, base, fillColor, targetVertices, targetIndices, targetOutlineIndices) => {
         const startIndex = targetVertices.length / 7;
         
         // Convert height from meters to clip space
@@ -166,6 +168,9 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
             fillColor[2] * 0.7,
             fillColor[3]
         ];
+        
+        // Black color for outlines
+        const outlineColor = [0.0, 0.0, 0.0, 1.0];
         
         // Generate wall quads for each edge of outer ring only
         for (let i = 0; i < outerRing.length - 1; i++) {
@@ -188,6 +193,12 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                 vertexOffset, vertexOffset + 1, vertexOffset + 2,  // Triangle 1
                 vertexOffset, vertexOffset + 2, vertexOffset + 3   // Triangle 2
             );
+            
+            // Add outline edges for this wall (vertical edges only, horizontal done by roof outline)
+            // Left edge (bottom to top)
+            targetOutlineIndices.push(vertexOffset, vertexOffset + 3);
+            // Right edge (bottom to top)  
+            targetOutlineIndices.push(vertexOffset + 1, vertexOffset + 2);
         }
         
         // Generate roof (top polygon at height) - use ALL coords including holes
@@ -196,6 +207,15 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
             const [x, y] = mercatorToClipSpace(coord);
             targetVertices.push(x, y, heightZ, ...fillColor);
         });
+        
+        // Add roof outline (outer ring at roof height)
+        for (let i = 0; i < outerRing.length - 1; i++) {
+            targetOutlineIndices.push(roofStartIndex + i, roofStartIndex + i + 1);
+        }
+        // Close the roof outline
+        if (outerRing.length > 0) {
+            targetOutlineIndices.push(roofStartIndex + outerRing.length - 1, roofStartIndex);
+        }
         
         return roofStartIndex;
     };
@@ -214,7 +234,7 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
     };
 
     // Modify this function to ensure feature IDs are correctly stored in vertices
-    const coordsToIdVertices = (coords, featureId, targetArray) => {
+    const coordsToIdVertices = (coords, featureId, targetArray, zHeight = 0.0) => {
         const vertexStartIndex = targetArray.length / 7;
         
         // Encode feature ID as 16-bit across red and green channels
@@ -228,7 +248,7 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
         coords.forEach(coord => {
             const [x, y] = mercatorToClipSpace(coord);
             targetArray.push(
-                x, y, 0.0,        // Position (z=0 for flat map)
+                x, y, zHeight,    // Position with optional Z height
                 normalizedR, normalizedG, 0.0, 1.0  // 16-bit ID in R+G channels
             );
         });
@@ -280,7 +300,7 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
 
             // Check if this is an extruded building
             if (isExtruded && extrusionHeight > 0) {
-                console.log('🏢 EXTRUSION:', extrusionHeight, 'vertices before:', fillVertices.length);
+                console.log(`🏢 EXTRUSION: ${extrusionHeight}m for feature ${clampedFeatureId}, vertices before:`, fillVertices.length);
                 
                 // Generate 3D building geometry (walls + roof)
                 const roofStartIndex = generateExtrusion(
@@ -290,13 +310,29 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                     extrusionBase, 
                     _fillColor, 
                     fillVertices, 
-                    fillIndices
+                    fillIndices,
+                    outlineIndices  // Pass outline array to generate 3D edges
                 );
                 
                 console.log('vertices after:', fillVertices.length);
                 // Triangulate the roof
                 triangles.forEach(index => {
                     fillIndices.push(roofStartIndex + index);
+                });
+                
+                // CRITICAL: For extruded buildings, create hidden geometry at ROOF height
+                // This allows the compute shader to calculate the centroid of the TOP CAP
+                // instead of the base polygon, ensuring markers appear on building roofs
+                const heightZ = extrusionHeight * 0.0007;
+                const hiddenRoofStartIndex = coordsToIdVertices(allCoords, 
+                    clampedFeatureId,
+                    hiddenVertices,
+                    heightZ  // Render hidden polygon at roof height
+                );
+                
+                // Add hidden triangle indices for the roof
+                triangles.forEach(index => {
+                    hiddenfillIndices.push(hiddenRoofStartIndex + index);
                 });
             } else {
                 // Flat polygon at z=0
@@ -306,27 +342,31 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                 triangles.forEach(index => {
                     fillIndices.push(fillStartIndex + index);
                 });
+                
+                // Hidden buffer (for picking) - flat at z=0
+                const hiddenStartIndex = coordsToIdVertices(allCoords, 
+                    clampedFeatureId,
+                    hiddenVertices,
+                    0.0  // Flat features at ground level
+                );
+                
+                // Add hidden triangle indices
+                triangles.forEach(index => {
+                    hiddenfillIndices.push(hiddenStartIndex + index);
+                });
             }
             
-            // Hidden buffer (for picking) - always flat
-            const hiddenStartIndex = coordsToIdVertices(allCoords, 
-                clampedFeatureId,  // Use clamped ID to match properties
-                hiddenVertices
-            );
-            
-            // Add hidden triangle indices
-            triangles.forEach(index => {
-                hiddenfillIndices.push(hiddenStartIndex + index);
-            });
-            
-            // Add outline indices for polygon borders (outer ring only)
-            const outlineStartIndex = coordsToVertices(outerRing, _borderColor, fillVertices);
-            for (let i = 0; i < outerRing.length - 1; i++) {
-                outlineIndices.push(outlineStartIndex + i, outlineStartIndex + i + 1);
-            }
-            // Close the ring
-            if (outerRing.length > 0) {
-                outlineIndices.push(outlineStartIndex + outerRing.length - 1, outlineStartIndex);
+            // Note: Outlines for extruded buildings are now generated inside generateExtrusion()
+            // For flat polygons, add ground-level outline
+            if (!isExtruded || extrusionHeight === 0) {
+                const outlineStartIndex = coordsToVertices(outerRing, _borderColor, fillVertices);
+                for (let i = 0; i < outerRing.length - 1; i++) {
+                    outlineIndices.push(outlineStartIndex + i, outlineStartIndex + i + 1);
+                }
+                // Close the ring
+                if (outerRing.length > 0) {
+                    outlineIndices.push(outlineStartIndex + outerRing.length - 1, outlineStartIndex);
+                }
             }
             break;
 
@@ -356,19 +396,56 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                 // Triangulate with holes
                 const triangles = earcut(flatCoords, holeIndices);
 
-                // Add vertices for this polygon part
+                // Get all coordinates for both fill and hidden buffers
                 const allCoords = polygon.flat(1);
-                const fillStartIndex = coordsToVertices(allCoords, _fillColor, fillVertices);
-                const hiddenStartIndex = coordsToIdVertices(allCoords, 
-                    clampedFeatureId,  // Use clamped ID to match properties
-                    hiddenVertices
-                );
+                
+                // Check if this is an extruded building (same logic as Polygon)
+                if (isExtruded && extrusionHeight > 0) {
+                    console.log(`🏢 MultiPolygon EXTRUSION: ${extrusionHeight}m for polygon ${polygonIndex}`);
+                    
+                    // Generate 3D building geometry (walls + roof)
+                    const roofStartIndex = generateExtrusion(
+                        allCoords,
+                        outerRing, 
+                        extrusionHeight, 
+                        extrusionBase, 
+                        _fillColor, 
+                        fillVertices, 
+                        fillIndices,
+                        outlineIndices  // Pass outline array to generate 3D edges
+                    );
+                    
+                    // Triangulate the roof
+                    triangles.forEach(index => {
+                        fillIndices.push(roofStartIndex + index);
+                    });
+                    
+                    // Hidden geometry at ROOF height for marker positioning
+                    const heightZ = extrusionHeight * 0.0007;
+                    const hiddenRoofStartIndex = coordsToIdVertices(allCoords, 
+                        clampedFeatureId,
+                        hiddenVertices,
+                        heightZ
+                    );
+                    
+                    triangles.forEach(index => {
+                        hiddenfillIndices.push(hiddenRoofStartIndex + index);
+                    });
+                } else {
+                    // Flat polygon rendering
+                    const fillStartIndex = coordsToVertices(allCoords, _fillColor, fillVertices);
+                    const hiddenStartIndex = coordsToIdVertices(allCoords, 
+                        clampedFeatureId,
+                        hiddenVertices,
+                        0.0
+                    );
 
-                // Add triangle indices
-                triangles.forEach(index => {
-                    fillIndices.push(fillStartIndex + index);
-                    hiddenfillIndices.push(hiddenStartIndex + index);
-                });
+                    // Add triangle indices
+                    triangles.forEach(index => {
+                        fillIndices.push(fillStartIndex + index);
+                        hiddenfillIndices.push(hiddenStartIndex + index);
+                    });
+                }
             });
             break;
         case 'LineString':

@@ -7,13 +7,20 @@ export function createMarkerPipeline(device, format) {
         window._markerShaderLogged = true;
     }
     
-    // Define bind group layout - only one group now (markers storage buffer)
+    // Define bind group layout - camera uniform + markers storage buffer
     const markerBindGroupLayout = device.createBindGroupLayout({
-        entries: [{
-            binding: 0,
-            visibility: GPUShaderStage.VERTEX,
-            buffer: { type: 'read-only-storage' }
-        }]
+        entries: [
+            {
+                binding: 0,
+                visibility: GPUShaderStage.VERTEX,
+                buffer: { type: 'uniform' } // Camera matrix uniform
+            },
+            {
+                binding: 1,
+                visibility: GPUShaderStage.VERTEX,
+                buffer: { type: 'read-only-storage' } // Markers storage buffer
+            }
+        ]
     });
     
     const pipelineLayout = device.createPipelineLayout({
