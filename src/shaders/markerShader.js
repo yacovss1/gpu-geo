@@ -1,11 +1,11 @@
 export const markerVertexShaderCode = `
-struct Uniforms {
-    transform: mat4x4<f32>,
-};
-
 struct Marker {
-    center: vec2<f32>, // Already in clip space
+    center: vec2<f32>,  // Clip-space centroid (-1 to 1)
+    height: f32,        // World-space Z height
+    padding: f32,       // Alignment padding
     color: vec4<f32>,
+    featureId: u32,     // Feature ID
+    padding2: u32,      // Alignment padding
 };
 
 struct VertexInput {
@@ -13,8 +13,7 @@ struct VertexInput {
     @builtin(instance_index) instanceIndex: u32,
 };
 
-@group(0) @binding(0) var<uniform> uniforms: Uniforms;
-@group(1) @binding(0) var<storage, read> markers: array<Marker>;
+@group(0) @binding(0) var<storage, read> markers: array<Marker>;
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -33,15 +32,21 @@ fn main(input: VertexInput) -> VertexOutput {
         );
     }
     
-    // Use fixed marker size for visibility
+    // Marker center is already in clip space (-1 to 1) from compute shader
+    // Apply isometric offset for height (convert meters to world Z, same as buildings)
+    let heightZ = marker.height * 0.0007;
+    let isoX = marker.center.x;
+    let isoY = marker.center.y - heightZ;
+    
+    // Use fixed marker size in screen space
     let markerSize = 0.02;
     
-    // Position the marker in clip space
+    // Construct final position (already in clip space, no transform needed)
     var output: VertexOutput;
     output.position = vec4<f32>(
-        marker.center.x + input.quadPos.x * markerSize,
-        marker.center.y + input.quadPos.y * markerSize,
-        0.0,
+        isoX + input.quadPos.x * markerSize,
+        isoY + input.quadPos.y * markerSize,
+        0.5,
         1.0
     );
     

@@ -13,7 +13,11 @@
 export const textShaderCode = `
 struct Marker {
     center: vec2<f32>,
+    height: f32,
+    padding: f32,
     color: vec4<f32>,
+    featureId: u32,
+    padding2: u32,
 };
 
 struct Label {
@@ -44,7 +48,6 @@ struct VertexOutput {
 @group(1) @binding(1) var<storage> labels: array<Label>;
 @group(1) @binding(2) var<storage> textData: array<u32>;
 @group(1) @binding(3) var<storage> charMetrics: array<CharMetrics>;
-@group(1) @binding(4) var<storage> heights: array<f32>;
 
 @vertex
 fn vertexMain(
@@ -86,9 +89,6 @@ fn vertexMain(
     
     // Get marker position
     let marker = markers[label.featureId];
-    
-    // Get height offset for this feature (3D building height)
-    let heightOffset = heights[label.featureId];
     
     // Skip labels with invalid positions (0,0 would cluster at origin)
     if (marker.center.x == 0.0 && marker.center.y == 0.0) {
@@ -147,7 +147,9 @@ fn vertexMain(
     }
     
     // Offset text slightly above the marker point, adding height for 3D buildings
-    let finalPos = marker.center + vec2<f32>(xOffset, 0.035 + heightOffset) + corner;
+    let heightZ = marker.height * 0.0007;
+    let isoOffsetY = -heightZ;
+    let finalPos = marker.center + vec2<f32>(xOffset, 0.035 + isoOffsetY) + corner;
     output.position = vec4<f32>(finalPos, 0.0, 1.0);
     output.texCoord = uv;
     

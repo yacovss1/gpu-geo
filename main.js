@@ -3,7 +3,7 @@ import { Camera } from './src/core/camera.js';
 import { MapRenderer } from './src/rendering/renderer.js';
 import { parseGeoJSONFeature, fetchVectorTile, clearTileCache, resetNotFoundTiles, setTileSource } from './src/tiles/geojson.js';
 import { batchParseGeoJSONFeaturesGPU } from './src/tiles/geojsonGPU.js';
-import { getStyle, setStyle, setLayerVisibility, getLayerVisibility, getLayer, parseColor, getSymbolLayers } from './src/core/style.js';
+import { getStyle, setStyle, setLayerVisibility, getLayerVisibility, getLayer, parseColor, getSymbolLayers, getPaintProperty } from './src/core/style.js';
 import { setupEventListeners } from './src/core/events.js';
 import { getVisibleTiles } from './src/tiles/tile-utils.js'; 
 import { createMarkerPipeline } from './src/rendering/markerPipeline.js';
@@ -16,7 +16,7 @@ const MAX_FEATURES = 65535; // 16-bit encoding supports 1-65534, use 65535 as ar
 const ACCUMULATOR_BUFFER_SIZE = MAX_FEATURES * 28; // Pass 1: 7 u32 per feature (sumX, sumY, count, minX, minY, maxX, maxY) = 28 bytes
 const QUADRANT_BUFFER_SIZE = MAX_FEATURES * 108; // Pass 2: 9 quadrants × 3 u32 each = 108 bytes per feature
 const REGIONS_BUFFER_SIZE = MAX_FEATURES * 16;   // For 4 atomic u32s per feature  
-const MARKER_BUFFER_SIZE = MAX_FEATURES * 24;    // 6 floats per marker: vec2 center + vec4 color
+const MARKER_BUFFER_SIZE = MAX_FEATURES * 40;    // Per marker: vec2(8) + f32(4) + pad(4) + vec4(16) + u32(4) + pad(4) = 40 bytes
 
 // Performance tracking and GPU acceleration toggle
 const PERFORMANCE_STATS = {
@@ -414,9 +414,8 @@ async function main() {
         accumulatorBuffer,
         quadrantBuffer,
         dimsBuffer,
-        markerUniformBuffer,
-        markerBindGroup,
-        regionsBuffer
+        regionsBuffer,
+        markerBindGroupLayout
     } = initMarkerResources(device, format, canvas, camera);
 
     // Handle zoom events for loading tiles
@@ -646,7 +645,6 @@ async function main() {
         
         // Update transform matrices
         renderer.updateCameraTransform(transformMatrix);
-        device.queue.writeBuffer(markerUniformBuffer, 0, transformMatrix);
 
         // Get the current texture ONCE for this frame
         const currentTexture = context.getCurrentTexture();
@@ -660,6 +658,36 @@ async function main() {
         
         // Only compute markers/labels at zoom 14+ to avoid GPU overload
         if (camera.zoom >= 4) {
+            // Build feature names and extract heights BEFORE computing markers
+            const featureNames = buildFeatureNameMap(tileBuffers, camera.zoom);
+            
+            // Create heights array from featureNames
+            const heightsArray = new Float32Array(MAX_FEATURES);
+            let buildingHeightCount = 0;
+            for (const [fid, feature] of featureNames.entries()) {
+                if (fid < MAX_FEATURES) {
+                    heightsArray[fid] = feature.height || 0;
+                    if (feature.height && feature.height > 0 && feature.sourceLayer === 'building') {
+                        buildingHeightCount++;
+  
+                    }
+                }
+            }
+            if (!window._heightsDebugLogged) {
+                console.log(`📏 Heights: ${buildingHeightCount} buildings with height data`);
+                console.log(`📏 Sample heights buffer [1933]=${heightsArray[1933]}, [31252]=${heightsArray[31252]}, [43501]=${heightsArray[43501]}`);
+                window._heightsDebugLogged = true;
+            }
+            
+            // Upload heights to GPU buffer (create if not exists)
+            if (!window._heightsBuffer) {
+                window._heightsBuffer = device.createBuffer({
+                    size: MAX_FEATURES * 4, // 4 bytes per float
+                    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+                });
+            }
+            device.queue.writeBuffer(window._heightsBuffer, 0, heightsArray);
+            
             // Compute marker positions (submits 3 passes internally, reads from hidden texture)
             createComputeMarkerEncoder(
                 device, 
@@ -672,26 +700,22 @@ async function main() {
                 markerBuffer, 
                 dimsBuffer, 
                 canvas,
-                regionsBuffer
+                regionsBuffer,
+                window._heightsBuffer
             );
         }
         
         // Create encoder for marker and label render passes
         const overlayEncoder = device.createCommandEncoder();
         
-        // Only render markers/labels at zoom 14+
+        // Only render markers/labels at zoom 14+ 
         if (camera.zoom >= 4) {
             // Render markers
-            renderMarkersToEncoder(overlayEncoder, textureView, device, markerPipeline, markerBindGroup, markerBuffer);
+            renderMarkersToEncoder(overlayEncoder, textureView, device, markerPipeline, markerBuffer, markerBindGroupLayout);
             
-            // Render labels using cached positions from PREVIOUS frame
-            // (One frame delay is acceptable - labels will catch up)
-            if (markerPositionCache) {
-                //renderLabelsToEncoder(overlayEncoder, textureView, textRenderer, tileBuffers, markerPositionCache, camera);
-            }
+            // Build feature names for labels (already done above for heights)
+            const featureNames = buildFeatureNameMap(tileBuffers, camera.zoom);
             
-            // NEW: Render labels directly from GPU marker buffer
-            const featureNames = buildFeatureNameMap(tileBuffers);
             if (!window._labelDebugLogged) {
                 console.log('📝 Feature names map size:', featureNames.size);
                 if (featureNames.size > 0) {
@@ -700,12 +724,6 @@ async function main() {
                 }
                 window._labelDebugLogged = true;
             }
-            
-            // Create bind group for marker buffer (same as markers use at group 1)
-            const markerDataBindGroup = device.createBindGroup({
-                layout: markerPipeline.getBindGroupLayout(1),
-                entries: [{ binding: 0, resource: { buffer: markerBuffer } }]
-            });
             
             // Get source ID from style (use first vector source)
             const style = getStyle();
@@ -797,18 +815,8 @@ function initMarkerResources(device, format, canvas, camera) {
     });
     device.queue.writeBuffer(dimsBuffer, 0, new Uint32Array([canvas.width, canvas.height]));
     
-    // Create marker pipeline
-    const markerPipeline = createMarkerPipeline(device, format);
-    const markerUniformBuffer = device.createBuffer({
-        size: 64,
-        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
-    device.queue.writeBuffer(markerUniformBuffer, 0, camera.getMatrix());
-    
-    const markerBindGroup = device.createBindGroup({
-        layout: markerPipeline.getBindGroupLayout(0),
-        entries: [{ binding: 0, resource: { buffer: markerUniformBuffer } }]
-    });
+    // Create marker pipeline (no longer needs camera uniform)
+    const { pipeline: markerPipeline, bindGroupLayout: markerBindGroupLayout } = createMarkerPipeline(device, format);
 
     // Add regions buffer
     const regionsBuffer = device.createBuffer({
@@ -825,9 +833,8 @@ function initMarkerResources(device, format, canvas, camera) {
         quadrantBuffer,
         markerBuffer,
         dimsBuffer,
-        markerUniformBuffer,
-        markerBindGroup,
-        regionsBuffer
+        regionsBuffer,
+        markerBindGroupLayout
     };
 }
 
@@ -1465,7 +1472,8 @@ function createComputeMarkerEncoder(
     markerBuffer,
     dimsBuffer,
     canvas,
-    regionsBuffer
+    regionsBuffer,
+    heightsBuffer
 ) {
     // Reset buffers for new frame
     device.queue.writeBuffer(accumulatorBuffer, 0, new Uint8Array(ACCUMULATOR_BUFFER_SIZE));
@@ -1528,7 +1536,8 @@ function createComputeMarkerEncoder(
             { binding: 1, resource: { buffer: quadrantBuffer } },
             { binding: 2, resource: { buffer: markerBuffer } },
             { binding: 3, resource: { buffer: dimsBuffer } },
-            { binding: 4, resource: renderer.textures.hidden.createView() }
+            { binding: 4, resource: renderer.textures.hidden.createView() },
+            { binding: 5, resource: { buffer: heightsBuffer } }
         ]
     }));
     const workgroupCount3 = Math.ceil(10000 / 64);
@@ -1545,8 +1554,8 @@ function renderMarkersToEncoder(
     textureView,
     device,
     markerPipeline,
-    markerBindGroup,
-    markerBuffer
+    markerBuffer,
+    markerBindGroupLayout
 ) {
     // Render triangles for markers (pointing downward)
     const triangleData = new Float32Array([
@@ -1573,21 +1582,20 @@ function renderMarkersToEncoder(
     });
     
     markerPass.setPipeline(markerPipeline);
-    markerPass.setBindGroup(0, markerBindGroup);
     markerPass.setVertexBuffer(0, triangleBuffer);
     
     const markerDataBindGroup = device.createBindGroup({
-        layout: markerPipeline.getBindGroupLayout(1),
+        layout: markerBindGroupLayout,
         entries: [{ binding: 0, resource: { buffer: markerBuffer } }]
     });
     
-    markerPass.setBindGroup(1, markerDataBindGroup);
+    markerPass.setBindGroup(0, markerDataBindGroup);
     markerPass.draw(3, MAX_FEATURES); // Draw one triangle per feature
     markerPass.end();
 }
 
 // Build feature name map from tile buffers
-function buildFeatureNameMap(tileBuffers) {
+function buildFeatureNameMap(tileBuffers, currentZoom) {
     const featureNames = new Map();
     const style = getStyle();
     const symbolLayers = style?.layers?.filter(l => l.type === 'symbol') || [];
@@ -1650,10 +1658,22 @@ function buildFeatureNameMap(tileBuffers) {
             }
             
             if (clampedFid && labelText) {
-                // Extract building height for 3D label placement
-                const height = tileBuffer.properties?.height || 0;
-                const base_height = tileBuffer.properties?.min_height || 0;
-                const totalHeight = (height + base_height) || 0;
+                // Extract building height from fill-extrusion paint properties
+                let totalHeight = 0;
+                
+                // Find the fill-extrusion layer for this source-layer
+                const style = getStyle();
+                const extrusionLayer = style?.layers?.find(layer => 
+                    layer.type === 'fill-extrusion' && 
+                    layer['source-layer'] === sourceLayer
+                );
+                
+                if (extrusionLayer) {
+                    // Evaluate the fill-extrusion-height expression
+                    const heightValue = getPaintProperty(extrusionLayer.id, 'fill-extrusion-height', 
+                        { properties: tileBuffer.properties }, currentZoom);
+                    totalHeight = heightValue || 0;
+                }
                 
                 featureNames.set(clampedFid, { 
                     name: labelText, 

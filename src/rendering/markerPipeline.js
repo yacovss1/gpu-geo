@@ -1,16 +1,14 @@
 import { markerVertexShaderCode, markerFragmentShaderCode } from '../shaders/markerShader.js';
 
 export function createMarkerPipeline(device, format) {
-    // Define bind group layouts
-    const markerBindGroupLayout0 = device.createBindGroupLayout({
-        entries: [{
-            binding: 0,
-            visibility: GPUShaderStage.VERTEX,
-            buffer: { type: 'uniform' }
-        }]
-    });
+    // Debug: log shader code to verify it's correct
+    if (!window._markerShaderLogged) {
+        console.log('🔍 Marker shader code:', markerVertexShaderCode.substring(0, 500));
+        window._markerShaderLogged = true;
+    }
     
-    const markerBindGroupLayout1 = device.createBindGroupLayout({
+    // Define bind group layout - only one group now (markers storage buffer)
+    const markerBindGroupLayout = device.createBindGroupLayout({
         entries: [{
             binding: 0,
             visibility: GPUShaderStage.VERTEX,
@@ -19,13 +17,17 @@ export function createMarkerPipeline(device, format) {
     });
     
     const pipelineLayout = device.createPipelineLayout({
-        bindGroupLayouts: [markerBindGroupLayout0, markerBindGroupLayout1]
+        bindGroupLayouts: [markerBindGroupLayout]
     });
 
-    return device.createRenderPipeline({
+    const pipeline = device.createRenderPipeline({
+        label: 'Marker Pipeline',
         layout: pipelineLayout,
         vertex: {
-            module: device.createShaderModule({ code: markerVertexShaderCode }),
+            module: device.createShaderModule({ 
+                label: 'Marker Vertex Shader',
+                code: markerVertexShaderCode 
+            }),
             entryPoint: 'main',
             buffers: [{
                 arrayStride: 8,
@@ -47,4 +49,6 @@ export function createMarkerPipeline(device, format) {
             topology: 'triangle-list'
         }
     });
+    
+    return { pipeline, bindGroupLayout: markerBindGroupLayout };
 }

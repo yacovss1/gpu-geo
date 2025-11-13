@@ -143,7 +143,7 @@ export function setupEventListeners(canvas, camera, device, renderer, tileBuffer
             const blueChannel = data[0];  // Layer ID
             const featureId = redChannel * 256 + greenChannel;
             
-            // Ignore clicks on ocean (where there's no feature)
+            // Ignore clicks where there's no feature
             if (!featureId) {
                 sharedReadBuffer.unmap();
                 bufferIsMapped = false; // Clear mapping flag

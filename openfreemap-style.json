@@ -215,7 +215,7 @@
         "fill-extrusion-color": "#5D8AA8",
         "fill-extrusion-height": ["get", "render_height"],
         "fill-extrusion-base": ["get", "render_min_height"],
-        "fill-extrusion-opacity": 0.5
+        "fill-extrusion-opacity": 1
       }
     },
     {

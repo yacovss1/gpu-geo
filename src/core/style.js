@@ -564,20 +564,6 @@ function generateFeatureId(feature, fallbackIndex = 0) {
     // This helps features spanning tiles get the same ID
     const featureClass = feature.properties?.class || feature.properties?.type;
     if (featureClass) {
-        // Special handling for water: use VERY coarse grouping or just class alone at low zoom
-        if (featureClass === 'lake' || featureClass === 'ocean' || featureClass === 'water') {
-            // At low zoom, just use the class - all nearby water merges
-            // This prevents tile boundary seams but may merge adjacent lakes
-            const str = `${featureClass}`;
-            let hash = 0;
-            for (let i = 0; i < str.length; i++) {
-                hash = ((hash << 5) - hash) + str.charCodeAt(i);
-                hash = hash & hash;
-            }
-            return ((Math.abs(hash) % 100) + 1); // Limited range for water
-        }
-        
-        // For non-water, use position-based grouping
         const coords = feature.geometry?.coordinates;
         let approxLon = 0, approxLat = 0;
         

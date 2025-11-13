@@ -220,7 +220,11 @@ struct QuadrantAccumulator {
 
 struct Marker {
     center: vec2<f32>,
+    height: f32,
+    padding: f32,
     color: vec4<f32>,
+    featureId: u32,
+    padding2: u32,
 };
 
 @group(0) @binding(0) var<storage, read_write> accumulators: array<FeatureAccumulator>;
@@ -228,6 +232,7 @@ struct Marker {
 @group(0) @binding(2) var<storage, read_write> markers: array<Marker>;
 @group(0) @binding(3) var<uniform> dims: vec2<u32>;
 @group(0) @binding(4) var hiddenTex: texture_2d<f32>;
+@group(0) @binding(5) var<storage, read> heights: array<f32>;
 
 // Helper function to calculate centroid from quadrant data
 fn calculateCentroid(quad: ptr<storage, QuadrantData, read_write>) -> vec2<f32> {
@@ -247,7 +252,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     
     // Initialize marker with default values
     markers[idx].center = vec2<f32>(0.0, 0.0);
+    markers[idx].height = 0.0;
+    markers[idx].padding = 0.0;
     markers[idx].color = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    markers[idx].featureId = idx;
+    markers[idx].padding2 = 0u;
     
     // Skip background
     if (idx == 0u) { return; }
@@ -320,6 +329,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     
     // Store marker position
     markers[idx].center = vec2<f32>(clipX, clipY);
+    markers[idx].height = heights[idx];
+    markers[idx].featureId = idx;
     
     // Set color from feature - use a simple scheme based on feature ID
     let r = f32(idx % 256u) / 255.0;

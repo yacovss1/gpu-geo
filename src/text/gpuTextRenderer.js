@@ -88,7 +88,6 @@ export class GPUTextRenderer {
                     { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } }, // labels
                     { binding: 2, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } }, // text
                     { binding: 3, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } }, // char metrics
-                    { binding: 4, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } }, // heights
                 ]
             });
 
@@ -226,16 +225,11 @@ export class GPUTextRenderer {
         
         const labelData = [];
         const textData = [];
-        const heightMap = new Map(); // Store heights indexed by featureId
         let charOffset = 0;
         
         for (const [featureId, featureData] of featureNames) {
             const name = typeof featureData === 'string' ? featureData : featureData.name;
             const sourceLayer = typeof featureData === 'object' ? featureData.sourceLayer : null;
-            const height = typeof featureData === 'object' ? (featureData.height || 0) : 0;
-            
-            // Store height for this feature (will be scaled by zoom later)
-            heightMap.set(featureId, height);
             
             // Check zoom-based filtering and symbol-placement
             let shouldRender = true;
@@ -300,30 +294,6 @@ export class GPUTextRenderer {
         
         if (this.labelCount === 0) return 0;
         
-        // Create height array indexed by featureId (MAX_FEATURES size)
-        const MAX_FEATURES = 65535;
-        const heights = new Float32Array(MAX_FEATURES);
-        
-        // Scale heights by zoom to clip space (same formula as extrusion rendering)
-        const zoomScale = Math.pow(2, camera.zoom);
-        const metersToWorld = 0.00000008;
-        
-        for (const [featureId, height] of heightMap) {
-            if (featureId < MAX_FEATURES) {
-                heights[featureId] = height * metersToWorld * zoomScale;
-            }
-        }
-        
-        // Create or update height buffer
-        if (!this.heightBuffer) {
-            this.heightBuffer = this.device.createBuffer({
-                size: heights.byteLength,
-                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
-            });
-        }
-        
-        this.device.queue.writeBuffer(this.heightBuffer, 0, heights);
-        
         // Upload label and text data to GPU
         this.device.queue.writeBuffer(
             this.labelBuffer, 
@@ -348,15 +318,14 @@ export class GPUTextRenderer {
             return;
         }
 
-        // Create data bind group with marker buffer and height buffer
+        // Create data bind group with marker buffer
         const dataBindGroup = this.device.createBindGroup({
             layout: this.pipeline.getBindGroupLayout(1),
             entries: [
                 { binding: 0, resource: { buffer: markerBuffer } },
                 { binding: 1, resource: { buffer: this.labelBuffer } },
                 { binding: 2, resource: { buffer: this.textBuffer } },
-                { binding: 3, resource: { buffer: this.charMetricsBuffer } },
-                { binding: 4, resource: { buffer: this.heightBuffer } }
+                { binding: 3, resource: { buffer: this.charMetricsBuffer } }
             ]
         });
 
