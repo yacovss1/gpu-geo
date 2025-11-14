@@ -130,7 +130,8 @@ async function main() {
         const mapEncoder = renderMap(
             device, renderer, 
             tileManager.visibleTileBuffers, 
-            tileManager.hiddenTileBuffers, 
+            tileManager.hiddenTileBuffers,
+            tileManager.roofTileBuffers,
             textureView, camera,
             (layerId, zoom) => styleManager.shouldRenderLayer(layerId, zoom)
         );
@@ -240,7 +241,7 @@ function setupGlobalAPI(device, camera, tileManager, performanceManager, styleMa
     window.mapPerformance = {
         setGPUEnabled: async (enabled) => {
             performanceManager.setGPUEnabled(enabled);
-            await destroyAllBuffers(device, tileManager.visibleTileBuffers, tileManager.hiddenTileBuffers);
+            await destroyAllBuffers(device, tileManager.visibleTileBuffers, tileManager.hiddenTileBuffers, tileManager.roofTileBuffers);
             clearTileCache();
             resetNotFoundTiles();
             camera.triggerEvent('zoomend');
@@ -258,7 +259,7 @@ function setupGlobalAPI(device, camera, tileManager, performanceManager, styleMa
     window.mapStyle = {
         setStyle: async (style) => {
             await styleManager.setStyle(style);
-            await destroyAllBuffers(device, tileManager.visibleTileBuffers, tileManager.hiddenTileBuffers);
+            await destroyAllBuffers(device, tileManager.visibleTileBuffers, tileManager.hiddenTileBuffers, tileManager.roofTileBuffers);
             camera.triggerEvent('zoomend');
         },
         getStyle: () => styleManager.getStyle(),
@@ -266,7 +267,7 @@ function setupGlobalAPI(device, camera, tileManager, performanceManager, styleMa
         setLayerVisibility: async (layerId, visible) => {
             await device.queue.onSubmittedWorkDone();
             await styleManager.setLayerVisibility(layerId, visible);
-            await destroyAllBuffers(device, tileManager.visibleTileBuffers, tileManager.hiddenTileBuffers);
+            await destroyAllBuffers(device, tileManager.visibleTileBuffers, tileManager.hiddenTileBuffers, tileManager.roofTileBuffers);
             camera.triggerEvent('zoomend');
         },
         getLayerVisibility: (layerId) => styleManager.getLayerVisibility(layerId),
@@ -318,7 +319,7 @@ function setupTileLoadingEvents(camera, tileManager, renderer, styleManager, dev
         const shouldClearOldTiles = lastFetchZoom !== -1 && fetchZoom !== lastFetchZoom;
         if (shouldClearOldTiles) {
             await device.queue.onSubmittedWorkDone();
-            await destroyAllBuffers(device, tileManager.visibleTileBuffers, tileManager.hiddenTileBuffers);
+            await destroyAllBuffers(device, tileManager.visibleTileBuffers, tileManager.hiddenTileBuffers, tileManager.roofTileBuffers);
             clearTileCache();
         }
         lastFetchZoom = fetchZoom;

@@ -132,7 +132,7 @@ export function destroyTileBuffers(tile) {
 /**
  * Destroy all GPU buffers in a collection
  */
-export async function destroyAllBuffers(device, tileBuffers, hiddenTileBuffers) {
+export async function destroyAllBuffers(device, tileBuffers, hiddenTileBuffers, roofTileBuffers) {
     // Wait for GPU to finish
     await device.queue.onSubmittedWorkDone();
     
@@ -156,8 +156,19 @@ export async function destroyAllBuffers(device, tileBuffers, hiddenTileBuffers) 
         });
     });
     
+    // Destroy roof buffers
+    if (roofTileBuffers) {
+        roofTileBuffers.forEach((buffers) => {
+            buffers.forEach(tile => {
+                if (tile.roofIndexBuffer) tile.roofIndexBuffer.destroy();
+                destroyedCount += 1;
+            });
+        });
+    }
+    
     tileBuffers.clear();
     hiddenTileBuffers.clear();
+    if (roofTileBuffers) roofTileBuffers.clear();
     
     return destroyedCount;
 }

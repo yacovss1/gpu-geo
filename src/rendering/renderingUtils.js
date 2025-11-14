@@ -18,7 +18,7 @@ const MARKER_BUFFER_SIZE = MAX_FEATURES * 40;
 /**
  * Render the map with hidden texture and edge detection
  */
-export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, textureView, camera, shouldRenderLayer) {
+export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, roofTileBuffers, textureView, camera, shouldRenderLayer) {
     const mapCommandEncoder = device.createCommandEncoder();
     
     // First render pass: hidden texture for feature IDs (no MSAA - needs exact values)
@@ -56,6 +56,45 @@ export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, text
     
     hiddenPass.end();
     
+    // Second render pass: marker offset texture for 3D building roof caps
+    // This sparse texture only contains roof geometry for precise label placement
+    const markerOffsetPass = mapCommandEncoder.beginRenderPass({
+        colorAttachments: [{
+            view: renderer.textures.markerOffset.createView(),
+            clearValue: { r: 0, g: 0, b: 0, a: 0 },
+            loadOp: 'clear',
+            storeOp: 'store',
+        }],
+        depthStencilAttachment: {
+            view: renderer.textures.depthHidden.createView(),
+            depthClearValue: 1.0,
+            depthLoadOp: 'clear',
+            depthStoreOp: 'store',
+        }
+    });
+    
+    // Render roof cap geometry layer by layer
+    for (const [layerId, buffers] of roofTileBuffers) {
+        if (!shouldRenderLayer(layerId, renderZoom)) continue;
+        
+        buffers.forEach(({ vertexBuffer, roofIndexBuffer, roofIndexCount }) => {
+            // Validate buffers exist and are not destroyed before rendering
+            if (roofIndexCount > 0 && roofIndexBuffer && vertexBuffer) {
+                try {
+                    markerOffsetPass.setPipeline(renderer.pipelines.hidden);
+                    markerOffsetPass.setVertexBuffer(0, vertexBuffer);
+                    markerOffsetPass.setIndexBuffer(roofIndexBuffer, "uint32");
+                    markerOffsetPass.setBindGroup(0, renderer.bindGroups.picking);
+                    markerOffsetPass.drawIndexed(roofIndexCount);
+                } catch (err) {
+                    console.warn('Failed to render roof geometry:', err.message);
+                }
+            }
+        });
+    }
+    
+    markerOffsetPass.end();
+    
     // Get background color from style
     const currentMapStyle = getStyle();
     let clearColor = { r: 0.67, g: 0.83, b: 0.87, a: 1.0 };
@@ -74,7 +113,7 @@ export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, text
         }
     }
     
-    // Second render pass: color texture with map features (MSAA enabled)
+    // Third render pass: color texture with map features (MSAA enabled)
     const colorPass = mapCommandEncoder.beginRenderPass({
         colorAttachments: [{
             view: renderer.textures.colorMSAA.createView(),
@@ -144,7 +183,7 @@ export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, text
     
     colorPass.end();
     
-    // Third render pass: Apply edge detection to screen
+    // Fourth render pass: Apply edge detection to screen
     const mainPass = mapCommandEncoder.beginRenderPass({
         colorAttachments: [{
             view: textureView,

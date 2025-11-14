@@ -21,6 +21,7 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
     const hiddenVertices = [];
     const fillIndices = [];
     const hiddenfillIndices = [];
+    const roofIndices = [];  // Track roof geometry for marker offset buffer
     let isFilled = true;
     let isLine = true;
 
@@ -178,6 +179,7 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
     const generateExtrusion = (outerRing, height, base) => {
         const vertices = [];
         const indices = [];
+        const roofIndices = [];  // Separate array for roof triangles
         
         // Convert meters to world space units
         // At zoom 0, the entire world spans -1 to 1 (2 units total)
@@ -233,11 +235,14 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
             vertices.push(x, y, heightZ, ..._fillColor);
         });
         
+        // Add roof triangles to BOTH indices arrays
         roofTriangles.forEach(idx => {
-            indices.push(roofStartIdx + idx);
+            const fullIdx = roofStartIdx + idx;
+            indices.push(fullIdx);       // For main color pass
+            roofIndices.push(fullIdx);   // For marker offset pass
         });
         
-        return { vertices, indices };
+        return { vertices, indices, roofIndices };
     };
 
     // Deduplicate features by tracking processed feature IDs
@@ -353,6 +358,7 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
                     const vertexOffset = fillVertices.length / 7;
                     extrusion.vertices.forEach(v => fillVertices.push(v));
                     extrusion.indices.forEach(i => fillIndices.push(i + vertexOffset));
+                    extrusion.roofIndices.forEach(i => roofIndices.push(i + vertexOffset));
                     
                     // Also create hidden vertices for the footprint so markers can be computed
                     const allCoords = polygon.flat(1);
@@ -690,6 +696,7 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
     const hiddenVertices = [];
     const fillIndices = [];
     const hiddenfillIndices = [];
+    const roofIndices = [];  // Track roof geometry for marker offset buffer
     let isFilled = true;
     let isLine = true;
 
@@ -1009,16 +1016,20 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
             vertices.push(x, y, heightZ, ..._fillColor);
         });
         
+        // Create arrays for roof indices (both local and global)
+        const roofIndicesLocal = [];  // Indices relative to this building's vertices
         roofTriangles.forEach(idx => {
-            indices.push(roofStartIdx + idx);
+            const globalIdx = roofStartIdx + idx;
+            indices.push(globalIdx);
+            roofIndicesLocal.push(globalIdx);  // Store offset indices for roof-only buffer
         });
         
         // Return roof geometry separately so hidden buffer can use EXACT same triangulation
         return { 
             vertices, 
             indices,
-            roofVertices,      // Array of [x, y] transformed coordinates
-            roofIndices: roofTriangles  // Triangle indices for roof
+            roofVertices,         // Array of [x, y] transformed coordinates
+            roofIndices: roofIndicesLocal  // Offset triangle indices for roof (relative to building start)
         };
     };
 
@@ -1072,6 +1083,7 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
                 const vertexOffset = fillVertices.length / 7;
                 extrusion.vertices.forEach(v => fillVertices.push(v));
                 extrusion.indices.forEach(i => fillIndices.push(i + vertexOffset));
+                extrusion.roofIndices.forEach(i => roofIndices.push(i + vertexOffset));
                 
                 // TRIVIAL: Use the EXACT SAME roof geometry for hidden as visible
                 // extrusion.roofVertices contains the transformed coordinates already
@@ -1180,6 +1192,7 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
                     const vertexOffset = fillVertices.length / 7;
                     extrusion.vertices.forEach(v => fillVertices.push(v));
                     extrusion.indices.forEach(i => fillIndices.push(i + vertexOffset));
+                    extrusion.roofIndices.forEach(i => roofIndices.push(i + vertexOffset));
                     
                     // TRIVIAL: Use the EXACT SAME roof geometry for hidden as visible
                     const heightZ = extrusionHeight * 0.0007;
@@ -1348,6 +1361,7 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
         hiddenVertices: new Float32Array(hiddenVertices),
         fillIndices: new Uint32Array(fillIndices),
         hiddenfillIndices: new Uint32Array(hiddenfillIndices),
+        roofIndices: new Uint32Array(roofIndices),  // Roof geometry for marker offset buffer
         isFilled,
         isLine,
         properties: {

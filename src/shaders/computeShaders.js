@@ -43,26 +43,18 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let fid: u32 = u32(pixel.r * 255.0) * 256u + u32(pixel.g * 255.0);
     if (fid == 0u || fid >= 65535u) { return; }
     
-    // Z-height in blue channel: 0 = ground, higher = building roof
-    let pixelZ = pixel.b;
+    // Blue channel now contains layer ID (not Z-height)
+    // Include all pixels with valid feature IDs for marker calculation
+    let x = gid.x;
+    let y = gid.y;
     
-    // Accept pixels with any measurable height (building edges/faces)
-    // and flat features (ground level)
-    let hasHeight = pixelZ > 0.001;
-    let isFlatFeature = pixelZ <= 0.001;
-    
-    if (hasHeight || isFlatFeature) {
-        let x = gid.x;
-        let y = gid.y;
-        
-        atomicAdd(&accumulators[fid].count, 1u);
-        atomicAdd(&accumulators[fid].sumX, x);
-        atomicAdd(&accumulators[fid].sumY, y);
-        atomicMin(&accumulators[fid].minX, x);
-        atomicMin(&accumulators[fid].minY, y);
-        atomicMax(&accumulators[fid].maxX, x);
-        atomicMax(&accumulators[fid].maxY, y);
-    }
+    atomicAdd(&accumulators[fid].count, 1u);
+    atomicAdd(&accumulators[fid].sumX, x);
+    atomicAdd(&accumulators[fid].sumY, y);
+    atomicMin(&accumulators[fid].minX, x);
+    atomicMin(&accumulators[fid].minY, y);
+    atomicMax(&accumulators[fid].maxX, x);
+    atomicMax(&accumulators[fid].maxY, y);
 }
 `;
 
