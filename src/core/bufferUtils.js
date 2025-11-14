@@ -138,7 +138,7 @@ export async function destroyAllBuffers(device, tileBuffers, hiddenTileBuffers, 
     
     let destroyedCount = 0;
     
-    // Destroy visible buffers
+    // Destroy visible buffers (including shared vertex buffers)
     tileBuffers.forEach((buffers) => {
         buffers.forEach(tile => {
             if (tile.vertexBuffer) tile.vertexBuffer.destroy();
@@ -147,19 +147,20 @@ export async function destroyAllBuffers(device, tileBuffers, hiddenTileBuffers, 
         });
     });
     
-    // Destroy hidden buffers
+    // Destroy hidden buffers (vertex buffer already destroyed above, just destroy indices)
     hiddenTileBuffers.forEach((buffers) => {
         buffers.forEach(tile => {
-            if (tile.vertexBuffer) tile.vertexBuffer.destroy();
+            // Don't destroy vertexBuffer - it's shared with visible buffers and already destroyed
             if (tile.hiddenFillIndexBuffer) tile.hiddenFillIndexBuffer.destroy();
-            destroyedCount += 2;
+            destroyedCount += 1;
         });
     });
     
-    // Destroy roof buffers
+    // Destroy roof buffers (vertex buffer already destroyed above, just destroy indices)
     if (roofTileBuffers) {
         roofTileBuffers.forEach((buffers) => {
             buffers.forEach(tile => {
+                // Don't destroy vertexBuffer - it's shared with visible buffers and already destroyed
                 if (tile.roofIndexBuffer) tile.roofIndexBuffer.destroy();
                 destroyedCount += 1;
             });

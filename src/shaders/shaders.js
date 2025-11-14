@@ -20,7 +20,7 @@ fn main(@location(0) inPosition: vec3<f32>, @location(1) inColor: vec4<f32>) -> 
 
     // Apply camera transform
     output.position = uniforms * pos;
-    
+
     // CRITICAL: Set depth AFTER transformation for proper Z-ordering
     // Depth comparison is 'less', so SMALLER depth = closer to camera
     // Strategy: All flat features get depth ~0.95, buildings get much smaller depth
@@ -29,7 +29,7 @@ fn main(@location(0) inPosition: vec3<f32>, @location(1) inColor: vec4<f32>) -> 
     // Add tiny offset for flat features to prevent z-fighting between overlapping polys
     let flatOffset = select(0.0, 0.00001, inPosition.z < 0.00001);
     output.position.z = baseDepth - (inPosition.z * 10.0) + flatOffset;
-    
+
     // Pass along coordinates for fragment shader
     output.fragCoord = output.position.xy;
     output.color = inColor;
@@ -80,12 +80,12 @@ fn main(@location(0) inPosition: vec3<f32>, @location(1) inColor: vec4<f32>) -> 
 
     // Apply camera transform
     output.position = uniforms * pos;
-    
+
     // Set depth same as visible geometry
     let baseDepth = 0.95;
     let flatOffset = select(0.0, 0.00001, inPosition.z < 0.00001);
     output.position.z = baseDepth - (inPosition.z * 10.0) + flatOffset;
-    
+
     output.fragCoord = output.position.xy;
     output.color = inColor;
     output.worldZ = inPosition.z;

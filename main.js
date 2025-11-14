@@ -142,6 +142,23 @@ async function main() {
             // Build feature names and extract heights
             const featureNames = labelManager.buildFeatureNameMap(tileManager.visibleTileBuffers, camera.zoom);
             
+            // Debug log every zoom level to track when buildings appear
+            const currentZoomInt = Math.floor(camera.zoom);
+            if (!window._lastLoggedZoom || window._lastLoggedZoom !== currentZoomInt) {
+                if (featureNames.size > 0) {
+                    console.log(`📍 Zoom ${currentZoomInt}: Found ${featureNames.size} features for labeling`);
+                    // Count by layer
+                    const layerCounts = {};
+                    for (const [fid, feature] of featureNames.entries()) {
+                        layerCounts[feature.sourceLayer] = (layerCounts[feature.sourceLayer] || 0) + 1;
+                    }
+                    console.log('  Layers:', layerCounts);
+                } else {
+                    console.log(`📍 Zoom ${currentZoomInt}: No features found for labeling`);
+                }
+                window._lastLoggedZoom = currentZoomInt;
+            }
+            
             // Upload heights to GPU
             const heightsArray = new Float32Array(MAX_FEATURES);
             for (const [fid, feature] of featureNames.entries()) {
@@ -151,7 +168,7 @@ async function main() {
             }
             device.queue.writeBuffer(heightsBuffer, 0, heightsArray);
             
-            // Compute marker positions (3-pass GPU compute)
+            // Compute marker positions from hidden texture
             createComputeMarkerEncoder(
                 device, renderer,
                 markerResources.accumulatorPipeline,

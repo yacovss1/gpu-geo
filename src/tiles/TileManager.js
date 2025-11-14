@@ -227,7 +227,7 @@ export class TileManager {
      */
     createBuffersForFeature(parsedFeature, z, x, y, newTileBuffers, newHiddenTileBuffers, newRoofTileBuffers) {
         const {
-            vertices, hiddenVertices, fillIndices, hiddenfillIndices, roofIndices,
+            vertices, hiddenVertices, roofVertices, fillIndices, hiddenfillIndices, roofIndices,
             isFilled, isLine, properties, layerId
         } = parsedFeature;
         
@@ -250,20 +250,24 @@ export class TileManager {
         let hiddenVertexBuffer, hiddenFillIndexBuffer;
         
         if (use3DGeometry) {
-            // For 3D features, use hidden vertices with footprint geometry
-            if (hiddenVertices.length > 0 && hiddenfillIndices.length > 0) {
+            // For 3D features, create hidden vertex buffer if we have any hidden vertices
+            if (hiddenVertices.length > 0) {
                 hiddenVertexBuffer = this.device.createBuffer({
                     size: this.alignBufferSize(hiddenVertices.byteLength),
                     usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
                 });
                 this.device.queue.writeBuffer(hiddenVertexBuffer, 0, this.padToAlignment(hiddenVertices));
-                
+                this.totalBuffersCreated++;
+            }
+            
+            // Create hidden fill index buffer if we have footprint indices
+            if (hiddenfillIndices.length > 0) {
                 hiddenFillIndexBuffer = this.device.createBuffer({
                     size: this.alignBufferSize(hiddenfillIndices.byteLength),
                     usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
                 });
                 this.device.queue.writeBuffer(hiddenFillIndexBuffer, 0, this.padToAlignment(hiddenfillIndices));
-                this.totalBuffersCreated += 2;
+                this.totalBuffersCreated++;
             }
         } else {
             // For 2D features, create separate hidden buffers
@@ -289,9 +293,20 @@ export class TileManager {
         this.device.queue.writeBuffer(fillIndexBuffer, 0, this.padToAlignment(fillIndices));
         this.totalBuffersCreated++;
         
-        // Create roof index buffer for 3D buildings (used for marker offset buffer)
-        let roofIndexBuffer;
-        if (use3DGeometry && roofIndices && roofIndices.length > 0) {
+        // DISABLED: Roof buffers completely disabled until we fix the rendering issue
+        /*
+        // Create roof buffers for 3D buildings (separate vertex buffer + index buffer)
+        let roofVertexBuffer, roofIndexBuffer;
+        if (use3DGeometry && roofVertices && roofVertices.length > 0 && roofIndices && roofIndices.length > 0) {
+            // Create SEPARATE vertex buffer for roof geometry
+            roofVertexBuffer = this.device.createBuffer({
+                size: this.alignBufferSize(roofVertices.byteLength),
+                usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+            });
+            this.device.queue.writeBuffer(roofVertexBuffer, 0, this.padToAlignment(roofVertices));
+            this.totalBuffersCreated++;
+            
+            // Create roof index buffer
             roofIndexBuffer = this.device.createBuffer({
                 size: this.alignBufferSize(roofIndices.byteLength),
                 usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
@@ -299,6 +314,9 @@ export class TileManager {
             this.device.queue.writeBuffer(roofIndexBuffer, 0, this.padToAlignment(roofIndices));
             this.totalBuffersCreated++;
         }
+        */
+        let roofVertexBuffer = null;
+        let roofIndexBuffer = null;
         
         // Add to visible tile buffers
         if (!newTileBuffers.has(layerId)) {
@@ -339,12 +357,12 @@ export class TileManager {
         }
         
         // Add to roof tile buffers (only for 3D buildings with roof geometry)
-        if (roofIndexBuffer) {
+        if (roofVertexBuffer && roofIndexBuffer && use3DGeometry) {
             if (!newRoofTileBuffers.has(layerId)) {
                 newRoofTileBuffers.set(layerId, []);
             }
             newRoofTileBuffers.get(layerId).push({
-                vertexBuffer,
+                vertexBuffer: roofVertexBuffer,  // Use SEPARATE roof vertex buffer with encoded IDs!
                 roofIndexBuffer,
                 roofIndexCount: roofIndices.length,
                 properties,
@@ -353,6 +371,11 @@ export class TileManager {
                 tileY: y,
                 layerId: layerId
             });
+            
+            if (!window._roofBufferDebug) {
+                console.log(`🏗️ Created roof buffer: layer=${layerId}, roofIndexCount=${roofIndices.length}, tile=${z}/${x}/${y}`);
+                window._roofBufferDebug = true;
+            }
         }
     }
     
@@ -390,18 +413,25 @@ export class TileManager {
         
         let destroyedCount = 0;
         
-        // Destroy visible tile buffers
+        // Destroy visible tile buffers (including shared vertex buffers)
         destroyedCount += this.destroyTilesWhere(
             this.visibleTileBuffers,
             tile => tile.zoomLevel !== currentZoom,
             ['vertexBuffer', 'fillIndexBuffer']
         );
         
-        // Destroy hidden tile buffers
+        // Destroy hidden tile buffers (only index buffers, vertex already destroyed)
         destroyedCount += this.destroyTilesWhere(
             this.hiddenTileBuffers,
             tile => tile.zoomLevel !== currentZoom,
-            ['vertexBuffer', 'hiddenFillIndexBuffer']
+            ['hiddenFillIndexBuffer']
+        );
+        
+        // Destroy roof tile buffers (only index buffers, vertex already destroyed)
+        destroyedCount += this.destroyTilesWhere(
+            this.roofTileBuffers,
+            tile => tile.zoomLevel !== currentZoom,
+            ['roofIndexBuffer']
         );
         
         if (destroyedCount > 0) {
@@ -424,7 +454,12 @@ export class TileManager {
             this.destroyTilesWhere(
                 this.hiddenTileBuffers,
                 tile => !visibleKeys.has(`${tile.zoomLevel}/${tile.tileX}/${tile.tileY}`),
-                ['vertexBuffer', 'hiddenFillIndexBuffer']
+                ['hiddenFillIndexBuffer']  // Don't destroy vertexBuffer - shared and already destroyed
+            ) +
+            this.destroyTilesWhere(
+                this.roofTileBuffers,
+                tile => !visibleKeys.has(`${tile.zoomLevel}/${tile.tileX}/${tile.tileY}`),
+                ['roofIndexBuffer']  // Don't destroy vertexBuffer - shared and already destroyed
             );
         
         if (destroyedCount > 0) {
@@ -488,7 +523,7 @@ export class TileManager {
     clearAll() {
         console.log('🗑️ Clearing all tiles');
         
-        // Destroy all visible buffers
+        // Destroy all visible buffers (including shared vertex buffers)
         this.visibleTileBuffers.forEach((tiles) => {
             tiles.forEach(tile => {
                 if (tile.vertexBuffer) tile.vertexBuffer.destroy();
@@ -497,16 +532,16 @@ export class TileManager {
             });
         });
         
-        // Destroy all hidden buffers
+        // Destroy all hidden buffers (vertex buffer already destroyed above, just destroy indices)
         this.hiddenTileBuffers.forEach((tiles) => {
             tiles.forEach(tile => {
-                if (tile.vertexBuffer) tile.vertexBuffer.destroy();
+                // Don't destroy vertexBuffer - it's shared with visible buffers and already destroyed
                 if (tile.hiddenFillIndexBuffer) tile.hiddenFillIndexBuffer.destroy();
-                this.totalBuffersDestroyed += 2;
+                this.totalBuffersDestroyed += 1;
             });
         });
         
-        // Destroy all roof buffers
+        // Destroy all roof buffers (vertex buffer already destroyed above, just destroy indices)
         this.roofTileBuffers.forEach((tiles) => {
             tiles.forEach(tile => {
                 if (tile.roofIndexBuffer) tile.roofIndexBuffer.destroy();

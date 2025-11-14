@@ -25,8 +25,8 @@ struct VertexOutput {
 fn main(input: VertexInput) -> VertexOutput {
     let marker = markers[input.instanceIndex];
     
-    // Skip invalid markers (those with zero position)
-    if (marker.center.x == 0.0 && marker.center.y == 0.0) {
+    // Skip invalid markers (sentinel value -999 means no valid position)
+    if (marker.center.x < -10.0 || marker.center.y < -10.0) {
         return VertexOutput(
             vec4<f32>(-100.0, -100.0, 0.0, 1.0),
             vec4<f32>(0.0, 0.0, 0.0, 0.0)

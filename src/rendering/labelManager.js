@@ -17,7 +17,10 @@ export class LabelManager {
             symbolLayers: false,
             tileBufferLayers: false,
             buildingLabel: false,
-            featureNames: false
+            featureNames: false,
+            buildingCheck: false,
+            extrusionFound: false,
+            sourceLayerCheck: false
         };
     }
     
@@ -29,12 +32,23 @@ export class LabelManager {
         const style = getStyle();
         const symbolLayers = style?.layers?.filter(l => l.type === 'symbol') || [];
         
+        if (!this.debugLogged.buildingCheck) {
+            console.log('🏗️ Label Manager: Checking', tileBuffers.size, 'layers for labels');
+            console.log('🏗️ Layer IDs:', Array.from(tileBuffers.keys()));
+            this.debugLogged.buildingCheck = true;
+        }
+        
         // Iterate through all layers
         for (const [layerId, buffers] of tileBuffers) {
             for (const tileBuffer of buffers) {
                 if (!tileBuffer.properties) continue;
                 const clampedFid = tileBuffer.properties.clampedFid;
                 const sourceLayer = tileBuffer.properties.sourceLayer;
+                
+                if (!this.debugLogged.sourceLayerCheck && sourceLayer) {
+                    console.log(`🔍 Checking layer "${layerId}": sourceLayer="${sourceLayer}", fid=${clampedFid}`);
+                    this.debugLogged.sourceLayerCheck = true;
+                }
                 
                 // Find matching symbol layer for this feature's source-layer
                 const matchingSymbolLayer = symbolLayers.find(layer => 
@@ -53,6 +67,23 @@ export class LabelManager {
                                tileBuffer.properties.ADM0_A3 || tileBuffer.properties.ISO_A3;
                 }
                 
+                // For buildings WITHOUT labels, create a synthetic label showing height
+                if (!labelText && sourceLayer === 'building' && clampedFid) {
+                    // Find the fill-extrusion layer for this source-layer to get height
+                    const extrusionLayer = style?.layers?.find(layer => 
+                        layer.type === 'fill-extrusion' && 
+                        layer['source-layer'] === sourceLayer
+                    );
+                    
+                    if (extrusionLayer) {
+                        const heightValue = getPaintProperty(extrusionLayer.id, 'fill-extrusion-height', 
+                            { properties: tileBuffer.properties }, currentZoom);
+                        if (heightValue > 0) {
+                            labelText = `${Math.round(heightValue)}m`; // Create synthetic label
+                        }
+                    }
+                }
+                
                 if (clampedFid && labelText) {
                     // Extract building height from fill-extrusion paint properties
                     let totalHeight = 0;
@@ -68,6 +99,11 @@ export class LabelManager {
                         const heightValue = getPaintProperty(extrusionLayer.id, 'fill-extrusion-height', 
                             { properties: tileBuffer.properties }, currentZoom);
                         totalHeight = heightValue || 0;
+                        
+                        if (!this.debugLogged.extrusionFound && totalHeight > 0) {
+                            console.log('🏢 Found extruded building:', labelText, 'height:', totalHeight, 'fid:', clampedFid);
+                            this.debugLogged.extrusionFound = true;
+                        }
                     }
                     
                     featureNames.set(clampedFid, { 

@@ -10,7 +10,6 @@
     }
   },
   "layers": [
-
     {
       "id": "water",
       "type": "fill",
@@ -18,17 +17,7 @@
       "source-layer": "water",
       "paint": {
         "fill-opacity": 0.5,
-        "fill-color": "#00ffff"
-      }
-    },
-    {
-      "id": "boundaries",
-      "type": "line",
-      "source": "carto",
-      "source-layer": "boundary",    
-      "paint": {
-        "line-width": 1,
-        "line-color": "#ff0000"
+        "fill-color": "#a0c8f0"
       }
     },
     {
@@ -38,18 +27,19 @@
       "source-layer": "landuse",
       "minzoom": 8,
       "paint": {
-        "fill-opacity": 1.0,
-        "fill-color": "#00ff00"
+        "fill-opacity": 0.4,
+        "fill-color": "#e8f5e9"
       }
     },
-     {
-      "id": "roads-all",
-      "type": "line",
+    {
+      "id": "parks",
+      "type": "fill",
       "source": "carto",
-      "source-layer": "transportation",
+      "source-layer": "park",
+      "minzoom": 10,
       "paint": {
-        "line-width": 1,
-        "line-color": "#ffa500"
+        "fill-opacity": 0.4,
+        "fill-color": "#c8e6c9"
       }
     },
     {
@@ -57,14 +47,59 @@
       "type": "fill",
       "source": "carto",
       "source-layer": "building",
-      "minzoom": 13,
+      "minzoom": 20,
       "paint": {
-        "fill-color": "#444444",
-        "fill-opacity": 0.9
+        "fill-color": "#ff0000",
+        "fill-opacity": 0.7
       }
-    },   
-   
-   {
+    },
+    {
+      "id": "roads-minor",
+      "type": "line",
+      "source": "carto",
+      "source-layer": "transportation",
+      "filter": ["in", "class", "minor", "service"],
+      "minzoom": 10,
+      "paint": {
+        "line-width": 2,
+        "line-color": "#00ff00"
+      }
+    },
+    {
+      "id": "roads-major",
+      "type": "line",
+      "source": "carto",
+      "source-layer": "transportation",
+      "filter": ["in", "class", "primary", "secondary", "tertiary"],
+      "minzoom": 8,
+      "paint": {
+        "line-width": 3,
+        "line-color": "#ffff00"
+      }
+    },
+    {
+      "id": "roads-highway",
+      "type": "line",
+      "source": "carto",
+      "source-layer": "transportation",
+      "filter": ["in", "class", "motorway", "trunk"],
+      "minzoom": 6,
+      "paint": {
+        "line-width": 4,
+        "line-color": "#ff00ff"
+      }
+    },
+    {
+      "id": "boundaries",
+      "type": "line",
+      "source": "carto",
+      "source-layer": "boundary",
+      "paint": {
+        "line-width": 3,
+        "line-color": "#ff0000"
+      }
+    },
+    {
       "id": "place-labels",
       "type": "symbol",
       "source": "carto",

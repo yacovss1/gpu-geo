@@ -56,8 +56,9 @@ export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, roof
     
     hiddenPass.end();
     
-    // Second render pass: marker offset texture for 3D building roof caps
-    // This sparse texture only contains roof geometry for precise label placement
+    // DISABLED: Second render pass for marker offset texture
+    // TODO: Fix malformed geometry issue before re-enabling
+    /*
     const markerOffsetPass = mapCommandEncoder.beginRenderPass({
         colorAttachments: [{
             view: renderer.textures.markerOffset.createView(),
@@ -69,16 +70,13 @@ export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, roof
             view: renderer.textures.depthHidden.createView(),
             depthClearValue: 1.0,
             depthLoadOp: 'clear',
-            depthStoreOp: 'store',
+            depthStoreOp: 'discard',
         }
     });
     
-    // Render roof cap geometry layer by layer
     for (const [layerId, buffers] of roofTileBuffers) {
         if (!shouldRenderLayer(layerId, renderZoom)) continue;
-        
         buffers.forEach(({ vertexBuffer, roofIndexBuffer, roofIndexCount }) => {
-            // Validate buffers exist and are not destroyed before rendering
             if (roofIndexCount > 0 && roofIndexBuffer && vertexBuffer) {
                 try {
                     markerOffsetPass.setPipeline(renderer.pipelines.hidden);
@@ -92,8 +90,8 @@ export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, roof
             }
         });
     }
-    
     markerOffsetPass.end();
+    */
     
     // Get background color from style
     const currentMapStyle = getStyle();
@@ -218,6 +216,11 @@ export function createComputeMarkerEncoder(
     regionsBuffer,
     heightsBuffer
 ) {
+    if (!window._computeStartLogged) {
+        console.log('🎯 Starting marker compute passes...');
+        window._computeStartLogged = true;
+    }
+    
     const ACCUMULATOR_BUFFER_SIZE = MAX_FEATURES * 28;
     const QUADRANT_BUFFER_SIZE = MAX_FEATURES * 108;
     
@@ -282,7 +285,16 @@ export function createComputeMarkerEncoder(
     const workgroupCount3 = Math.ceil(10000 / 64);
     computePass3.dispatchWorkgroups(workgroupCount3);
     computePass3.end();
-    device.queue.submit([encoder3.finish()]);
+    
+    const commandBuffer = encoder3.finish();
+    device.queue.submit([commandBuffer]);
+    
+    // Debug: Log marker computation completion
+    if (!window._markerComputeLogged) {
+        console.log(`🎯 Marker compute: Pass 1 (accumulator), Pass 2 (quadrants), Pass 3 (centers) - complete`);
+        console.log(`   Texture sizes: hidden=${renderer.textures.hidden.width}x${renderer.textures.hidden.height}, markerOffset=${renderer.textures.markerOffset.width}x${renderer.textures.markerOffset.height}`);
+        window._markerComputeLogged = true;
+    }
 }
 
 // Cache the triangle buffer so we don't recreate it every frame
@@ -338,6 +350,12 @@ export function renderMarkersToEncoder(
     }));
     markerPass.draw(3, MAX_FEATURES, 0, 0);
     markerPass.end();
+    
+    // Debug: Log marker rendering
+    if (!window._markerRenderLogged) {
+        console.log(`🎨 Marker render pass: drawing ${MAX_FEATURES} instances`);
+        window._markerRenderLogged = true;
+    }
 }
 
 /**
@@ -358,6 +376,28 @@ export async function readMarkerBufferSync(device, markerBuffer) {
         const data = new Float32Array(readBuffer.getMappedRange()).slice();
         readBuffer.unmap();
         readBuffer.destroy();
+        
+        // DEBUG: Check for valid markers
+        if (!window._markerDataLogged) {
+            let validCount = 0;
+            const MARKER_STRIDE = 10; // 10 floats per marker
+            for (let i = 0; i < 100; i++) { // Check first 100 features
+                const offset = i * MARKER_STRIDE;
+                const centerX = data[offset];
+                const centerY = data[offset + 1];
+                const height = data[offset + 2];
+                const featureId = data[offset + 8];
+                
+                if (centerX > -10 && centerX < 10 && centerY > -10 && centerY < 10) {
+                    validCount++;
+                    if (validCount <= 5) {
+                        console.log(`  Marker ${i}: center=(${centerX.toFixed(3)}, ${centerY.toFixed(3)}) height=${height.toFixed(1)}m fid=${featureId}`);
+                    }
+                }
+            }
+            console.log(`📊 Marker buffer: ${validCount} valid markers found (first 100 checked)`);
+            window._markerDataLogged = true;
+        }
         
         return data;
     } catch (err) {

@@ -18,8 +18,15 @@
 // Pass 3: Generate final marker position from selected quadrant
 
 export const accumulatorShaderCode = `
-// Pass 1: Calculate centroid for TOP surface only (highest Z pixels)
-// This ensures markers appear on building roofs, not at ground level
+// Pass 1: Scan hidden texture and accumulate (sum, count, min, max) per feature ID
+//
+// For 3D buildings: checks markerOffset texture first (roof pixels)
+// For 2D features: uses hidden texture (ground footprint pixels)
+//
+// This dual-buffer approach ensures:
+// - Building markers appear on roofs (not at building edges/ground)
+// - 2D feature markers appear at their centroid
+
 struct FeatureAccumulator {
     sumX: atomic<u32>,
     sumY: atomic<u32>,
@@ -37,13 +44,16 @@ struct FeatureAccumulator {
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let dims = textureDimensions(hiddenTex);
     if (gid.x >= dims.x || gid.y >= dims.y) { return; }
+    
+    // DISABLED: markerOffset texture until we fix building roof geometry
+    // Just use hidden texture for all features (2D only)
     let pixel = textureLoad(hiddenTex, vec2<i32>(gid.xy), 0);
     
     // Feature ID from red+green channels (16-bit encoding)
     let fid: u32 = u32(pixel.r * 255.0) * 256u + u32(pixel.g * 255.0);
     if (fid == 0u || fid >= 65535u) { return; }
     
-    // Blue channel now contains layer ID (not Z-height)
+    // Blue channel contains layer ID, alpha contains pickable flag
     // Include all pixels with valid feature IDs for marker calculation
     let x = gid.x;
     let y = gid.y;
@@ -103,22 +113,14 @@ struct QuadrantAccumulator {
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let dims = textureDimensions(hiddenTex);
     if (gid.x >= dims.x || gid.y >= dims.y) { return; }
+    
+    // DISABLED: markerOffset texture until we fix building roof geometry
+    // Just use hidden texture for all features (2D only)
     let pixel = textureLoad(hiddenTex, vec2<i32>(gid.xy), 0);
     
     // Feature ID from red+green channels (16-bit encoding)
-    // R = high byte, G = low byte
     let fid: u32 = u32(pixel.r * 255.0) * 256u + u32(pixel.g * 255.0);
     if (fid == 0u || fid >= 65535u) { return; }
-    
-    // Z-height in blue channel: 0 = ground, higher = building roof
-    let pixelZ = pixel.b;
-    
-    // Accept pixels with any measurable height (building edges/faces)
-    // and flat features (ground level) - same filter as Pass 1
-    let hasHeight = pixelZ > 0.001;
-    let isFlatFeature = pixelZ <= 0.001;
-    
-    if (!hasHeight && !isFlatFeature) { return; }
     
     let x = gid.x;
     let y = gid.y;
@@ -259,8 +261,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let idx: u32 = gid.x;
     if (idx >= 65535u) { return; } // Match feature ID limit
     
-    // Initialize marker with default values
-    markers[idx].center = vec2<f32>(0.0, 0.0);
+    // Initialize marker with default values (use -999 as sentinel for invalid)
+    markers[idx].center = vec2<f32>(-999.0, -999.0);
     markers[idx].height = 0.0;
     markers[idx].padding = 0.0;
     markers[idx].color = vec4<f32>(0.0, 0.0, 0.0, 0.0);
@@ -297,9 +299,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var onFeature = false;
     
     // Check if the centroid point is on this feature
+    // DISABLED: markerOffset texture - just use hidden texture for all features
     if (sampleX >= 0 && sampleX < i32(width) && sampleY >= 0 && sampleY < i32(height)) {
         let pixelColor = textureLoad(hiddenTex, vec2<i32>(sampleX, sampleY), 0);
-        // Decode 16-bit feature ID from red+green channels
         let pixelId = u32(pixelColor.r * 255.0) * 256u + u32(pixelColor.g * 255.0);
         onFeature = (pixelId == idx);
     }
