@@ -18,7 +18,7 @@ const MARKER_BUFFER_SIZE = MAX_FEATURES * 40;
 /**
  * Render the map with hidden texture and edge detection
  */
-export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, roofTileBuffers, textureView, camera, shouldRenderLayer) {
+export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, textureView, camera, shouldRenderLayer) {
     const mapCommandEncoder = device.createCommandEncoder();
     
     // First render pass: hidden texture for feature IDs (no MSAA - needs exact values)
@@ -55,43 +55,6 @@ export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, roof
     }
     
     hiddenPass.end();
-    
-    // DISABLED: Second render pass for marker offset texture
-    // TODO: Fix malformed geometry issue before re-enabling
-    /*
-    const markerOffsetPass = mapCommandEncoder.beginRenderPass({
-        colorAttachments: [{
-            view: renderer.textures.markerOffset.createView(),
-            clearValue: { r: 0, g: 0, b: 0, a: 0 },
-            loadOp: 'clear',
-            storeOp: 'store',
-        }],
-        depthStencilAttachment: {
-            view: renderer.textures.depthHidden.createView(),
-            depthClearValue: 1.0,
-            depthLoadOp: 'clear',
-            depthStoreOp: 'discard',
-        }
-    });
-    
-    for (const [layerId, buffers] of roofTileBuffers) {
-        if (!shouldRenderLayer(layerId, renderZoom)) continue;
-        buffers.forEach(({ vertexBuffer, roofIndexBuffer, roofIndexCount }) => {
-            if (roofIndexCount > 0 && roofIndexBuffer && vertexBuffer) {
-                try {
-                    markerOffsetPass.setPipeline(renderer.pipelines.hidden);
-                    markerOffsetPass.setVertexBuffer(0, vertexBuffer);
-                    markerOffsetPass.setIndexBuffer(roofIndexBuffer, "uint32");
-                    markerOffsetPass.setBindGroup(0, renderer.bindGroups.picking);
-                    markerOffsetPass.drawIndexed(roofIndexCount);
-                } catch (err) {
-                    console.warn('Failed to render roof geometry:', err.message);
-                }
-            }
-        });
-    }
-    markerOffsetPass.end();
-    */
     
     // Get background color from style
     const currentMapStyle = getStyle();
@@ -292,7 +255,7 @@ export function createComputeMarkerEncoder(
     // Debug: Log marker computation completion
     if (!window._markerComputeLogged) {
         console.log(`🎯 Marker compute: Pass 1 (accumulator), Pass 2 (quadrants), Pass 3 (centers) - complete`);
-        console.log(`   Texture sizes: hidden=${renderer.textures.hidden.width}x${renderer.textures.hidden.height}, markerOffset=${renderer.textures.markerOffset.width}x${renderer.textures.markerOffset.height}`);
+        console.log(`   Texture size: hidden=${renderer.textures.hidden.width}x${renderer.textures.hidden.height}`);
         window._markerComputeLogged = true;
     }
 }

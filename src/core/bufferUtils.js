@@ -132,13 +132,13 @@ export function destroyTileBuffers(tile) {
 /**
  * Destroy all GPU buffers in a collection
  */
-export async function destroyAllBuffers(device, tileBuffers, hiddenTileBuffers, roofTileBuffers) {
+export async function destroyAllBuffers(device, tileBuffers, hiddenTileBuffers) {
     // Wait for GPU to finish
     await device.queue.onSubmittedWorkDone();
     
     let destroyedCount = 0;
     
-    // Destroy visible buffers (including shared vertex buffers)
+    // Destroy visible buffers
     tileBuffers.forEach((buffers) => {
         buffers.forEach(tile => {
             if (tile.vertexBuffer) tile.vertexBuffer.destroy();
@@ -147,29 +147,17 @@ export async function destroyAllBuffers(device, tileBuffers, hiddenTileBuffers, 
         });
     });
     
-    // Destroy hidden buffers (vertex buffer already destroyed above, just destroy indices)
+    // Destroy hidden buffers
     hiddenTileBuffers.forEach((buffers) => {
         buffers.forEach(tile => {
-            // Don't destroy vertexBuffer - it's shared with visible buffers and already destroyed
+            if (tile.vertexBuffer) tile.vertexBuffer.destroy();
             if (tile.hiddenFillIndexBuffer) tile.hiddenFillIndexBuffer.destroy();
-            destroyedCount += 1;
+            destroyedCount += 2;
         });
     });
     
-    // Destroy roof buffers (vertex buffer already destroyed above, just destroy indices)
-    if (roofTileBuffers) {
-        roofTileBuffers.forEach((buffers) => {
-            buffers.forEach(tile => {
-                // Don't destroy vertexBuffer - it's shared with visible buffers and already destroyed
-                if (tile.roofIndexBuffer) tile.roofIndexBuffer.destroy();
-                destroyedCount += 1;
-            });
-        });
-    }
-    
     tileBuffers.clear();
     hiddenTileBuffers.clear();
-    if (roofTileBuffers) roofTileBuffers.clear();
     
     return destroyedCount;
 }

@@ -21,7 +21,6 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
     const hiddenVertices = [];
     const fillIndices = [];
     const hiddenfillIndices = [];
-    const roofIndices = [];  // Track roof geometry for marker offset buffer
     let isFilled = true;
     let isLine = true;
 
@@ -154,7 +153,7 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
         return vertexStartIndex;
     };
 
-    const coordsToIdVertices = (coords, featureId, targetArray) => {
+    const coordsToIdVertices = (coords, featureId, targetArray, layerId = '') => {
         const vertexStartIndex = targetArray.length / 7;
         
         // Encode feature ID as 16-bit across red and green channels
@@ -165,11 +164,21 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
         const normalizedR = highByte / 255.0;
         const normalizedG = lowByte / 255.0;
         
+        // Encode layer ID in blue channel
+        let layerIdNum = 0;
+        if (layerId && typeof layerId === 'string') {
+            for (let i = 0; i < layerId.length; i++) {
+                layerIdNum = ((layerIdNum << 5) - layerIdNum) + layerId.charCodeAt(i);
+            }
+            layerIdNum = Math.abs(layerIdNum) % 256;
+        }
+        const normalizedB = layerIdNum / 255.0;
+        
         coords.forEach(coord => {
             const [x, y] = getTransformedCoord(coord);
             targetArray.push(
                 x, y, 0.0,        // Position (z=0 for flat map)
-                normalizedR, normalizedG, 0.0, 1.0  // 16-bit ID in R+G channels
+                normalizedR, normalizedG, normalizedB, 1.0  // R+G=ID, B=layerID, A=1.0
             );
         });
         return vertexStartIndex;
@@ -179,7 +188,6 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
     const generateExtrusion = (outerRing, height, base) => {
         const vertices = [];
         const indices = [];
-        const roofIndices = [];  // Separate array for roof triangles
         
         // Convert meters to world space units
         // At zoom 0, the entire world spans -1 to 1 (2 units total)
@@ -235,14 +243,11 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
             vertices.push(x, y, heightZ, ..._fillColor);
         });
         
-        // Add roof triangles to BOTH indices arrays
         roofTriangles.forEach(idx => {
-            const fullIdx = roofStartIdx + idx;
-            indices.push(fullIdx);       // For main color pass
-            roofIndices.push(fullIdx);   // For marker offset pass
+            indices.push(roofStartIdx + idx);
         });
         
-        return { vertices, indices, roofVertices: transformedRoofCoords, roofIndices };
+        return { vertices, indices };
     };
 
     // Deduplicate features by tracking processed feature IDs
@@ -358,7 +363,6 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
                     const vertexOffset = fillVertices.length / 7;
                     extrusion.vertices.forEach(v => fillVertices.push(v));
                     extrusion.indices.forEach(i => fillIndices.push(i + vertexOffset));
-                    // Don't add roof indices yet - we'll do that after hidden vertices
                     
                     // Also create hidden vertices for the footprint so markers can be computed
                     const allCoords = polygon.flat(1);
@@ -383,25 +387,6 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
                     const triangles = earcut(flatCoords, holeIndices);
                     triangles.forEach(index => {
                         hiddenfillIndices.push(hiddenStartIndex + index);
-                    });
-                    
-                    // Now create HIDDEN roof vertices with encoded feature IDs AT ROOF HEIGHT
-                    // Roofs at positive Z so markers are placed at correct height
-                    const heightZ = extrusionHeight * 0.0007; // Positive = actual roof height
-                    const hiddenRoofStartIndex = hiddenVertices.length / 7;  // 7 floats per vertex
-                    extrusion.roofVertices.forEach(coord => {
-                        const [x, y] = getTransformedCoord(coord);  // Transform to world coordinates!
-                        const [r, g] = encodeFeatureId(clampedFeatureId);
-                        const b = hashLayerId(layer?.id || 'unknown');
-                        hiddenVertices.push(x, y, heightZ, r / 255, g / 255, b / 255, 1.0);  // Always alpha=1.0 for marker detection
-                    });
-                    
-                    // Convert roof indices from absolute (pointing to color vertices) to relative pattern
-                    // extrusion.roofIndices contains something like [50, 51, 52] but we need [0, 1, 2]
-                    const minRoofIdx = Math.min(...extrusion.roofIndices);
-                    extrusion.roofIndices.forEach(i => {
-                        const relativeIdx = i - minRoofIdx;  // Convert to 0-based pattern
-                        roofIndices.push(hiddenRoofStartIndex + relativeIdx);
                     });
                 } else {
                     // Standard 2D fill
@@ -715,8 +700,6 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
     const hiddenVertices = [];
     const fillIndices = [];
     const hiddenfillIndices = [];
-    const roofVertices = [];  // Separate vertex array for roof geometry (markerOffset buffer)
-    const roofIndices = [];  // Track roof geometry for marker offset buffer
     let isFilled = true;
     let isLine = true;
 
@@ -877,7 +860,7 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
         return vertexStartIndex;
     };
 
-    const coordsToIdVertices = (coords, featureId, targetArray, layerId = '', zPosition = 0.0, pickable = true) => {
+    const coordsToIdVertices = (coords, featureId, targetArray, layerId = '', zPosition = 0.0, zEncoding = 0.0) => {
         const vertexStartIndex = targetArray.length / 7;
         
         // Encode feature ID as 16-bit across red and green channels
@@ -888,23 +871,13 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
         const normalizedR = highByte / 255.0;
         const normalizedG = lowByte / 255.0;
         
-        // Encode layer ID in blue channel (8-bit, 0-255 layers)
-        // Convert layer ID string to numeric hash
-        let layerIdNum = 0;
-        if (layerId && typeof layerId === 'string') {
-            for (let i = 0; i < layerId.length; i++) {
-                layerIdNum = ((layerIdNum << 5) - layerIdNum) + layerId.charCodeAt(i);
-            }
-            layerIdNum = Math.abs(layerIdNum) % 256;
-        }
-        const normalizedB = layerIdNum / 255.0;
-        
-        // Encode pickable flag in alpha channel (1.0 = pickable, 0.0 = not pickable)
-        const normalizedA = pickable ? 1.0 : 0.0;
+        // Encode Z-height in blue channel for roof detection (use zEncoding if provided)
+        const heightToEncode = zEncoding > 0.0 ? zEncoding : zPosition;
+        const normalizedB = Math.min(1.0, heightToEncode / 0.07); // Normalize to 0-1 range
         
         coords.forEach(coord => {
             const [x, y] = getTransformedCoord(coord);
-            targetArray.push(x, y, zPosition, normalizedR, normalizedG, normalizedB, normalizedA);
+            targetArray.push(x, y, zPosition, normalizedR, normalizedG, normalizedB, 1.0);
         });
         return vertexStartIndex;
     };
@@ -1031,25 +1004,21 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
         
         const roofStartIdx = vertices.length / 7;
         
-        // Add roof vertices to main vertices array for color rendering
+        // Add all roof vertices (already transformed)
         roofVertices.forEach(([x, y]) => {
             vertices.push(x, y, heightZ, ..._fillColor);
         });
         
-        // Add roof indices to main indices array for color pass
-        const roofIndicesLocal = [];
         roofTriangles.forEach(idx => {
-            const fullIdx = roofStartIdx + idx;
-            indices.push(fullIdx);       // For main color pass
-            roofIndicesLocal.push(idx);  // Store relative indices for roof-only buffer
+            indices.push(roofStartIdx + idx);
         });
         
-        // Return roof geometry separately - ONLY for markerOffset buffer
+        // Return roof geometry separately so hidden buffer can use EXACT same triangulation
         return { 
             vertices, 
-            indices,  // Only wall indices
-            roofVertices,         // Array of [x, y] transformed coordinates
-            roofIndices: roofIndicesLocal  // Triangle indices for roof (relative to roofVertices array)
+            indices,
+            roofVertices,      // Array of [x, y] transformed coordinates
+            roofIndices: roofTriangles  // Triangle indices for roof
         };
     };
 
@@ -1103,49 +1072,35 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
                 const vertexOffset = fillVertices.length / 7;
                 extrusion.vertices.forEach(v => fillVertices.push(v));
                 extrusion.indices.forEach(i => fillIndices.push(i + vertexOffset));
-                // DON'T push to roofIndices here - we'll build separate roof buffer below
                 
-                // DON'T add footprints to hidden buffer - they cause offset outlines when tilting!
-                // Buildings are only pickable via their roofs in the markerOffset buffer
-                
-                // Create SEPARATE roof vertex buffer for markerOffset texture
-                // This is independent from hiddenVertices (2D footprints)
+                // TRIVIAL: Use the EXACT SAME roof geometry for hidden as visible
+                // extrusion.roofVertices contains the transformed coordinates already
                 const heightZ = extrusionHeight * 0.0007;
-                const roofVertexStartIndex = roofVertices.length / 7;
+                const hiddenStartIndex = hiddenVertices.length / 7;
                 
-                // Encode feature ID for roof buffer
+                console.log(`🔧 Roof data: roofVertices=${extrusion.roofVertices?.length || 0}, roofIndices=${extrusion.roofIndices?.length || 0}, heightZ=${heightZ.toFixed(4)}`);
+                
+                // Encode feature ID for hidden buffer
                 const safeId = Math.max(1, Math.min(65534, clampedFeatureId || 1));
                 const highByte = Math.floor(safeId / 256);
                 const lowByte = safeId % 256;
                 const normalizedR = highByte / 255.0;
                 const normalizedG = lowByte / 255.0;
+                const normalizedB = Math.min(1.0, heightZ / 0.07);
                 
-                // Encode layer ID in blue channel
-                let layerIdNum = 0;
-                if (layer?.id && typeof layer.id === 'string') {
-                    for (let i = 0; i < layer.id.length; i++) {
-                        layerIdNum = ((layerIdNum << 5) - layerIdNum) + layer.id.charCodeAt(i);
-                    }
-                    layerIdNum = Math.abs(layerIdNum) % 256;
-                }
-                const normalizedB = layerIdNum / 255.0;
-                
-                // Push roof vertices to SEPARATE roof array (not hiddenVertices!)
+                // Push roof vertices to hidden buffer at same height as visible
                 if (extrusion.roofVertices && extrusion.roofVertices.length > 0) {
                     extrusion.roofVertices.forEach(([x, y]) => {
-                        roofVertices.push(x, y, heightZ, normalizedR, normalizedG, normalizedB, 1.0);
+                        hiddenVertices.push(x, y, heightZ, normalizedR, normalizedG, normalizedB, 1.0);
                     });
                     
-                    // roofIndices from extrusion are already relative (0-based from earcut)
-                    // Just offset them by the current roof vertex buffer position
+                    // Use the same triangulation indices
                     extrusion.roofIndices.forEach(index => {
-                        roofIndices.push(roofVertexStartIndex + index);
+                        hiddenfillIndices.push(hiddenStartIndex + index);
                     });
-                    
-                    if (!window._roofBufferLogged) {
-                        console.log(`✅ Created separate roof buffer: ${extrusion.roofVertices.length} vertices, ${roofIndices.length} indices`);
-                        window._roofBufferLogged = true;
-                    }
+                    console.log(`✅ Added ${extrusion.roofVertices.length} roof vertices to hidden buffer for feature ${clampedFeatureId}`);
+                } else {
+                    console.warn(`⚠️ No roof vertices available for feature ${clampedFeatureId}`);
                 }
             } else {
                 // Standard 2D fill
@@ -1225,7 +1180,6 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
                     const vertexOffset = fillVertices.length / 7;
                     extrusion.vertices.forEach(v => fillVertices.push(v));
                     extrusion.indices.forEach(i => fillIndices.push(i + vertexOffset));
-                    extrusion.roofIndices.forEach(i => roofIndices.push(i + vertexOffset));
                     
                     // TRIVIAL: Use the EXACT SAME roof geometry for hidden as visible
                     const heightZ = extrusionHeight * 0.0007;
@@ -1392,10 +1346,8 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
     return {
         vertices: new Float32Array(fillVertices),
         hiddenVertices: new Float32Array(hiddenVertices),
-        roofVertices: new Float32Array(roofVertices),  // SEPARATE roof buffer for markerOffset
         fillIndices: new Uint32Array(fillIndices),
         hiddenfillIndices: new Uint32Array(hiddenfillIndices),
-        roofIndices: new Uint32Array(roofIndices),  // Roof indices reference roofVertices array
         isFilled,
         isLine,
         properties: {

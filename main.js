@@ -130,8 +130,7 @@ async function main() {
         const mapEncoder = renderMap(
             device, renderer, 
             tileManager.visibleTileBuffers, 
-            tileManager.hiddenTileBuffers,
-            tileManager.roofTileBuffers,
+            tileManager.hiddenTileBuffers, 
             textureView, camera,
             (layerId, zoom) => styleManager.shouldRenderLayer(layerId, zoom)
         );
@@ -142,23 +141,6 @@ async function main() {
             // Build feature names and extract heights
             const featureNames = labelManager.buildFeatureNameMap(tileManager.visibleTileBuffers, camera.zoom);
             
-            // Debug log every zoom level to track when buildings appear
-            const currentZoomInt = Math.floor(camera.zoom);
-            if (!window._lastLoggedZoom || window._lastLoggedZoom !== currentZoomInt) {
-                if (featureNames.size > 0) {
-                    console.log(`📍 Zoom ${currentZoomInt}: Found ${featureNames.size} features for labeling`);
-                    // Count by layer
-                    const layerCounts = {};
-                    for (const [fid, feature] of featureNames.entries()) {
-                        layerCounts[feature.sourceLayer] = (layerCounts[feature.sourceLayer] || 0) + 1;
-                    }
-                    console.log('  Layers:', layerCounts);
-                } else {
-                    console.log(`📍 Zoom ${currentZoomInt}: No features found for labeling`);
-                }
-                window._lastLoggedZoom = currentZoomInt;
-            }
-            
             // Upload heights to GPU
             const heightsArray = new Float32Array(MAX_FEATURES);
             for (const [fid, feature] of featureNames.entries()) {
@@ -168,7 +150,7 @@ async function main() {
             }
             device.queue.writeBuffer(heightsBuffer, 0, heightsArray);
             
-            // Compute marker positions from hidden texture
+            // Compute marker positions (3-pass GPU compute)
             createComputeMarkerEncoder(
                 device, renderer,
                 markerResources.accumulatorPipeline,
@@ -258,7 +240,7 @@ function setupGlobalAPI(device, camera, tileManager, performanceManager, styleMa
     window.mapPerformance = {
         setGPUEnabled: async (enabled) => {
             performanceManager.setGPUEnabled(enabled);
-            await destroyAllBuffers(device, tileManager.visibleTileBuffers, tileManager.hiddenTileBuffers, tileManager.roofTileBuffers);
+            await destroyAllBuffers(device, tileManager.visibleTileBuffers, tileManager.hiddenTileBuffers);
             clearTileCache();
             resetNotFoundTiles();
             camera.triggerEvent('zoomend');
@@ -276,7 +258,7 @@ function setupGlobalAPI(device, camera, tileManager, performanceManager, styleMa
     window.mapStyle = {
         setStyle: async (style) => {
             await styleManager.setStyle(style);
-            await destroyAllBuffers(device, tileManager.visibleTileBuffers, tileManager.hiddenTileBuffers, tileManager.roofTileBuffers);
+            await destroyAllBuffers(device, tileManager.visibleTileBuffers, tileManager.hiddenTileBuffers);
             camera.triggerEvent('zoomend');
         },
         getStyle: () => styleManager.getStyle(),
@@ -284,7 +266,7 @@ function setupGlobalAPI(device, camera, tileManager, performanceManager, styleMa
         setLayerVisibility: async (layerId, visible) => {
             await device.queue.onSubmittedWorkDone();
             await styleManager.setLayerVisibility(layerId, visible);
-            await destroyAllBuffers(device, tileManager.visibleTileBuffers, tileManager.hiddenTileBuffers, tileManager.roofTileBuffers);
+            await destroyAllBuffers(device, tileManager.visibleTileBuffers, tileManager.hiddenTileBuffers);
             camera.triggerEvent('zoomend');
         },
         getLayerVisibility: (layerId) => styleManager.getLayerVisibility(layerId),
@@ -336,7 +318,7 @@ function setupTileLoadingEvents(camera, tileManager, renderer, styleManager, dev
         const shouldClearOldTiles = lastFetchZoom !== -1 && fetchZoom !== lastFetchZoom;
         if (shouldClearOldTiles) {
             await device.queue.onSubmittedWorkDone();
-            await destroyAllBuffers(device, tileManager.visibleTileBuffers, tileManager.hiddenTileBuffers, tileManager.roofTileBuffers);
+            await destroyAllBuffers(device, tileManager.visibleTileBuffers, tileManager.hiddenTileBuffers);
             clearTileCache();
         }
         lastFetchZoom = fetchZoom;
