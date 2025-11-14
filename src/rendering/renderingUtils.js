@@ -21,17 +21,16 @@ const MARKER_BUFFER_SIZE = MAX_FEATURES * 40;
 export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, textureView, camera, shouldRenderLayer) {
     const mapCommandEncoder = device.createCommandEncoder();
     
-    // First render pass: hidden texture for feature IDs (MSAA enabled)
+    // First render pass: hidden texture for feature IDs (no MSAA - needs exact values)
     const hiddenPass = mapCommandEncoder.beginRenderPass({
         colorAttachments: [{
-            view: renderer.textures.hiddenMSAA.createView(),
-            resolveTarget: renderer.textures.hidden.createView(),
+            view: renderer.textures.hidden.createView(),
             clearValue: { r: 0, g: 0, b: 0, a: 1 },
             loadOp: 'clear',
             storeOp: 'store',
         }],
         depthStencilAttachment: {
-            view: renderer.textures.depth.createView(),
+            view: renderer.textures.depthHidden.createView(),
             depthClearValue: 1.0,
             depthLoadOp: 'clear',
             depthStoreOp: 'store',

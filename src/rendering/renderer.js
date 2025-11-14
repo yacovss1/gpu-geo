@@ -91,7 +91,7 @@ export function createRenderPipeline(device, format, topology, isHidden = false,
                 depthBiasSlopeScale: 1.0
             } : {})
         },
-        multisample: { count: 4 }  // Enable 4x MSAA for anti-aliasing
+        multisample: { count: isHidden ? 1 : 4 }  // No MSAA for hidden buffer (exact feature IDs needed)
     });
 }
 
@@ -331,18 +331,6 @@ export class MapRenderer {
             usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC | GPUTextureUsage.TEXTURE_BINDING,
         });
         
-        // Create MSAA hidden texture
-        if (this.textures.hiddenMSAA) {
-            this.textures.hiddenMSAA.destroy();
-        }
-        
-        this.textures.hiddenMSAA = this.device.createTexture({
-            size: [width, height, 1],
-            format: this.format,
-            sampleCount: 4,
-            usage: GPUTextureUsage.RENDER_ATTACHMENT,
-        });
-        
         if (this.textures.color) {
             this.textures.color.destroy();
         }
@@ -365,7 +353,7 @@ export class MapRenderer {
             usage: GPUTextureUsage.RENDER_ATTACHMENT,
         });
         
-        // Create depth texture for 3D rendering
+        // Create depth texture for 3D rendering with MSAA
         if (this.textures.depth) {
             this.textures.depth.destroy();
         }
@@ -373,7 +361,19 @@ export class MapRenderer {
         this.textures.depth = this.device.createTexture({
             size: [width, height, 1],
             format: 'depth24plus',
-            sampleCount: 4,  // Match MSAA sample count
+            sampleCount: 4,  // Match MSAA sample count for color pass
+            usage: GPUTextureUsage.RENDER_ATTACHMENT,
+        });
+        
+        // Create separate depth texture for hidden pass (no MSAA)
+        if (this.textures.depthHidden) {
+            this.textures.depthHidden.destroy();
+        }
+        
+        this.textures.depthHidden = this.device.createTexture({
+            size: [width, height, 1],
+            format: 'depth24plus',
+            sampleCount: 1,  // No MSAA for hidden buffer
             usage: GPUTextureUsage.RENDER_ATTACHMENT,
         });
     }
