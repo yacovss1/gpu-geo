@@ -50,10 +50,11 @@ fn main(@location(0) fragCoord: vec2<f32>, @location(1) color: vec4<f32>, @locat
 export const hiddenFragmentShaderCode = `
 @fragment
 fn main(@location(0) fragCoord: vec2<f32>, @location(1) color: vec4<f32>, @location(2) worldZ: f32) -> @location(0) vec4<f32> {
-    // Use RGB channels: R+G for 16-bit feature ID, B for Z-height encoding
-    // Encode Z height (0-100m range) into blue channel for roof detection
-    let normalizedZ = clamp(worldZ / 0.07, 0.0, 1.0); // 0.07 = 100m in clip units (100 * 0.0007)
-    return vec4<f32>(color.r, color.g, normalizedZ, 1.0);
+    // color.r = Feature ID high byte
+    // color.g = Feature ID low byte
+    // color.b = Layer ID
+    // color.a = Pickable flag
+    return color;
 }
 `;
 

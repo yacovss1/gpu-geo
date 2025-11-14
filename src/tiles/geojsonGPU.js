@@ -850,7 +850,7 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
         return vertexStartIndex;
     };
 
-    const coordsToIdVertices = (coords, featureId, targetArray, layerId = '', zPosition = 0.0, zEncoding = 0.0) => {
+    const coordsToIdVertices = (coords, featureId, targetArray, layerId = '', zPosition = 0.0, pickable = true) => {
         const vertexStartIndex = targetArray.length / 7;
         
         // Encode feature ID as 16-bit across red and green channels
@@ -861,13 +861,23 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
         const normalizedR = highByte / 255.0;
         const normalizedG = lowByte / 255.0;
         
-        // Encode Z-height in blue channel for roof detection (use zEncoding if provided)
-        const heightToEncode = zEncoding > 0.0 ? zEncoding : zPosition;
-        const normalizedB = Math.min(1.0, heightToEncode / 0.07); // Normalize to 0-1 range
+        // Encode layer ID in blue channel (8-bit, 0-255 layers)
+        // Convert layer ID string to numeric hash
+        let layerIdNum = 0;
+        if (layerId && typeof layerId === 'string') {
+            for (let i = 0; i < layerId.length; i++) {
+                layerIdNum = ((layerIdNum << 5) - layerIdNum) + layerId.charCodeAt(i);
+            }
+            layerIdNum = Math.abs(layerIdNum) % 256;
+        }
+        const normalizedB = layerIdNum / 255.0;
+        
+        // Encode pickable flag in alpha channel (1.0 = pickable, 0.0 = not pickable)
+        const normalizedA = pickable ? 1.0 : 0.0;
         
         coords.forEach(coord => {
             const [x, y] = getTransformedCoord(coord);
-            targetArray.push(x, y, zPosition, normalizedR, normalizedG, normalizedB, 1.0);
+            targetArray.push(x, y, zPosition, normalizedR, normalizedG, normalizedB, normalizedA);
         });
         return vertexStartIndex;
     };

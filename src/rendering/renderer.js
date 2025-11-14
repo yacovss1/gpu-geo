@@ -376,6 +376,17 @@ export class MapRenderer {
             sampleCount: 1,  // No MSAA for hidden buffer
             usage: GPUTextureUsage.RENDER_ATTACHMENT,
         });
+        
+        // Create marker offset buffer for 3D feature label placement
+        if (this.textures.markerOffset) {
+            this.textures.markerOffset.destroy();
+        }
+        
+        this.textures.markerOffset = this.device.createTexture({
+            size: [width, height, 1],
+            format: this.format,
+            usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+        });
     }
     
     // Add method to update texture dimensions when canvas size changes
