@@ -1,4 +1,3 @@
-import { hexToRgb, mercatorToClipSpace } from '../core/utils.js';
 import Pbf from 'pbf';
 import { VectorTile } from '@mapbox/vector-tile';
 import earcut from 'earcut';
@@ -16,15 +15,7 @@ import {
     isTileInBounds
 } from '../core/style.js';
 
-// Ensure tileCache is declared before use
-const problemTiles = new Set(["4/12/15"]);
-
-// Update these constants for optimal memory usage
-const MAX_CACHE_SIZE_MB = 100; // Reduced from 200MB to 100MB
-const MAX_TILES_PER_ZOOM = 50; // Reduced from 100 to 50
-let CACHE_TILE_DATA = true;   // Force this to true to always store raw PBF data
-
-const tileCache = new TileCache(); // Use the imported TileCache class
+const tileCache = new TileCache();
 
 // Create deterministic ID from country name (no collision resolution - let GPU handle duplicates)
 function getCountryId(countryName) {
@@ -612,37 +603,7 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
     };
 }
 
-// Improve memory management by cleaning up old tiles
-export function clearOldTileCache(activeZoom, maxSize = 100) {
-    // Find all keys in the cache
-    const allKeys = [...tileCache.keys()];
-    
-    // Filter for keys that are not at the active zoom level
-    const oldZoomKeys = allKeys.filter(key => {
-        const [z] = key.split('/');
-        return parseInt(z) !== activeZoom;
-    });
-    
-    // Keep the most recently accessed keys for the current zoom
-    const currentZoomKeys = allKeys.filter(key => {
-        const [z] = key.split('/');
-        return parseInt(z) === activeZoom;
-    });
-    
-    if (currentZoomKeys.length > maxSize) {
-        // If we have too many at the current zoom, remove older ones
-        const keysToRemove = currentZoomKeys.slice(0, currentZoomKeys.length - maxSize);
-        keysToRemove.forEach(key => tileCache.delete(key));
-    }
-    
-    // Remove all tiles from other zoom levels
-    oldZoomKeys.forEach(key => tileCache.delete(key));
-}
-
-// Keep track of successful and failed tiles
-//const tileCache = new Map();
-
-// Add at top of file if needed
+// Tile fetching infrastructure
 const activeFetchingTiles = new Set();
 const tileErrors = new Map(); // Track failed tiles to avoid repeated fetches
 const notFoundTiles = new Set(); // Keep track of tiles that failed with 404 to avoid repeating requests
@@ -830,47 +791,12 @@ export async function fetchVectorTile(x, y, z, abortSignal = null) {
     }
 }
 
-// Helper function to clear error tracking
-export function resetTileErrors() {
-    tileErrors.clear();
-    activeFetchingTiles.clear();
-}
-
-// Add a tracking set for in-progress high-zoom tiles
-//const activeFetchingTiles = new Set();
-
-// Utilities for diagnostics and cache management
-export function getTileCacheStats() {
-    return tileCache.getStats();
-}
-
 // Helper function to clear tile cache
 export function clearTileCache() {
     tileCache.clear();
 }
 
-// Add a helper function to reset the system
-export function resetTileFetchingSystem() {
-    tileCache.clear();
-    problemTiles.clear();
-}
-
-// Increase cache size to avoid frequent refetching
-
-// Clear cache when it gets too large
-export function maintainTileCache(maxSize = 100) {
-    if (tileCache.size > maxSize) {
-        const keysToDelete = [...tileCache.keys()].slice(0, tileCache.size - Math.floor(maxSize/2));
-        keysToDelete.forEach(key => tileCache.delete(key));
-    }
-}
-
-// Add an exported function to control caching strategy
-export function setCachingStrategy(cacheRawData = true)  {
-    CACHE_TILE_DATA = cacheRawData;
-}
-
-// Add this function to reset the not-found cache
+// Reset the not-found tiles tracking
 export function resetNotFoundTiles() {
     notFoundTiles.clear();
 }
