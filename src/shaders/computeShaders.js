@@ -243,7 +243,7 @@ struct Marker {
 @group(0) @binding(2) var<storage, read_write> markers: array<Marker>;
 @group(0) @binding(3) var<uniform> dims: vec2<u32>;
 @group(0) @binding(4) var hiddenTex: texture_2d<f32>;
-@group(0) @binding(5) var<storage, read> heights: array<f32>;
+// Heights buffer removed - now reading height from hiddenTex alpha channel
 
 // Helper function to calculate centroid from quadrant data
 fn calculateCentroid(quad: ptr<storage, QuadrantData, read_write>) -> vec2<f32> {
@@ -298,6 +298,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let sampleX = i32(centerX);
     let sampleY = i32(centerY);
     var onFeature = false;
+    var surfaceHeight = 0.0; // Height from alpha channel (denormalized to meters)
     
     // Check if the centroid point is on this feature
     if (sampleX >= 0 && sampleX < i32(width) && sampleY >= 0 && sampleY < i32(height)) {
@@ -309,6 +310,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Use feature ID directly (no hash needed - layer ID properly encoded)
         let pixelIdx = pixelFid;
         onFeature = (pixelIdx == idx);
+        
+        // Read height from alpha channel if we're on the feature
+        if (onFeature) {
+            surfaceHeight = pixelColor.a * 300.0; // Denormalize: 0-1 → 0-300m
+        }
     }
     
     // If centroid is not on feature, do a grid search to find a valid point
@@ -330,6 +336,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 if (gridIdx == idx) {
                     centerX = f32(gridX);
                     centerY = f32(gridY);
+                    surfaceHeight = gridPixel.a * 300.0; // Read height from alpha channel
                     onFeature = true;
                 }
             }
@@ -345,11 +352,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let clipX = (centerX / width) * 2.0 - 1.0;
     let clipY = (centerY / height) * 2.0 - 1.0;
     
-    // Store marker in clip space (markers will be drawn in screen space)
-    // The vertex shader will apply the isometric offset
-    let buildingHeight = heights[idx];
+    // Store marker in clip space with surface height from alpha channel
+    // This ensures markers appear at the correct elevation (e.g., on building roofs)
     markers[idx].center = vec2<f32>(clipX, clipY);
-    markers[idx].height = buildingHeight;
+    markers[idx].height = surfaceHeight; // Use height from hidden buffer alpha channel
     markers[idx].featureId = idx;
     
     // Set color from feature - use a simple scheme based on feature ID

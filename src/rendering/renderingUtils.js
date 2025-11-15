@@ -176,8 +176,7 @@ export function createComputeMarkerEncoder(
     markerBuffer,
     dimsBuffer,
     canvas,
-    regionsBuffer,
-    heightsBuffer
+    regionsBuffer
 ) {
     if (!window._computeStartLogged) {
         console.log('🎯 Starting marker compute passes...');
@@ -241,8 +240,8 @@ export function createComputeMarkerEncoder(
             { binding: 1, resource: { buffer: quadrantBuffer } },
             { binding: 2, resource: { buffer: markerBuffer } },
             { binding: 3, resource: { buffer: dimsBuffer } },
-            { binding: 4, resource: renderer.textures.hidden.createView() },
-            { binding: 5, resource: { buffer: heightsBuffer } }
+            { binding: 4, resource: renderer.textures.hidden.createView() }
+            // Heights buffer removed - reading height from hiddenTex alpha channel
         ]
     }));
     const workgroupCount3 = Math.ceil(10000 / 64);

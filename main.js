@@ -82,11 +82,7 @@ async function main() {
         createMarkerPipeline
     );
 
-    // Create heights buffer for building extrusions
-    const heightsBuffer = device.createBuffer({
-        size: MAX_FEATURES * 4,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    });
+    // Heights buffer removed - now reading height from hidden texture alpha channel
 
     // ===== Setup Global API =====
     setupGlobalAPI(
@@ -138,17 +134,8 @@ async function main() {
         
         // Render markers and labels at higher zoom levels
         if (camera.zoom >= MIN_ZOOM_FOR_LABELS) {
-            // Build feature names and extract heights
+            // Build feature names (heights now read from alpha channel in compute shader)
             const featureNames = labelManager.buildFeatureNameMap(tileManager.visibleTileBuffers, camera.zoom);
-            
-            // Upload heights to GPU
-            const heightsArray = new Float32Array(MAX_FEATURES);
-            for (const [fid, feature] of featureNames.entries()) {
-                if (fid < MAX_FEATURES) {
-                    heightsArray[fid] = feature.height || 0;
-                }
-            }
-            device.queue.writeBuffer(heightsBuffer, 0, heightsArray);
             
             // Compute marker positions (3-pass GPU compute)
             createComputeMarkerEncoder(
@@ -161,8 +148,7 @@ async function main() {
                 markerResources.markerBuffer,
                 markerResources.dimsBuffer,
                 canvas,
-                markerResources.regionsBuffer,
-                heightsBuffer
+                markerResources.regionsBuffer
             );
             
             // Render markers and labels
