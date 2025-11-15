@@ -43,26 +43,24 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let fid: u32 = u32(pixel.r * 255.0) * 256u + u32(pixel.g * 255.0);
     if (fid == 0u || fid >= 65535u) { return; }
     
-    // Z-height in blue channel: 0 = ground, higher = building roof
-    let pixelZ = pixel.b;
+    // Layer ID from blue channel (0-255) - combine with feature ID via hash
+    let layerId: u32 = u32(pixel.b * 255.0);
     
-    // Accept pixels with any measurable height (building edges/faces)
-    // and flat features (ground level)
-    let hasHeight = pixelZ > 0.001;
-    let isFlatFeature = pixelZ <= 0.001;
+    // Hash function: combine layerId and fid to get unique index within 65535 space
+    // XOR provides good distribution, modulo wraps to valid range
+    let idx: u32 = ((layerId * 257u) ^ fid) % 65535u;
+    if (idx == 0u) { return; } // Skip background
     
-    if (hasHeight || isFlatFeature) {
-        let x = gid.x;
-        let y = gid.y;
-        
-        atomicAdd(&accumulators[fid].count, 1u);
-        atomicAdd(&accumulators[fid].sumX, x);
-        atomicAdd(&accumulators[fid].sumY, y);
-        atomicMin(&accumulators[fid].minX, x);
-        atomicMin(&accumulators[fid].minY, y);
-        atomicMax(&accumulators[fid].maxX, x);
-        atomicMax(&accumulators[fid].maxY, y);
-    }
+    let x = gid.x;
+    let y = gid.y;
+    
+    atomicAdd(&accumulators[idx].count, 1u);
+    atomicAdd(&accumulators[idx].sumX, x);
+    atomicAdd(&accumulators[idx].sumY, y);
+    atomicMin(&accumulators[idx].minX, x);
+    atomicMin(&accumulators[idx].minY, y);
+    atomicMax(&accumulators[idx].maxX, x);
+    atomicMax(&accumulators[idx].maxY, y);
 }
 `;
 
@@ -118,32 +116,29 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let fid: u32 = u32(pixel.r * 255.0) * 256u + u32(pixel.g * 255.0);
     if (fid == 0u || fid >= 65535u) { return; }
     
-    // Z-height in blue channel: 0 = ground, higher = building roof
-    let pixelZ = pixel.b;
+    // Layer ID from blue channel (0-255) - combine with feature ID via hash
+    let layerId: u32 = u32(pixel.b * 255.0);
     
-    // Accept pixels with any measurable height (building edges/faces)
-    // and flat features (ground level) - same filter as Pass 1
-    let hasHeight = pixelZ > 0.001;
-    let isFlatFeature = pixelZ <= 0.001;
-    
-    if (!hasHeight && !isFlatFeature) { return; }
+    // Hash function: combine layerId and fid to get unique index within 65535 space
+    let idx: u32 = ((layerId * 257u) ^ fid) % 65535u;
+    if (idx == 0u) { return; } // Skip background
     
     let x = gid.x;
     let y = gid.y;
     
     // Get STABLE centroid from pass 1
-    let count = atomicLoad(&accumulators[fid].count);
+    let count = atomicLoad(&accumulators[idx].count);
     if (count == 0u) { return; }
     
-    let sumX = atomicLoad(&accumulators[fid].sumX);
-    let sumY = atomicLoad(&accumulators[fid].sumY);
+    let sumX = atomicLoad(&accumulators[idx].sumX);
+    let sumY = atomicLoad(&accumulators[idx].sumY);
     let centerX = f32(sumX) / f32(count);
     let centerY = f32(sumY) / f32(count);
     
     // Always accumulate in center
-    atomicAdd(&quadrants[fid].center.count, 1u);
-    atomicAdd(&quadrants[fid].center.sumX, x);
-    atomicAdd(&quadrants[fid].center.sumY, y);
+    atomicAdd(&quadrants[idx].center.count, 1u);
+    atomicAdd(&quadrants[idx].center.sumX, x);
+    atomicAdd(&quadrants[idx].center.sumY, y);
     
     // Now use stable centroid to determine quadrants
     // Quadrant naming = GEOGRAPHIC position (top=north, bottom=south, left=west, right=east)
@@ -155,46 +150,46 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     
     // Accumulate into directional quadrants
     if (inTop && inLeft) {
-        atomicAdd(&quadrants[fid].topLeft.count, 1u);
-        atomicAdd(&quadrants[fid].topLeft.sumX, x);
-        atomicAdd(&quadrants[fid].topLeft.sumY, y);
+        atomicAdd(&quadrants[idx].topLeft.count, 1u);
+        atomicAdd(&quadrants[idx].topLeft.sumX, x);
+        atomicAdd(&quadrants[idx].topLeft.sumY, y);
     }
     if (inTop && inRight) {
-        atomicAdd(&quadrants[fid].topRight.count, 1u);
-        atomicAdd(&quadrants[fid].topRight.sumX, x);
-        atomicAdd(&quadrants[fid].topRight.sumY, y);
+        atomicAdd(&quadrants[idx].topRight.count, 1u);
+        atomicAdd(&quadrants[idx].topRight.sumX, x);
+        atomicAdd(&quadrants[idx].topRight.sumY, y);
     }
     if (inBottom && inLeft) {
-        atomicAdd(&quadrants[fid].bottomLeft.count, 1u);
-        atomicAdd(&quadrants[fid].bottomLeft.sumX, x);
-        atomicAdd(&quadrants[fid].bottomLeft.sumY, y);
+        atomicAdd(&quadrants[idx].bottomLeft.count, 1u);
+        atomicAdd(&quadrants[idx].bottomLeft.sumX, x);
+        atomicAdd(&quadrants[idx].bottomLeft.sumY, y);
     }
     if (inBottom && inRight) {
-        atomicAdd(&quadrants[fid].bottomRight.count, 1u);
-        atomicAdd(&quadrants[fid].bottomRight.sumX, x);
-        atomicAdd(&quadrants[fid].bottomRight.sumY, y);
+        atomicAdd(&quadrants[idx].bottomRight.count, 1u);
+        atomicAdd(&quadrants[idx].bottomRight.sumX, x);
+        atomicAdd(&quadrants[idx].bottomRight.sumY, y);
     }
     
     // Edge midpoints
     if (inTop) {
-        atomicAdd(&quadrants[fid].top.count, 1u);
-        atomicAdd(&quadrants[fid].top.sumX, x);
-        atomicAdd(&quadrants[fid].top.sumY, y);
+        atomicAdd(&quadrants[idx].top.count, 1u);
+        atomicAdd(&quadrants[idx].top.sumX, x);
+        atomicAdd(&quadrants[idx].top.sumY, y);
     }
     if (inBottom) {
-        atomicAdd(&quadrants[fid].bottom.count, 1u);
-        atomicAdd(&quadrants[fid].bottom.sumX, x);
-        atomicAdd(&quadrants[fid].bottom.sumY, y);
+        atomicAdd(&quadrants[idx].bottom.count, 1u);
+        atomicAdd(&quadrants[idx].bottom.sumX, x);
+        atomicAdd(&quadrants[idx].bottom.sumY, y);
     }
     if (inLeft) {
-        atomicAdd(&quadrants[fid].left.count, 1u);
-        atomicAdd(&quadrants[fid].left.sumX, x);
-        atomicAdd(&quadrants[fid].left.sumY, y);
+        atomicAdd(&quadrants[idx].left.count, 1u);
+        atomicAdd(&quadrants[idx].left.sumX, x);
+        atomicAdd(&quadrants[idx].left.sumY, y);
     }
     if (inRight) {
-        atomicAdd(&quadrants[fid].right.count, 1u);
-        atomicAdd(&quadrants[fid].right.sumX, x);
-        atomicAdd(&quadrants[fid].right.sumY, y);
+        atomicAdd(&quadrants[idx].right.count, 1u);
+        atomicAdd(&quadrants[idx].right.sumX, x);
+        atomicAdd(&quadrants[idx].right.sumY, y);
     }
 }
 `;
@@ -265,7 +260,8 @@ fn calculateCentroid(quad: ptr<storage, QuadrantData, read_write>) -> vec2<f32> 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let idx: u32 = gid.x;
-    if (idx >= 65535u) { return; } // Match feature ID limit
+    let maxSlots: u32 = 256u * 65535u; // 256 layers × 65535 features
+    if (idx >= maxSlots) { return; }
     
     // Initialize marker with default values
     markers[idx].center = vec2<f32>(0.0, 0.0);
@@ -275,7 +271,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     markers[idx].featureId = idx;
     markers[idx].padding2 = 0u;
     
-    // Skip background
+    // Skip background (layer 0, feature 0)
     if (idx == 0u) { return; }
     
     // Get pixel count for this feature
@@ -308,8 +304,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (sampleX >= 0 && sampleX < i32(width) && sampleY >= 0 && sampleY < i32(height)) {
         let pixelColor = textureLoad(hiddenTex, vec2<i32>(sampleX, sampleY), 0);
         // Decode 16-bit feature ID from red+green channels
-        let pixelId = u32(pixelColor.r * 255.0) * 256u + u32(pixelColor.g * 255.0);
-        onFeature = (pixelId == idx);
+        let pixelFid = u32(pixelColor.r * 255.0) * 256u + u32(pixelColor.g * 255.0);
+        // Decode layer ID from blue channel
+        let pixelLayerId = u32(pixelColor.b * 255.0);
+        // Reconstruct combined index using same hash function as Pass 1 & 2
+        let pixelIdx = ((pixelLayerId * 257u) ^ pixelFid) % 65535u;
+        onFeature = (pixelIdx == idx);
     }
     
     // If centroid is not on feature, do a grid search to find a valid point
@@ -324,9 +324,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let gridY = gy * stepSizeY + stepSizeY / 2;
                 
                 let gridPixel = textureLoad(hiddenTex, vec2<i32>(gridX, gridY), 0);
-                let gridId = u32(gridPixel.r * 255.0) * 256u + u32(gridPixel.g * 255.0);
+                let gridFid = u32(gridPixel.r * 255.0) * 256u + u32(gridPixel.g * 255.0);
+                let gridLayerId = u32(gridPixel.b * 255.0);
+                let gridIdx = ((gridLayerId * 257u) ^ gridFid) % 65535u;
                 
-                if (gridId == idx) {
+                if (gridIdx == idx) {
                     centerX = f32(gridX);
                     centerY = f32(gridY);
                     onFeature = true;

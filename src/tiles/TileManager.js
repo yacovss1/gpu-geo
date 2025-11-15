@@ -9,9 +9,7 @@
  * - Handle zoom level changes
  */
 
-import { fetchVectorTile, clearTileCache, resetNotFoundTiles } from './geojson.js';
-import { batchParseGeoJSONFeaturesGPU } from './geojsonGPU.js';
-import { parseGeoJSONFeature } from './geojson.js';
+import { fetchVectorTile, clearTileCache, resetNotFoundTiles, parseGeoJSONFeature } from './geojson.js';
 import { getVisibleTiles } from './tile-utils.js';
 
 export class TileManager {
@@ -136,7 +134,7 @@ export class TileManager {
                 
                 if (abortSignal?.aborted || !vectorTile?.layers) return;
                 
-                // Parse features (GPU or CPU based on performanceStats.gpuEnabled)
+                // Parse features with pre-transformed coordinates from vectorTileParser
                 const parsedFeatures = await this.parseVectorTile(vectorTile, x, y, z);
                 
                 if (abortSignal?.aborted) return;
@@ -162,7 +160,8 @@ export class TileManager {
     }
     
     /**
-     * Parse vector tile into features
+     * Parse vector tile into features using DIRECT coordinate transform
+     * No toGeoJSON(), no GPU roundtrip - just pure CPU tile→Mercator transform
      */
     async parseVectorTile(vectorTile, x, y, z) {
         const parsedFeatures = [];
@@ -172,46 +171,14 @@ export class TileManager {
         const currentStyle = getStyle();
         const sourceId = currentStyle ? Object.keys(currentStyle.sources)[0] : null;
         
-        if (this.performanceStats.gpuEnabled) {
-            // GPU path - process all layers together
-            const features = [];
-            for (const layerName in vectorTile.layers) {
-                const layer = vectorTile.layers[layerName];
-                for (let i = 0; i < layer.length; i++) {
-                    const rawFeature = layer.feature(i);
-                    const feature = rawFeature.toGeoJSON(x, y, z);
-                    // Set layer name for style matching
-                    feature.layer = { name: layerName };
-                    features.push(feature);
-                }
-            }
-            
-            // batchParseGeoJSONFeaturesGPU(features, device, fillColor, sourceId, zoom, tileX, tileY, tileZ)
-            const result = await batchParseGeoJSONFeaturesGPU(
-                features,
-                this.device,
-                [0.0, 0.0, 0.0, 1.0], // fillColor
-                sourceId,
-                z,    // zoom
-                x,    // tileX
-                y,    // tileY
-                z     // tileZ
-            );
-            
-            parsedFeatures.push(...result);
-            
-        } else {
-            // CPU fallback
-            for (const layerName in vectorTile.layers) {
-                const layer = vectorTile.layers[layerName];
-                for (let i = 0; i < layer.length; i++) {
-                    const rawFeature = layer.feature(i);
-                    const feature = rawFeature.toGeoJSON(x, y, z);
-                    feature.layer = { name: layerName };
-                    const parsed = parseGeoJSONFeature(feature, [0.0, 0.0, 0.0, 1.0], sourceId, z);
-                    if (parsed) {
-                        parsedFeatures.push(parsed);
-                    }
+        // Parse all features with pre-transformed coordinates from vectorTileParser
+        // Coordinates are already in Mercator clip space - no GPU roundtrip needed
+        for (const layerName in vectorTile.layers) {
+            const layer = vectorTile.layers[layerName];
+            for (const feature of layer.features) {
+                const parsed = parseGeoJSONFeature(feature, [0.0, 0.0, 0.0, 1.0], sourceId, z);
+                if (parsed) {
+                    parsedFeatures.push(parsed);
                 }
             }
         }

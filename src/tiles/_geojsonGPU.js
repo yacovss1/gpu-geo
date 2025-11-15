@@ -1,9 +1,10 @@
-// GPU-Accelerated GeoJSON Parser
-// This file provides enhanced parsing functions that use GPU compute shaders for coordinate transformation
+// GeoJSON Parser with Pre-Transformed Coordinates
+// This file processes GeoJSON features that already have Mercator-transformed coordinates
+// from vectorTileParser.js - no GPU roundtrip needed!
 
 import { hexToRgb } from '../core/utils.js';
 import { getColorOfCountries } from '../core/utils.js';
-import { getGlobalCoordinateTransformer } from '../core/coordinateGPU.js';
+// GPU coordinate transformer removed - coordinates come pre-transformed!
 import earcut from 'earcut';
 import { tessellateLine, screenWidthToWorld } from './line-tessellation-simple.js';
 import { 
@@ -15,7 +16,7 @@ import {
     getLayersBySource
 } from '../core/style.js';
 
-// Enhanced parseGeoJSONFeature that uses GPU coordinate transformation
+// Parse GeoJSON feature with PRE-TRANSFORMED coordinates (no GPU transform needed!)
 export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 0.0, 0.0, 1.0], sourceId = null, zoom = 0) {
     const fillVertices = [];
     const hiddenVertices = [];
@@ -114,37 +115,19 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
         return rawId;
     };
 
-    // Get GPU coordinate transformer
-    const transformer = getGlobalCoordinateTransformer(device);
-    await transformer.initialize();
-
-    // Extract all coordinates from the feature geometry
-    const allCoordinates = transformer.extractCoordinatesFromGeometry(feature.geometry);
+    // NEW: Coordinates are already transformed by vectorTileParser!
+    // No GPU roundtrip, no coordMap - coordinates come pre-transformed in Mercator clip space
+    // feature.geometry.coordinates are ready to use directly
     
-    // Transform all coordinates in a single GPU batch operation
-    let transformedCoords = [];
-    if (allCoordinates.length > 0) {
-        transformedCoords = await transformer.transformCoordinates(allCoordinates);
-    }
+    // Helper function - coordinates are already in correct format [x, y]
+    // Just extract them directly from the geometry
+    const getCoord = (coord) => coord; // Identity function - coords already transformed!
 
-    // Create a mapping from original coordinates to transformed coordinates
-    const coordMap = new Map();
-    allCoordinates.forEach((originalCoord, index) => {
-        const key = `${originalCoord[0]},${originalCoord[1]}`;
-        coordMap.set(key, transformedCoords[index]);
-    });
-
-    // Helper function to get transformed coordinate
-    const getTransformedCoord = (coord) => {
-        const key = `${coord[0]},${coord[1]}`;
-        return coordMap.get(key) || [0, 0]; // Fallback to origin if not found
-    };
-
-    // Create vertex arrays using transformed coordinates
+    // Create vertex arrays using pre-transformed coordinates
     const coordsToVertices = (coords, color, targetArray) => {
         const vertexStartIndex = targetArray.length / 7;
         coords.forEach(coord => {
-            const [x, y] = getTransformedCoord(coord);
+            const [x, y] = coord; // Coordinates already in Mercator clip space!
             targetArray.push(
                 x, y, 0.0, // Position (z=0 for flat map)
                 ...color   // Color
@@ -175,7 +158,7 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
         const normalizedB = layerIdNum / 255.0;
         
         coords.forEach(coord => {
-            const [x, y] = getTransformedCoord(coord);
+            const [x, y] = coord; // Coordinates already transformed!
             targetArray.push(
                 x, y, 0.0,        // Position (z=0 for flat map)
                 normalizedR, normalizedG, normalizedB, 1.0  // R+G=ID, B=layerID, A=1.0
@@ -204,8 +187,8 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
         for (let i = 0; i < outerRing.length - 1; i++) {
             const p1 = outerRing[i];
             const p2 = outerRing[i + 1];
-            const [x1, y1] = getTransformedCoord(p1);
-            const [x2, y2] = getTransformedCoord(p2);
+            const [x1, y1] = p1; // Coordinates already transformed!
+            const [x2, y2] = p2;
             
             const baseIdx = vertices.length / 7;
             
@@ -226,7 +209,7 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
         const transformedRoofCoords = [];
         
         outerRing.forEach(coord => {
-            const [x, y] = getTransformedCoord(coord);
+            const [x, y] = coord;
             flatCoords.push(x, y);  // Use transformed coords for earcut
             transformedRoofCoords.push([x, y]);
         });
@@ -291,7 +274,7 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
                 
                 // Add outer ring with transformed coords
                 outerRing.forEach(coord => {
-                    const [x, y] = getTransformedCoord(coord);
+                    const [x, y] = coord;
                     flatCoords.push(x, y);
                 });
                 
@@ -307,7 +290,7 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
                 holes.forEach(hole => {
                     holeIndices.push(flatCoords.length / 2);
                     hole.forEach(coord => {
-                        const [x, y] = getTransformedCoord(coord);
+                        const [x, y] = coord;
                         flatCoords.push(x, y);
                     });
                 });
@@ -455,7 +438,7 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
             }
             
             // Transform coordinates to screen space
-            const transformedLineCoords = feature.geometry.coordinates.map(coord => getTransformedCoord(coord));
+            const transformedLineCoords = feature.geometry.coordinates.map(coord => coord);
             
             // Convert line width from pixels to world space
             const worldWidth = screenWidthToWorld(lineWidth, zoom, 512);
@@ -508,7 +491,7 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
             
             feature.geometry.coordinates.forEach(line => {
                 // Transform coordinates to screen space
-                const transformedLineCoords = line.map(coord => getTransformedCoord(coord));
+                const transformedLineCoords = line.map(coord => coord);
                 
                 // Convert line width from pixels to world space
                 const worldWidth = screenWidthToWorld(multiLineWidth, zoom, 512);
@@ -535,7 +518,7 @@ export async function parseGeoJSONFeatureGPU(feature, device, fillColor = [0.0, 
             break;
             
         case 'Point':
-            const transformedPoint = getTransformedCoord(feature.geometry.coordinates);
+            const transformedPoint = feature.geometry.coordinates;
             fillVertices.push(transformedPoint[0], transformedPoint[1], 0.0, ..._fillColor);
             break;
             
@@ -854,7 +837,7 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
     const coordsToVertices = (coords, color, targetArray) => {
         const vertexStartIndex = targetArray.length / 7;
         coords.forEach(coord => {
-            const [x, y] = getTransformedCoord(coord);
+            const [x, y] = coord;
             targetArray.push(x, y, 0.0, ...color);
         });
         return vertexStartIndex;
@@ -876,7 +859,7 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
         const normalizedB = Math.min(1.0, heightToEncode / 0.07); // Normalize to 0-1 range
         
         coords.forEach(coord => {
-            const [x, y] = getTransformedCoord(coord);
+            const [x, y] = coord;
             targetArray.push(x, y, zPosition, normalizedR, normalizedG, normalizedB, 1.0);
         });
         return vertexStartIndex;
@@ -897,8 +880,8 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
         for (let i = 0; i < outerRing.length - 1; i++) {
             const p1 = outerRing[i];
             const p2 = outerRing[i + 1];
-            const [x1, y1] = getTransformedCoord(p1);
-            const [x2, y2] = getTransformedCoord(p2);
+            const [x1, y1] = p1;
+            const [x2, y2] = p2;
             
             // Calculate wall direction for directional lighting
             const dx = x2 - x1;
@@ -938,8 +921,8 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
             for (let i = 0; i < hole.length - 1; i++) {
                 const p1 = hole[i];
                 const p2 = hole[i + 1];
-                const [x1, y1] = getTransformedCoord(p1);
-                const [x2, y2] = getTransformedCoord(p2);
+                const [x1, y1] = p1;
+                const [x2, y2] = p2;
                 
                 const dx = x2 - x1;
                 const dy = y2 - y1;
@@ -974,7 +957,7 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
         const roofVertices = [];
         
         outerRing.forEach(coord => {
-            const [x, y] = getTransformedCoord(coord);
+            const [x, y] = coord;
             flatCoords.push(x, y);  // Use transformed coords for earcut
             roofVertices.push([x, y]);
         });
@@ -983,7 +966,7 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
         holes.forEach(hole => {
             holeIndices.push(flatCoords.length / 2);
             hole.forEach(coord => {
-                const [x, y] = getTransformedCoord(coord);
+                const [x, y] = coord;
                 flatCoords.push(x, y);  // Use transformed coords for earcut
                 roofVertices.push([x, y]);
             });
@@ -1042,7 +1025,7 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
                     const miterLimit = layer.layout?.['line-miter-limit'] || 2;
                     
                     // Transform coordinates first, then tessellate
-                    const transformedRing = ring.map(coord => getTransformedCoord(coord));
+                    const transformedRing = ring.map(coord => coord);
                     
                     // Tessellate the transformed ring as a line
                     const lineTessellation = tessellateLine(transformedRing, lineWidth, lineCap, lineJoin, miterLimit);
@@ -1109,14 +1092,14 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
                 
                 // Use TRANSFORMED coordinates for earcut (clip space, not raw lon/lat)
                 outerRing.forEach(coord => {
-                    const [x, y] = getTransformedCoord(coord);
+                    const [x, y] = coord;
                     flatCoords.push(x, y);
                 });
                 
                 holes.forEach(hole => {
                     holeIndices.push(flatCoords.length / 2);
                     hole.forEach(coord => {
-                        const [x, y] = getTransformedCoord(coord);
+                        const [x, y] = coord;
                         flatCoords.push(x, y);
                     });
                 });
@@ -1154,7 +1137,7 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
                         const miterLimit = layer.layout?.['line-miter-limit'] || 2;
                         
                         // Transform coordinates first, then tessellate
-                        const transformedRing = ring.map(coord => getTransformedCoord(coord));
+                        const transformedRing = ring.map(coord => coord);
                         
                         // Tessellate the transformed ring as a line
                         const lineTessellation = tessellateLine(transformedRing, lineWidth, lineCap, lineJoin, miterLimit);
@@ -1209,14 +1192,14 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
                     
                     // Use TRANSFORMED coordinates for earcut (clip space, not raw lon/lat)
                     outerRing.forEach(coord => {
-                        const [x, y] = getTransformedCoord(coord);
+                        const [x, y] = coord;
                         flatCoords.push(x, y);
                     });
                     
                     holes.forEach(hole => {
                         holeIndices.push(flatCoords.length / 2);
                         hole.forEach(coord => {
-                            const [x, y] = getTransformedCoord(coord);
+                            const [x, y] = coord;
                             flatCoords.push(x, y);
                         });
                     });
@@ -1257,7 +1240,7 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
             }
             
             // Transform coordinates to screen space
-            const transformedLineCoords2 = feature.geometry.coordinates.map(coord => getTransformedCoord(coord));
+            const transformedLineCoords2 = feature.geometry.coordinates.map(coord => coord);
             
             // Convert line width from pixels to world space
             const worldWidth2 = screenWidthToWorld(lineWidth2, zoom, 512);
@@ -1302,7 +1285,7 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
             
             feature.geometry.coordinates.forEach(line => {
                 // Transform coordinates to screen space
-                const transformedLineCoords3 = line.map(coord => getTransformedCoord(coord));
+                const transformedLineCoords3 = line.map(coord => coord);
                 
                 // Convert line width from pixels to world space
                 const worldWidth3 = screenWidthToWorld(multiLineWidth2, zoom, 512);
@@ -1329,7 +1312,7 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
             break;
             
         case 'Point':
-            const transformedPoint = getTransformedCoord(feature.geometry.coordinates);
+            const transformedPoint = feature.geometry.coordinates;
             fillVertices.push(transformedPoint[0], transformedPoint[1], 0.0, ..._fillColor);
             break;
             
@@ -1358,6 +1341,7 @@ async function parseFeatureWithTransformedCoords(feature, getTransformedCoord, f
         }
     };
 }
+
 
 
 

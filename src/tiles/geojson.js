@@ -4,6 +4,8 @@ import { VectorTile } from '@mapbox/vector-tile';
 import earcut from 'earcut';
 import { getColorOfCountries } from '../core/utils.js';
 import { TileCache } from './tileCache.js';
+import { parseVectorTile as parseVectorTileDirect } from './vectorTileParser.js';
+import { tessellateLine, screenWidthToWorld } from './line-tessellation-simple.js';
 import { 
     getStyle, 
     getFeatureId as getStyleFeatureId, 
@@ -48,11 +50,32 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
     const style = getStyle();
     let _fillColor = fillColor;
     let _borderColor = [0.0, 0.0, 0.0, 1.0];
+    let layerId = feature.layer?.name || 'unknown'; // Default layerId
 
     // Track extrusion properties
     let extrusionHeight = 0;
     let extrusionBase = 0;
     let isExtruded = false;
+
+    // CRITICAL: Calculate zoom-dependent scale for extrusions
+    // Buildings need to be visible but proportional to their footprint
+    // 
+    // At zoom Z, the entire world (360° longitude) fits in 2 clip units
+    // Each tile represents (360 / 2^Z) degrees
+    // In clip space, each tile = (2 / 2^Z) clip units = 2^(1-Z) clip units
+    // 
+    // For extrusion height to be proportional:
+    // - At zoom 14, tile = 2^(-13) ≈ 0.000122 clip units wide
+    // - A 5m building on a 20m×20m footprint should be 25% of footprint height
+    // - So 5m should map to roughly 0.25 * (footprint_size_in_clip_space)
+    // 
+    // Simpler approach: Scale extrusion by (2^-zoom) to match tile size
+    // Then apply a constant multiplier for visual appeal
+    const tileScaleInClipSpace = Math.pow(2, 1 - zoom); // Size of one tile in clip units
+    const metersPerTile = 40075000 / Math.pow(2, zoom); // Meters covered by one tile
+    const metersToClipSpace = tileScaleInClipSpace / metersPerTile;
+    const visualExaggeration = 3; // Make buildings 3x taller for visibility
+    const zoomExtrusion = metersToClipSpace * visualExaggeration;
 
     if (style && sourceId) {
         // Get layers for this source
@@ -73,12 +96,14 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
         const fillLayer = layers.find(l => 
             l.type === 'fill' && 
             (!l['source-layer'] || l['source-layer'] === feature.layer?.name) &&
-            l.layout?.visibility !== 'none'
+            l.layout?.visibility !== 'none' &&
+            (!l.filter || evaluateFilter(l.filter, feature, zoom))
         );
         const lineLayer = layers.find(l => 
             l.type === 'line' && 
             (!l['source-layer'] || l['source-layer'] === feature.layer?.name) &&
-            l.layout?.visibility !== 'none'
+            l.layout?.visibility !== 'none' &&
+            (!l.filter || evaluateFilter(l.filter, feature, zoom))
         );
 
         // Prefer fill-extrusion over fill, then line
@@ -89,22 +114,25 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
             return null;
         }
         
+        // Store the active layer ID
+        layerId = activeLayer.id;
+        
         // Handle fill-extrusion properties
         if (extrusionLayer) {
-            isExtruded = true;
             const heightValue = getPaintProperty(extrusionLayer.id, 'fill-extrusion-height', feature, zoom);
             const baseValue = getPaintProperty(extrusionLayer.id, 'fill-extrusion-base', feature, zoom);
             
             extrusionHeight = heightValue !== undefined ? heightValue : 0;
             extrusionBase = baseValue !== undefined ? baseValue : 0;
             
-            console.log(`📐 Extrusion props: height=${extrusionHeight}m, base=${extrusionBase}m, layer="${extrusionLayer.id}"`);
+            // Only mark as extruded if height is actually > 0
+            if (extrusionHeight > 0) {
+                isExtruded = true;
+                console.log(`📐 Extrusion props: height=${extrusionHeight}m, base=${extrusionBase}m, layer="${extrusionLayer.id}", feature source-layer="${feature.layer?.name}"`);
+            }
         }
 
-        // Apply filter if layer has one
-        if (activeLayer && activeLayer.filter && !evaluateFilter(activeLayer.filter, feature, zoom)) {
-            return null; // Feature filtered out
-        }
+        // Note: Filter already checked during layer finding, no need to check again
 
         // Get paint properties from style based on layer type
         if (fillLayer || extrusionLayer) {
@@ -152,32 +180,38 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
     const generateExtrusion = (allCoords, outerRing, height, base, fillColor, targetVertices, targetIndices, targetOutlineIndices) => {
         const startIndex = targetVertices.length / 7;
         
-        // Convert height from meters to clip space
-        // Make buildings clearly visible with exaggerated height
-        // With orthographic projection and near/far of ±0.1, we have 0.2 units Z depth
-        // Scale so 15m building = ~0.01 units (10% of available Z range)
-        const heightZ = height * 0.0007; // 15m = 0.0105 clip units
-        const baseZ = base * 0.0007;
+        // Use zoom-dependent scaling passed from parent scope
+        const heightZ = height * zoomExtrusion;
+        const baseZ = base * zoomExtrusion;
         
-        console.log(`Building extrusion: ${height}m -> Z=${heightZ.toFixed(5)}`);
-        
-        // Create darker color for walls
-        const wallColor = [
-            fillColor[0] * 0.7,
-            fillColor[1] * 0.7,
-            fillColor[2] * 0.7,
-            fillColor[3]
-        ];
-        
-        // Black color for outlines
-        const outlineColor = [0.0, 0.0, 0.0, 1.0];
+        console.log(`Building extrusion at zoom ${zoom}: ${height}m -> Z=${heightZ.toFixed(8)}`);
         
         // Generate wall quads for each edge of outer ring only
         for (let i = 0; i < outerRing.length - 1; i++) {
             const curr = outerRing[i];
             const next = outerRing[i + 1];
-            const [x1, y1] = mercatorToClipSpace(curr);
-            const [x2, y2] = mercatorToClipSpace(next);
+            const [x1, y1] = curr; // Coordinates already transformed!
+            const [x2, y2] = next;
+            
+            // Calculate wall direction for directional lighting
+            const dx = x2 - x1;
+            const dy = y2 - y1;
+            const angle = Math.atan2(dy, dx);
+            
+            // Simulate sun from north-west
+            const sunAngle = Math.PI * 0.75;
+            const lightDot = Math.cos(angle - sunAngle);
+            
+            // Moderate lighting contrast (range 0.0 to 0.8)
+            const lightFactor = 0.4 + lightDot * 0.4;
+            
+            // Wall color with directional lighting
+            const wallColor = [
+                fillColor[0] * lightFactor,
+                fillColor[1] * lightFactor,
+                fillColor[2] * lightFactor,
+                fillColor[3]
+            ];
             
             // Wall quad vertices (2 triangles = 6 vertices for quad)
             const vertexOffset = (targetVertices.length / 7);
@@ -193,38 +227,24 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                 vertexOffset, vertexOffset + 1, vertexOffset + 2,  // Triangle 1
                 vertexOffset, vertexOffset + 2, vertexOffset + 3   // Triangle 2
             );
-            
-            // Add outline edges for this wall (vertical edges only, horizontal done by roof outline)
-            // Left edge (bottom to top)
-            targetOutlineIndices.push(vertexOffset, vertexOffset + 3);
-            // Right edge (bottom to top)  
-            targetOutlineIndices.push(vertexOffset + 1, vertexOffset + 2);
         }
         
         // Generate roof (top polygon at height) - use ALL coords including holes
         const roofStartIndex = targetVertices.length / 7;
         allCoords.forEach(coord => {
-            const [x, y] = mercatorToClipSpace(coord);
+            const [x, y] = coord; // Coordinates already transformed!
             targetVertices.push(x, y, heightZ, ...fillColor);
         });
-        
-        // Add roof outline (outer ring at roof height)
-        for (let i = 0; i < outerRing.length - 1; i++) {
-            targetOutlineIndices.push(roofStartIndex + i, roofStartIndex + i + 1);
-        }
-        // Close the roof outline
-        if (outerRing.length > 0) {
-            targetOutlineIndices.push(roofStartIndex + outerRing.length - 1, roofStartIndex);
-        }
         
         return roofStartIndex;
     };
 
     // Create two separate vertex arrays for visible and hidden rendering
+    // NOTE: Coordinates are PRE-TRANSFORMED by vectorTileParser - use directly!
     const coordsToVertices = (coords, color, targetArray) => {
         const vertexStartIndex = targetArray.length / 7;
         coords.forEach(coord => {
-            const [x, y] = mercatorToClipSpace(coord);
+            const [x, y] = coord; // Coordinates already in Mercator clip space!
             targetArray.push(
                 x, y, 0.0, // Position (z=0 for flat map)
                 ...color   // Color
@@ -233,7 +253,7 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
         return vertexStartIndex;
     };
 
-    // Modify this function to ensure feature IDs are correctly stored in vertices
+    // NOTE: Coordinates are PRE-TRANSFORMED - use directly!
     const coordsToIdVertices = (coords, featureId, targetArray, zHeight = 0.0) => {
         const vertexStartIndex = targetArray.length / 7;
         
@@ -246,7 +266,7 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
         const normalizedG = lowByte / 255.0;
         
         coords.forEach(coord => {
-            const [x, y] = mercatorToClipSpace(coord);
+            const [x, y] = coord; // Coordinates already in Mercator clip space!
             targetArray.push(
                 x, y, zHeight,    // Position with optional Z height
                 normalizedR, normalizedG, 0.0, 1.0  // 16-bit ID in R+G channels
@@ -300,21 +320,23 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
 
             // Check if this is an extruded building
             if (isExtruded && extrusionHeight > 0) {
-                console.log(`🏢 EXTRUSION: ${extrusionHeight}m for feature ${clampedFeatureId}, vertices before:`, fillVertices.length);
+                console.log(`🏢 EXTRUSION: ${extrusionHeight}m for feature ${clampedFeatureId}`);
+                console.log(`  Outer ring coords sample:`, outerRing.slice(0, 3));
+                console.log(`  Vertices before:`, fillVertices.length / 7, 'indices before:', fillIndices.length);
                 
                 // Generate 3D building geometry (walls + roof)
                 const roofStartIndex = generateExtrusion(
                     allCoords,
                     outerRing, 
                     extrusionHeight, 
-                    extrusionBase, 
+                    extrusionBase, // No offset - let depth testing handle it
                     _fillColor, 
                     fillVertices, 
                     fillIndices,
-                    outlineIndices  // Pass outline array to generate 3D edges
+                    [] // Don't generate outline indices for buildings - causes visual artifacts
                 );
                 
-                console.log('vertices after:', fillVertices.length);
+                console.log(`  Vertices after:`, fillVertices.length / 7, 'indices after:', fillIndices.length);
                 // Triangulate the roof
                 triangles.forEach(index => {
                     fillIndices.push(roofStartIndex + index);
@@ -451,23 +473,120 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
         case 'LineString':
             isFilled = false;
             isLine = true;
-            const lineStartIndex = coordsToVertices(feature.geometry.coordinates, _borderColor, fillVertices);
-            for (let i = 0; i < feature.geometry.coordinates.length - 1; i++) {
-                outlineIndices.push(lineStartIndex + i, lineStartIndex + i + 1);
+            
+            // Get line width and style properties
+            let lineWidth = 1;
+            let lineCap = 'round';
+            let lineJoin = 'round';
+            let miterLimit = 2;
+            
+            if (style && sourceId) {
+                const layers = getLayersBySource(sourceId);
+                const lineLayer = layers.find(l => 
+                    l.type === 'line' && 
+                    (!l['source-layer'] || l['source-layer'] === feature.layer?.name) &&
+                    l.layout?.visibility !== 'none'
+                );
+                
+                if (!lineLayer) {
+                    // Road not matching any visible line layer - log for debugging
+                    if (feature.layer?.name === 'transportation') {
+                        console.log(`⚠️ LineString in 'transportation' not matching any layer. Properties:`, feature.properties, `zoom: ${zoom}`);
+                    }
+                }
+                
+                if (lineLayer) {
+                    const widthValue = getPaintProperty(lineLayer.id, 'line-width', feature, zoom);
+                    lineWidth = typeof widthValue === 'number' ? widthValue : 1;
+                    lineCap = lineLayer.layout?.['line-cap'] || 'round';
+                    lineJoin = lineLayer.layout?.['line-join'] || 'round';
+                    miterLimit = lineLayer.layout?.['line-miter-limit'] || 2;
+                }
             }
+            
+            // Coordinates are already transformed - use directly
+            const transformedLineCoords = feature.geometry.coordinates;
+            
+            // Convert line width from pixels to world space
+            const worldWidth = screenWidthToWorld(lineWidth, zoom, 512);
+            
+            // Tessellate line into triangles
+            const tessellated = tessellateLine(transformedLineCoords, worldWidth, lineCap, lineJoin, miterLimit);
+            
+            // Add tessellated vertices and indices
+            const lineStartIndex = fillVertices.length / 7;
+            for (let i = 0; i < tessellated.vertices.length; i += 2) {
+                fillVertices.push(
+                    tessellated.vertices[i],     // x
+                    tessellated.vertices[i + 1], // y
+                    0.0,                          // z
+                    ..._borderColor               // color
+                );
+            }
+            
+            // Add triangle indices (lines render as filled triangles)
+            tessellated.indices.forEach(idx => {
+                fillIndices.push(lineStartIndex + idx);
+            });
             break;
         case 'MultiLineString':
             isFilled = false;
             isLine = true;
-            feature.geometry.coordinates.forEach(line => {
-                const lineStartIndex = coordsToVertices(line, _borderColor, fillVertices);
-                for (let i = 0; i < line.length - 1; i++) {
-                    outlineIndices.push(lineStartIndex + i, lineStartIndex + i + 1);
+            
+            console.log(`🛣️ MultiLineString with ${feature.geometry.coordinates.length} lines`);
+            
+            // Get line width and style properties for MultiLineString
+            let multiLineWidth = 1;
+            let multiLineCap = 'round';
+            let multiLineJoin = 'round';
+            let multiMiterLimit = 2;
+            
+            if (style && sourceId) {
+                const layers = getLayersBySource(sourceId);
+                const lineLayer = layers.find(l => 
+                    l.type === 'line' && 
+                    (!l['source-layer'] || l['source-layer'] === feature.layer?.name) &&
+                    l.layout?.visibility !== 'none'
+                );
+                
+                if (lineLayer) {
+                    const widthValue = getPaintProperty(lineLayer.id, 'line-width', feature, zoom);
+                    multiLineWidth = typeof widthValue === 'number' ? widthValue : 1;
+                    multiLineCap = lineLayer.layout?.['line-cap'] || 'round';
+                    multiLineJoin = lineLayer.layout?.['line-join'] || 'round';
+                    multiMiterLimit = lineLayer.layout?.['line-miter-limit'] || 2;
                 }
+            }
+            
+            // Convert line width from pixels to world space
+            const multiWorldWidth = screenWidthToWorld(multiLineWidth, zoom, 512);
+            
+            feature.geometry.coordinates.forEach(line => {
+                // Coordinates are already transformed
+                const transformedLine = line;
+                
+                // Tessellate each line
+                const lineTessellated = tessellateLine(transformedLine, multiWorldWidth, multiLineCap, multiLineJoin, multiMiterLimit);
+                
+                // Add tessellated vertices
+                const multiLineStartIndex = fillVertices.length / 7;
+                for (let i = 0; i < lineTessellated.vertices.length; i += 2) {
+                    fillVertices.push(
+                        lineTessellated.vertices[i],
+                        lineTessellated.vertices[i + 1],
+                        0.0,
+                        ..._borderColor
+                    );
+                }
+                
+                // Add triangle indices
+                lineTessellated.indices.forEach(idx => {
+                    fillIndices.push(multiLineStartIndex + idx);
+                });
             });
             break;
         case 'Point':
-            const point = mercatorToClipSpace(feature.geometry.coordinates);
+            const point = feature.geometry.coordinates; // Already transformed!
             fillVertices.push(point[0], point[1], 0.0, ..._fillColor);
             break;
         default:
@@ -478,11 +597,12 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
     return {
         vertices: new Float32Array(fillVertices),
         hiddenVertices: new Float32Array(hiddenVertices),  // Return hidden vertices
-        fillIndices: new Uint16Array(fillIndices),
-        outlineIndices: new Uint16Array(outlineIndices),
-        hiddenfillIndices: new Uint16Array(hiddenfillIndices),
+        fillIndices: new Uint32Array(fillIndices),
+        outlineIndices: new Uint32Array(outlineIndices),
+        hiddenfillIndices: new Uint32Array(hiddenfillIndices),
         isFilled,
         isLine,
+        layerId,  // Add layerId to return object
         properties: {
             ...feature.properties,
             fid: featureId,           // Original feature ID
@@ -669,12 +789,13 @@ export async function fetchVectorTile(x, y, z, abortSignal = null) {
             throw new Error("Empty tile data");
         }
         
-        const pbf = new Pbf(arrayBuffer);
-        const tile = new VectorTile(pbf);
+        // NEW: Use direct parser with pre-transformed coordinates
+        // This skips toGeoJSON() and GPU roundtrip - much faster!
+        const parsedTile = parseVectorTileDirect(arrayBuffer, x, y, z);
         
         // Only cache valid tiles
-        if (tile && tile.layers && Object.keys(tile.layers).length > 0) {
-            tileCache.set(tileKey, tile);
+        if (parsedTile && parsedTile.layers && Object.keys(parsedTile.layers).length > 0) {
+            tileCache.set(tileKey, parsedTile);
             activeFetchingTiles.delete(tileKey);
             
             // Clear error count on success
@@ -682,7 +803,7 @@ export async function fetchVectorTile(x, y, z, abortSignal = null) {
                 tileErrors.delete(tileKey);
             }
             
-            return tile;
+            return parsedTile;
         } else {
             throw new Error("Tile has no layers");
         }

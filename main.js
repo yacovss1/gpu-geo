@@ -238,18 +238,9 @@ function setupGlobalAPI(device, camera, tileManager, performanceManager, styleMa
     
     // Performance API
     window.mapPerformance = {
-        setGPUEnabled: async (enabled) => {
-            performanceManager.setGPUEnabled(enabled);
-            await destroyAllBuffers(device, tileManager.visibleTileBuffers, tileManager.hiddenTileBuffers);
-            clearTileCache();
-            resetNotFoundTiles();
-            camera.triggerEvent('zoomend');
-        },
-        isGPUEnabled: () => performanceManager.isGPUEnabled(),
         getStats: () => performanceManager.getStats(),
         resetStats: () => performanceManager.resetStats(),
         logStats: () => performanceManager.logStats(),
-        runBenchmark: (coords) => performanceManager.runBenchmark(device, coords),
         enableLiveMonitoring: (interval) => performanceManager.enableLiveMonitoring(interval),
         disableLiveMonitoring: () => performanceManager.disableLiveMonitoring()
     };
@@ -274,10 +265,7 @@ function setupGlobalAPI(device, camera, tileManager, performanceManager, styleMa
     };
     
     // Convenience aliases
-    window.gpuMode = () => window.mapPerformance.setGPUEnabled(true);
-    window.cpuMode = () => window.mapPerformance.setGPUEnabled(false);
     window.perfStats = () => window.mapPerformance.logStats();
-    window.benchmark = (coords) => window.mapPerformance.runBenchmark(coords);
     window.clearCache = () => {
         clearTileCache();
         resetNotFoundTiles();
