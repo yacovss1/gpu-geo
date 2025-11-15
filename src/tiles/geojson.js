@@ -245,7 +245,8 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
     };
 
     // NOTE: Coordinates are PRE-TRANSFORMED - use directly!
-    const coordsToIdVertices = (coords, featureId, targetArray, zHeight = 0.0) => {
+    // Encode feature ID, layer ID, and height into RGBA channels for hidden buffer
+    const coordsToIdVertices = (coords, featureId, targetArray, zHeight = 0.0, layerName = 'unknown', heightMeters = 0) => {
         const vertexStartIndex = targetArray.length / 7;
         
         // Encode feature ID as 16-bit across red and green channels
@@ -256,11 +257,26 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
         const normalizedR = highByte / 255.0;
         const normalizedG = lowByte / 255.0;
         
+        // Encode layer ID in blue channel (hash of layer name)
+        let layerIdHash = 0;
+        if (layerName && typeof layerName === 'string') {
+            for (let i = 0; i < layerName.length; i++) {
+                layerIdHash = ((layerIdHash << 5) - layerIdHash) + layerName.charCodeAt(i);
+                layerIdHash = layerIdHash & layerIdHash; // Convert to 32-bit integer
+            }
+            layerIdHash = Math.abs(layerIdHash) % 256; // 0-255 range
+        }
+        const normalizedB = layerIdHash / 255.0;
+        
+        // Encode normalized height in alpha channel (0-300m range)
+        const MAX_HEIGHT_METERS = 300;
+        const normalizedHeight = Math.min(1.0, Math.max(0.0, heightMeters / MAX_HEIGHT_METERS));
+        
         coords.forEach(coord => {
             const [x, y] = coord; // Coordinates already in Mercator clip space!
             targetArray.push(
                 x, y, zHeight,    // Position with optional Z height
-                normalizedR, normalizedG, 0.0, 1.0  // 16-bit ID in R+G channels
+                normalizedR, normalizedG, normalizedB, normalizedHeight  // R+G=ID, B=layerID, A=height
             );
         });
         return vertexStartIndex;
@@ -336,11 +352,13 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                 // CRITICAL: For extruded buildings, create hidden geometry at ROOF height
                 // This allows the compute shader to calculate the centroid of the TOP CAP
                 // instead of the base polygon, ensuring markers appear on building roofs
-                const heightZ = extrusionHeight * 0.0007;
+                const heightZ = extrusionHeight * zoomExtrusion;
                 const hiddenRoofStartIndex = coordsToIdVertices(allCoords, 
                     clampedFeatureId,
                     hiddenVertices,
-                    heightZ  // Render hidden polygon at roof height
+                    heightZ,  // Render hidden polygon at roof height
+                    layerId,  // Pass layer name for blue channel encoding
+                    extrusionHeight  // Pass actual height in meters for alpha channel
                 );
                 
                 // Add hidden triangle indices for the roof
@@ -360,7 +378,9 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                 const hiddenStartIndex = coordsToIdVertices(allCoords, 
                     clampedFeatureId,
                     hiddenVertices,
-                    0.0  // Flat features at ground level
+                    0.0,  // Flat features at ground level
+                    layerId,  // Pass layer name for blue channel encoding  
+                    0  // No height for flat polygons
                 );
                 
                 // Add hidden triangle indices
@@ -434,11 +454,13 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                     });
                     
                     // Hidden geometry at ROOF height for marker positioning
-                    const heightZ = extrusionHeight * 0.0007;
+                    const heightZ = extrusionHeight * zoomExtrusion;
                     const hiddenRoofStartIndex = coordsToIdVertices(allCoords, 
                         clampedFeatureId,
                         hiddenVertices,
-                        heightZ
+                        heightZ,
+                        layerId,
+                        extrusionHeight
                     );
                     
                     triangles.forEach(index => {
@@ -450,7 +472,9 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                     const hiddenStartIndex = coordsToIdVertices(allCoords, 
                         clampedFeatureId,
                         hiddenVertices,
-                        0.0
+                        0.0,
+                        layerId,
+                        0
                     );
 
                     // Add triangle indices

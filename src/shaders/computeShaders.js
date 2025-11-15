@@ -43,12 +43,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let fid: u32 = u32(pixel.r * 255.0) * 256u + u32(pixel.g * 255.0);
     if (fid == 0u || fid >= 65535u) { return; }
     
-    // Layer ID from blue channel (0-255) - combine with feature ID via hash
+    // Layer ID from blue channel (0-255) - now properly encoded, no hash needed
     let layerId: u32 = u32(pixel.b * 255.0);
     
-    // Hash function: combine layerId and fid to get unique index within 65535 space
-    // XOR provides good distribution, modulo wraps to valid range
-    let idx: u32 = ((layerId * 257u) ^ fid) % 65535u;
+    // Use feature ID directly as index (layer ID available separately if needed)
+    let idx: u32 = fid;
     if (idx == 0u) { return; } // Skip background
     
     let x = gid.x;
@@ -116,11 +115,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let fid: u32 = u32(pixel.r * 255.0) * 256u + u32(pixel.g * 255.0);
     if (fid == 0u || fid >= 65535u) { return; }
     
-    // Layer ID from blue channel (0-255) - combine with feature ID via hash
+    // Layer ID from blue channel (0-255) - now properly encoded, no hash needed
     let layerId: u32 = u32(pixel.b * 255.0);
     
-    // Hash function: combine layerId and fid to get unique index within 65535 space
-    let idx: u32 = ((layerId * 257u) ^ fid) % 65535u;
+    // Use feature ID directly as index (layer ID available separately if needed)
+    let idx: u32 = fid;
     if (idx == 0u) { return; } // Skip background
     
     let x = gid.x;
@@ -307,8 +306,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let pixelFid = u32(pixelColor.r * 255.0) * 256u + u32(pixelColor.g * 255.0);
         // Decode layer ID from blue channel
         let pixelLayerId = u32(pixelColor.b * 255.0);
-        // Reconstruct combined index using same hash function as Pass 1 & 2
-        let pixelIdx = ((pixelLayerId * 257u) ^ pixelFid) % 65535u;
+        // Use feature ID directly (no hash needed - layer ID properly encoded)
+        let pixelIdx = pixelFid;
         onFeature = (pixelIdx == idx);
     }
     
@@ -326,7 +325,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let gridPixel = textureLoad(hiddenTex, vec2<i32>(gridX, gridY), 0);
                 let gridFid = u32(gridPixel.r * 255.0) * 256u + u32(gridPixel.g * 255.0);
                 let gridLayerId = u32(gridPixel.b * 255.0);
-                let gridIdx = ((gridLayerId * 257u) ^ gridFid) % 65535u;
+                let gridIdx = gridFid; // Use feature ID directly
                 
                 if (gridIdx == idx) {
                     centerX = f32(gridX);
