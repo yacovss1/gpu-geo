@@ -21,6 +21,9 @@ const MARKER_BUFFER_SIZE = MAX_FEATURES * 40;
 export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, textureView, camera, shouldRenderLayer) {
     const mapCommandEncoder = device.createCommandEncoder();
     
+    // Get style once for all render passes
+    const style = getStyle();
+    
     // First render pass: hidden texture for feature IDs (no MSAA - needs exact values)
     const hiddenPass = mapCommandEncoder.beginRenderPass({
         colorAttachments: [{
@@ -39,19 +42,26 @@ export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, text
     
     const renderZoom = camera.zoom;
     
-    // Render hidden buffers layer by layer
-    for (const [layerId, buffers] of hiddenTileBuffers) {
-        if (!shouldRenderLayer(layerId, renderZoom)) continue;
-        
-        buffers.forEach(({ vertexBuffer, hiddenFillIndexBuffer, hiddenfillIndexCount }) => {
-            if (hiddenfillIndexCount > 0) {
-                hiddenPass.setPipeline(renderer.pipelines.hidden);
-                hiddenPass.setVertexBuffer(0, vertexBuffer);
-                hiddenPass.setIndexBuffer(hiddenFillIndexBuffer, "uint32");
-                hiddenPass.setBindGroup(0, renderer.bindGroups.picking);
-                hiddenPass.drawIndexed(hiddenfillIndexCount);
-            }
-        });
+    // Render hidden buffers in style layer order (same as color pass)
+    if (style?.layers) {
+        for (const layer of style.layers) {
+            const layerId = layer.id;
+            
+            if (!shouldRenderLayer(layerId, renderZoom)) continue;
+            
+            const buffers = hiddenTileBuffers.get(layerId);
+            if (!buffers) continue;
+            
+            buffers.forEach(({ vertexBuffer, hiddenFillIndexBuffer, hiddenfillIndexCount }) => {
+                if (hiddenfillIndexCount > 0) {
+                    hiddenPass.setPipeline(renderer.pipelines.hidden);
+                    hiddenPass.setVertexBuffer(0, vertexBuffer);
+                    hiddenPass.setIndexBuffer(hiddenFillIndexBuffer, "uint32");
+                    hiddenPass.setBindGroup(0, renderer.bindGroups.picking);
+                    hiddenPass.drawIndexed(hiddenfillIndexCount);
+                }
+            });
+        }
     }
     
     hiddenPass.end();
@@ -91,8 +101,7 @@ export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, text
         }
     });
     
-    // Get style to check for fills with extrusions (need depth bias)
-    const style = getStyle();
+    // Check for fills with extrusions (need depth bias)
     const fillsWithExtrusions = new Set();
     if (style?.layers) {
         for (const extrusionLayer of style.layers.filter(l => l.type === 'fill-extrusion')) {

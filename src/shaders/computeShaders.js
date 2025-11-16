@@ -39,16 +39,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (gid.x >= dims.x || gid.y >= dims.y) { return; }
     let pixel = textureLoad(hiddenTex, vec2<i32>(gid.xy), 0);
     
-    // Feature ID from red+green channels (16-bit encoding)
-    let fid: u32 = u32(pixel.r * 255.0) * 256u + u32(pixel.g * 255.0);
-    if (fid == 0u || fid >= 65535u) { return; }
+    // Feature ID from R+G+B channels (24-bit encoding = 16M IDs)
+    let fid: u32 = u32(pixel.r * 255.0) * 65536u + u32(pixel.g * 255.0) * 256u + u32(pixel.b * 255.0);
+    if (fid == 0u || fid >= 16777215u) { return; }
     
-    // Layer ID from blue channel (0-255) - now properly encoded, no hash needed
-    let layerId: u32 = u32(pixel.b * 255.0);
+    // Layer ID from alpha channel (0-255)
+    let layerId: u32 = u32(pixel.a * 255.0);
     
-    // Use feature ID directly as index (layer ID available separately if needed)
-    let idx: u32 = fid;
-    if (idx == 0u) { return; } // Skip background
+    // Map to buffer range: combine layer + feature mod to create unique index within 65k slots
+    // This allows 256 layers × 255 features = 65k total slots
+    let idx: u32 = (layerId * 255u) + (fid % 255u);
+    if (idx == 0u || idx >= 65535u) { return; }
     
     let x = gid.x;
     let y = gid.y;
@@ -110,17 +111,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (gid.x >= dims.x || gid.y >= dims.y) { return; }
     let pixel = textureLoad(hiddenTex, vec2<i32>(gid.xy), 0);
     
-    // Feature ID from red+green channels (16-bit encoding)
-    // R = high byte, G = low byte
-    let fid: u32 = u32(pixel.r * 255.0) * 256u + u32(pixel.g * 255.0);
-    if (fid == 0u || fid >= 65535u) { return; }
+    // Feature ID from R+G+B channels (24-bit encoding = 16M IDs)
+    let fid: u32 = u32(pixel.r * 255.0) * 65536u + u32(pixel.g * 255.0) * 256u + u32(pixel.b * 255.0);
+    if (fid == 0u || fid >= 16777215u) { return; }
     
-    // Layer ID from blue channel (0-255) - now properly encoded, no hash needed
-    let layerId: u32 = u32(pixel.b * 255.0);
+    // Layer ID from alpha channel (0-255)
+    let layerId: u32 = u32(pixel.a * 255.0);
     
-    // Use feature ID directly as index (layer ID available separately if needed)
-    let idx: u32 = fid;
-    if (idx == 0u) { return; } // Skip background
+    // Map to buffer range: combine layer + feature mod to create unique index within 65k slots
+    // This allows 256 layers × 255 features = 65k total slots
+    let idx: u32 = (layerId * 255u) + (fid % 255u);
+    if (idx == 0u || idx >= 65535u) { return; }
     
     let x = gid.x;
     let y = gid.y;
@@ -303,12 +304,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Check if the centroid point is on this feature
     if (sampleX >= 0 && sampleX < i32(width) && sampleY >= 0 && sampleY < i32(height)) {
         let pixelColor = textureLoad(hiddenTex, vec2<i32>(sampleX, sampleY), 0);
-        // Decode 16-bit feature ID from red+green channels
-        let pixelFid = u32(pixelColor.r * 255.0) * 256u + u32(pixelColor.g * 255.0);
-        // Decode layer ID from blue channel
-        let pixelLayerId = u32(pixelColor.b * 255.0);
-        // Use feature ID directly (no hash needed - layer ID properly encoded)
-        let pixelIdx = pixelFid;
+        // Decode 24-bit feature ID from R+G+B channels
+        let pixelFid = u32(pixelColor.r * 255.0) * 65536u + u32(pixelColor.g * 255.0) * 256u + u32(pixelColor.b * 255.0);
+        // Decode layer ID from alpha channel
+        let pixelLayerId = u32(pixelColor.a * 255.0);
+        // Map to same buffer range as our idx
+        let pixelIdx = (pixelLayerId * 255u) + (pixelFid % 255u);
         onFeature = (pixelIdx == idx);
         
         // Read height from alpha channel if we're on the feature
@@ -329,14 +330,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let gridY = gy * stepSizeY + stepSizeY / 2;
                 
                 let gridPixel = textureLoad(hiddenTex, vec2<i32>(gridX, gridY), 0);
-                let gridFid = u32(gridPixel.r * 255.0) * 256u + u32(gridPixel.g * 255.0);
-                let gridLayerId = u32(gridPixel.b * 255.0);
-                let gridIdx = gridFid; // Use feature ID directly
+                let gridFid = u32(gridPixel.r * 255.0) * 65536u + u32(gridPixel.g * 255.0) * 256u + u32(gridPixel.b * 255.0);
+                let gridLayerId = u32(gridPixel.a * 255.0);
+                // Map to buffer range
+                let gridIdx = (gridLayerId * 255u) + (gridFid % 255u);
                 
                 if (gridIdx == idx) {
                     centerX = f32(gridX);
                     centerY = f32(gridY);
-                    surfaceHeight = gridPixel.a * 300.0; // Read height from alpha channel
+                    surfaceHeight = gridPixel.a * 300.0; // Read height if on feature
                     onFeature = true;
                 }
             }

@@ -162,6 +162,99 @@ export function getLayerIndex(layerId) {
 }
 
 /**
+ * Get layers that should have markers (have corresponding symbol layers with text-field)
+ * @param {string} sourceId - Source ID
+ * @returns {Array<number>} Array of layer indices (0-255) that should render markers
+ */
+export function getLayersWithMarkers(sourceId) {
+    if (!currentStyle || !sourceId) {
+        return [];
+    }
+    
+    const markerLayerIndices = [];
+    
+    // Find all symbol layers with text-field
+    const symbolLayers = currentStyle.layers.filter(l => 
+        l.type === 'symbol' &&
+        l.source === sourceId &&
+        l.layout?.['text-field'] &&
+        l.layout?.visibility !== 'none'
+    );
+    
+    // For each symbol layer, find the corresponding fill/fill-extrusion layer
+    for (const symbolLayer of symbolLayers) {
+        const sourceLayer = symbolLayer['source-layer'];
+        if (!sourceLayer) continue;
+        
+        // Find fill or fill-extrusion layer with same source-layer
+        const fillLayer = currentStyle.layers.find(l =>
+            (l.type === 'fill' || l.type === 'fill-extrusion') &&
+            l.source === sourceId &&
+            l['source-layer'] === sourceLayer &&
+            l.layout?.visibility !== 'none'
+        );
+        
+        if (fillLayer) {
+            const layerIndex = getLayerIndex(fillLayer.id);
+            if (layerIndex !== 255 && !markerLayerIndices.includes(layerIndex)) {
+                markerLayerIndices.push(layerIndex);
+            }
+        }
+    }
+    
+    return markerLayerIndices;
+}
+
+/**
+ * Get layers that should have outlines (via edge detection or fill-outline-color)
+ * @param {string} sourceId - Source ID  
+ * @returns {Array<number>} Array of layer indices (0-255) that should render outlines
+ */
+export function getLayersWithOutlines(sourceId) {
+    if (!currentStyle || !sourceId) {
+        return [];
+    }
+    
+    const outlineLayerIndices = [];
+    
+    // Get fill layers that explicitly have outline properties
+    // OR all fill layers if no explicit outline config exists (backward compatibility)
+    const fillLayers = currentStyle.layers.filter(l =>
+        l.type === 'fill' &&
+        l.source === sourceId &&
+        l.layout?.visibility !== 'none'
+    );
+    
+    for (const layer of fillLayers) {
+        // Include layer if:
+        // 1. Has explicit fill-outline-color (standard MapLibre property)
+        // 2. Has fill-antialias enabled (implies outline rendering)
+        // 3. For backward compat: include all fill layers if no outline config exists
+        const hasOutlineColor = layer.paint?.['fill-outline-color'];
+        const hasAntialias = layer.paint?.['fill-antialias'] !== false; // Default is true
+        
+        if (hasOutlineColor || hasAntialias) {
+            const layerIndex = getLayerIndex(layer.id);
+            if (layerIndex !== 255) {
+                outlineLayerIndices.push(layerIndex);
+            }
+        }
+    }
+    
+    // If no layers specified outlines, default to all fill layers (backward compat)
+    if (outlineLayerIndices.length === 0) {
+        for (const layer of fillLayers) {
+            const layerIndex = getLayerIndex(layer.id);
+            if (layerIndex !== 255) {
+                outlineLayerIndices.push(layerIndex);
+            }
+        }
+    }
+    
+    return outlineLayerIndices;
+}
+
+/**
  * Get all symbol (text/icon) layers for a specific source
  * @param {string} sourceId - Source ID
  * @returns {Array<Object>} Array of symbol layer configurations
@@ -522,11 +615,22 @@ export function getFeatureId(feature, sourceId, featureIndex = 0) {
 
     // Fall back to feature.id if present (check both top-level and in properties)
     if (feature.id !== undefined && feature.id !== null) {
-        if (!window._featureIdLogged && Math.random() < 0.001) {
-            console.log(`✅ Using feature.id: ${feature.id} for`, feature.properties);
+        // Map to valid 16-bit range - use directly if in range, hash if too large
+        let mappedId;
+        if (feature.id >= 1 && feature.id <= 65534) {
+            mappedId = feature.id;
+        } else {
+            // For large IDs, use multiplicative hashing for better distribution
+            // This reduces collisions compared to simple modulo
+            const id = Math.abs(feature.id);
+            const hash = (id * 2654435761) >>> 0; // Knuth's multiplicative hash
+            mappedId = (hash % 65533) + 1;
+        }
+        if (!window._featureIdLogged && Math.random() < 0.01) {
+            console.log(`✅ Using feature.id: ${feature.id} → ${mappedId} for class=${feature.properties?.class}`);
             window._featureIdLogged = true;
         }
-        return feature.id;
+        return mappedId;
     }
     
     // Also check properties.id which some tile sources use
@@ -571,8 +675,8 @@ function generateFeatureId(feature, fallbackIndex = 0) {
             hash = ((hash << 5) - hash) + stableName.charCodeAt(i);
             hash = hash & hash;
         }
-        // Better distribution: use prime number 9973 instead of 9999
-        return ((Math.abs(hash) % 9973) + 1);
+        // Map to full 16-bit range for better distribution
+        return ((Math.abs(hash) % 65533) + 1);
     }
     
     // For features without names, try to use class/type + approximate position
@@ -599,7 +703,8 @@ function generateFeatureId(feature, fallbackIndex = 0) {
             hash = ((hash << 5) - hash) + str.charCodeAt(i);
             hash = hash & hash;
         }
-        return ((Math.abs(hash) % 9973) + 1);
+        // Map to full 16-bit range for better distribution
+        return ((Math.abs(hash) % 65533) + 1);
     }
     
     // If we have a fallback index (from batch processing), use it directly

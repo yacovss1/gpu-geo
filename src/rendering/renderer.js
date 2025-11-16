@@ -85,7 +85,7 @@ export function createRenderPipeline(device, format, topology, isHidden = false,
         depthStencil: {
             format: 'depth24plus',
             depthWriteEnabled: true,
-            depthCompare: 'less',
+            depthCompare: 'less-equal',  // Allow equal depth to overwrite based on draw order
             ...(depthBias !== 0 && topology !== 'line-list' ? {
                 depthBias: depthBias,
                 depthBiasSlopeScale: 1.0
@@ -269,6 +269,17 @@ export class MapRenderer {
         
         // Initialize with starting values
         this.updateZoomInfo(camera.zoom, Math.min(Math.floor(camera.zoom), camera.maxFetchZoom));
+        
+        // Add layer config buffer for marker and outline filtering
+        // Layout: [markerLayers[8], outlineLayers[8]] as u32 (4 bytes each)
+        // Total: 16 * 4 = 64 bytes
+        this.buffers.layerConfig = this.device.createBuffer({
+            size: 64,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+        // Initialize with 255 (no layers whitelisted)
+        const initialConfig = new Uint32Array(16).fill(255);
+        this.device.queue.writeBuffer(this.buffers.layerConfig, 0, initialConfig);
         
         // Create sampler
         this.sampler = this.device.createSampler({
