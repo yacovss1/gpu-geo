@@ -1,5 +1,30 @@
 # TODO: Architecture Improvements
 
+## PRIORITY 0: Per-Viewport Feature ID Assignment (Architecture Limitation)
+**Problem:** Current 24-bit feature IDs (16M range) exceed compute shader buffer capacity (65k slots)
+
+**Current Workaround:** Modulo mapping `idx = (layerId * 255) + (fid % 255)` causes collisions
+- Multiple features with same (layerId, fid%255) share marker slots
+- Results in incorrect marker positioning and multi-feature highlights
+
+**Proper Solution:** Per-viewport ID assignment
+- Only assign feature IDs (1-65534) to features visible in current viewport
+- Features outside viewport don't need IDs (no markers, no picking)
+- Requires viewport culling pass before geometry upload
+- Ensures 65k limit is never exceeded for reasonable viewports
+
+**Implementation Steps:**
+1. Add viewport frustum culling to tile processing
+2. Assign sequential IDs (1-N) only to visible features per frame
+3. Maintain feature→ID mapping for picking consistency
+4. Clear and regenerate IDs on pan/zoom
+
+**Estimated complexity:** High - requires significant tile processing refactor
+
+**Status:** Not started - current modulo workaround functional but collision-prone
+
+---
+
 ## PRIORITY 1: Fix Water Labels (Actual Bug)
 **Problem:** Water labels disappear at zoom 7+ when rendered over land due to landuse occlusion
 
