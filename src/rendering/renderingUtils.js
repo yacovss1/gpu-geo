@@ -144,16 +144,18 @@ export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, text
     
     colorPass.end();
     
-    // Fourth render pass: Apply edge detection to screen
+    // Fourth render pass: Apply edge detection to screen (DISABLED - skip outlines)
+    // Just copy the color texture directly to screen without edge detection
     const mainPass = mapCommandEncoder.beginRenderPass({
         colorAttachments: [{
             view: textureView,
             clearValue: clearColor,
-            loadOp: 'load',
+            loadOp: 'clear',
             storeOp: 'store',
         }],
     });
     
+    // Draw color texture directly without edge detection
     mainPass.setPipeline(renderer.pipelines.edgeDetection);
     mainPass.setBindGroup(0, renderer.bindGroups.edgeDetection);
     mainPass.draw(3);
@@ -272,7 +274,8 @@ export function renderMarkersToEncoder(
     markerPipeline,
     markerBuffer,
     markerBindGroupLayout,
-    cameraUniformBuffer
+    cameraUniformBuffer,
+    zoomInfoBuffer
 ) {
     // Create triangle buffer once and reuse it
     if (!cachedTriangleBuffer) {
@@ -307,7 +310,8 @@ export function renderMarkersToEncoder(
         layout: markerBindGroupLayout,
         entries: [
             { binding: 0, resource: { buffer: cameraUniformBuffer } },
-            { binding: 1, resource: { buffer: markerBuffer } }
+            { binding: 1, resource: { buffer: markerBuffer } },
+            { binding: 2, resource: { buffer: zoomInfoBuffer } }
         ]
     }));
     markerPass.draw(3, MAX_FEATURES, 0, 0);

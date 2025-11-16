@@ -12,7 +12,8 @@ import {
     parseColor,
     evaluateFilter,
     getLayersBySource,
-    isTileInBounds
+    isTileInBounds,
+    getLayerIndex
 } from '../core/style.js';
 
 const tileCache = new TileCache();
@@ -79,9 +80,7 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
             l.layout?.visibility !== 'none'
         );
         
-        if (extrusionLayer) {
-            console.log(`✅ Found extrusion layer "${extrusionLayer.id}" for feature at zoom ${zoom}, minzoom: ${extrusionLayer.minzoom}`);
-        }
+
         
         // Find first VISIBLE fill layer for this source-layer
         const fillLayer = layers.find(l => 
@@ -90,6 +89,7 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
             l.layout?.visibility !== 'none' &&
             (!l.filter || evaluateFilter(l.filter, feature, zoom))
         );
+        
         const lineLayer = layers.find(l => 
             l.type === 'line' && 
             (!l['source-layer'] || l['source-layer'] === feature.layer?.name) &&
@@ -105,7 +105,7 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
             return null;
         }
         
-        // Store the active layer ID
+        // Store the active layer ID for rendering and hidden buffer
         layerId = activeLayer.id;
         
         // Handle fill-extrusion properties
@@ -119,7 +119,7 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
             // Only mark as extruded if height is actually > 0
             if (extrusionHeight > 0) {
                 isExtruded = true;
-                console.log(`📐 Extrusion props: height=${extrusionHeight}m, base=${extrusionBase}m, layer="${extrusionLayer.id}", feature source-layer="${feature.layer?.name}"`);
+               
             }
         }
 
@@ -168,14 +168,15 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
     };
     
     // Helper to generate extruded building geometry (walls + roof)
+    // 28-byte format: position(12) + visual color(16)
     const generateExtrusion = (allCoords, outerRing, height, base, fillColor, targetVertices, targetIndices, targetOutlineIndices) => {
-        const startIndex = targetVertices.length / 7;
+        const startIndex = targetVertices.length / 7; // 7 floats per vertex
         
         // Use zoom-dependent scaling passed from parent scope
         const heightZ = height * zoomExtrusion;
         const baseZ = base * zoomExtrusion;
         
-        console.log(`Building extrusion at zoom ${zoom}: ${height}m -> Z=${heightZ.toFixed(8)}`);
+        //console.log(`Building extrusion at zoom ${zoom}: ${height}m -> Z=${heightZ.toFixed(8)}`);
         
         // Generate wall quads for each edge of outer ring only
         for (let i = 0; i < outerRing.length - 1; i++) {
@@ -183,6 +184,13 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
             const next = outerRing[i + 1];
             const [x1, y1] = curr; // Coordinates already transformed!
             const [x2, y2] = next;
+            
+            // Sanity check: skip corrupted coordinates
+            if (!isFinite(x1) || !isFinite(y1) || !isFinite(x2) || !isFinite(y2) ||
+                Math.abs(x1) > 10 || Math.abs(y1) > 10 || Math.abs(x2) > 10 || Math.abs(y2) > 10) {
+                console.warn(`⚠️ Skipping corrupted wall edge: (${x1},${y1}) to (${x2},${y2})`);
+                continue;
+            }
             
             // Calculate wall direction for directional lighting
             const dx = x2 - x1;
@@ -204,14 +212,15 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                 fillColor[3]
             ];
             
-            // Wall quad vertices (2 triangles = 6 vertices for quad)
+            // Wall quad vertices: 7 floats per vertex
+            // position(3) + visual color(4)
             const vertexOffset = (targetVertices.length / 7);
             
-            // Bottom-left, bottom-right, top-right, top-left - use WALL color
-            targetVertices.push(x1, y1, baseZ, ...wallColor);       // 0
-            targetVertices.push(x2, y2, baseZ, ...wallColor);       // 1
-            targetVertices.push(x2, y2, heightZ, ...wallColor);     // 2
-            targetVertices.push(x1, y1, heightZ, ...wallColor);     // 3
+            // Bottom-left, bottom-right, top-right, top-left
+            targetVertices.push(x1, y1, baseZ, ...wallColor);
+            targetVertices.push(x2, y2, baseZ, ...wallColor);
+            targetVertices.push(x2, y2, heightZ, ...wallColor);
+            targetVertices.push(x1, y1, heightZ, ...wallColor);
             
             // Two triangles for the wall quad
             targetIndices.push(
@@ -224,6 +233,14 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
         const roofStartIndex = targetVertices.length / 7;
         allCoords.forEach(coord => {
             const [x, y] = coord; // Coordinates already transformed!
+            
+            // Sanity check for roof vertices
+            if (!isFinite(x) || !isFinite(y) || Math.abs(x) > 10 || Math.abs(y) > 10) {
+                console.warn(`⚠️ Skipping corrupted roof vertex: (${x},${y})`);
+                return;
+            }
+            
+            // Roof uses normal fill color (not darkened)
             targetVertices.push(x, y, heightZ, ...fillColor);
         });
         
@@ -245,8 +262,8 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
     };
 
     // NOTE: Coordinates are PRE-TRANSFORMED - use directly!
-    // Encode feature ID, layer ID, and height into RGBA channels for hidden buffer
-    const coordsToIdVertices = (coords, featureId, targetArray, zHeight = 0.0, layerName = 'unknown', heightMeters = 0) => {
+    // Encode feature ID and layer ID into RGBA channels for hidden buffer
+    const coordsToIdVertices = (coords, featureId, targetArray, zHeight = 0.0, layerName = 'unknown') => {
         const vertexStartIndex = targetArray.length / 7;
         
         // Encode feature ID as 16-bit across red and green channels
@@ -257,26 +274,18 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
         const normalizedR = highByte / 255.0;
         const normalizedG = lowByte / 255.0;
         
-        // Encode layer ID in blue channel (hash of layer name)
-        let layerIdHash = 0;
-        if (layerName && typeof layerName === 'string') {
-            for (let i = 0; i < layerName.length; i++) {
-                layerIdHash = ((layerIdHash << 5) - layerIdHash) + layerName.charCodeAt(i);
-                layerIdHash = layerIdHash & layerIdHash; // Convert to 32-bit integer
-            }
-            layerIdHash = Math.abs(layerIdHash) % 256; // 0-255 range
-        }
-        const normalizedB = layerIdHash / 255.0;
+        // Get proper layer ID index (0-255) using getLayerIndex
+        const layerIdx = getLayerIndex(layerName);
+        const normalizedB = layerIdx / 255.0;
         
-        // Encode normalized height in alpha channel (0-300m range)
-        const MAX_HEIGHT_METERS = 300;
-        const normalizedHeight = Math.min(1.0, Math.max(0.0, heightMeters / MAX_HEIGHT_METERS));
+        // Alpha channel can be used for other purposes if needed (currently unused)
+        const normalizedA = 1.0;
         
         coords.forEach(coord => {
             const [x, y] = coord; // Coordinates already in Mercator clip space!
             targetArray.push(
-                x, y, zHeight,    // Position with optional Z height
-                normalizedR, normalizedG, normalizedB, normalizedHeight  // R+G=ID, B=layerID, A=height
+                x, y, zHeight,    // Position with Z height (for roof elevation)
+                normalizedR, normalizedG, normalizedB, normalizedA  // R+G=ID, B=layerID, A=unused
             );
         });
         return vertexStartIndex;
@@ -327,6 +336,12 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
 
             // Check if this is an extruded building
             if (isExtruded && extrusionHeight > 0) {
+                // Skip degenerate buildings with too few points (need at least 4 to close a polygon)
+                if (outerRing.length < 4) {
+                    console.warn(`⚠️ Skipping degenerate building with only ${outerRing.length} points`);
+                    return null;
+                }
+                
                 console.log(`🏢 EXTRUSION: ${extrusionHeight}m for feature ${clampedFeatureId}`);
                 console.log(`  Outer ring coords sample:`, outerRing.slice(0, 3));
                 console.log(`  Vertices before:`, fillVertices.length / 7, 'indices before:', fillIndices.length);
@@ -336,11 +351,11 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                     allCoords,
                     outerRing, 
                     extrusionHeight, 
-                    extrusionBase, // No offset - let depth testing handle it
+                    extrusionBase,
                     _fillColor, 
                     fillVertices, 
                     fillIndices,
-                    [] // Don't generate outline indices for buildings - causes visual artifacts
+                    [] // Don't generate outline indices for buildings
                 );
                 
                 console.log(`  Vertices after:`, fillVertices.length / 7, 'indices after:', fillIndices.length);
@@ -349,21 +364,19 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                     fillIndices.push(roofStartIndex + index);
                 });
                 
-                // CRITICAL: For extruded buildings, create hidden geometry at ROOF height
-                // This allows the compute shader to calculate the centroid of the TOP CAP
-                // instead of the base polygon, ensuring markers appear on building roofs
-                const heightZ = extrusionHeight * zoomExtrusion;
-                const hiddenRoofStartIndex = coordsToIdVertices(allCoords, 
+                // For hidden buffer: Use actual roof triangulation (includes holes/courtyards)
+                // Use same triangulated coordinates but elevated to roof height
+                const hiddenStartIndex = coordsToIdVertices(
+                    allCoords,
                     clampedFeatureId,
                     hiddenVertices,
-                    heightZ,  // Render hidden polygon at roof height
-                    layerId,  // Pass layer name for blue channel encoding
-                    extrusionHeight  // Pass actual height in meters for alpha channel
+                    extrusionHeight * zoomExtrusion,  // Z coordinate = roof height
+                    layerId
                 );
                 
-                // Add hidden triangle indices for the roof
+                // Add hidden triangle indices - same triangulation as visible roof
                 triangles.forEach(index => {
-                    hiddenfillIndices.push(hiddenRoofStartIndex + index);
+                    hiddenfillIndices.push(hiddenStartIndex + index);
                 });
             } else {
                 // Flat polygon at z=0
@@ -379,8 +392,7 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                     clampedFeatureId,
                     hiddenVertices,
                     0.0,  // Flat features at ground level
-                    layerId,  // Pass layer name for blue channel encoding  
-                    0  // No height for flat polygons
+                    layerId
                 );
                 
                 // Add hidden triangle indices
@@ -434,7 +446,7 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                 
                 // Check if this is an extruded building (same logic as Polygon)
                 if (isExtruded && extrusionHeight > 0) {
-                    console.log(`🏢 MultiPolygon EXTRUSION: ${extrusionHeight}m for polygon ${polygonIndex}`);
+                   // console.log(`🏢 MultiPolygon EXTRUSION: ${extrusionHeight}m for polygon ${polygonIndex}`);
                     
                     // Generate 3D building geometry (walls + roof)
                     const roofStartIndex = generateExtrusion(
@@ -445,7 +457,7 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                         _fillColor, 
                         fillVertices, 
                         fillIndices,
-                        outlineIndices  // Pass outline array to generate 3D edges
+                        [] // Don't generate outline indices
                     );
                     
                     // Triangulate the roof
@@ -453,18 +465,18 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                         fillIndices.push(roofStartIndex + index);
                     });
                     
-                    // Hidden geometry at ROOF height for marker positioning
-                    const heightZ = extrusionHeight * zoomExtrusion;
-                    const hiddenRoofStartIndex = coordsToIdVertices(allCoords, 
+                    // For hidden buffer: base polygon at roof height
+                    const hiddenStartIndex = coordsToIdVertices(
+                        allCoords,
                         clampedFeatureId,
                         hiddenVertices,
-                        heightZ,
-                        layerId,
-                        extrusionHeight
+                        extrusionHeight * zoomExtrusion,  // Z coordinate = roof height
+                        layerId
                     );
                     
+                    // Add hidden triangle indices for flat base
                     triangles.forEach(index => {
-                        hiddenfillIndices.push(hiddenRoofStartIndex + index);
+                        hiddenfillIndices.push(hiddenStartIndex + index);
                     });
                 } else {
                     // Flat polygon rendering
@@ -473,8 +485,7 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                         clampedFeatureId,
                         hiddenVertices,
                         0.0,
-                        layerId,
-                        0
+                        layerId
                     );
 
                     // Add triangle indices
@@ -548,7 +559,7 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
             isFilled = false;
             isLine = true;
             
-            console.log(`🛣️ MultiLineString with ${feature.geometry.coordinates.length} lines`);
+            //console.log(`🛣️ MultiLineString with ${feature.geometry.coordinates.length} lines`);
             
             // Get line width and style properties for MultiLineString
             let multiLineWidth = 1;
@@ -618,6 +629,8 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
         isFilled,
         isLine,
         layerId,  // Add layerId to return object
+        extrusionHeight: isExtruded ? extrusionHeight : 0,  // Return height for tracking
+        featureId: clampedFeatureId,  // Return feature ID for max height tracking
         properties: {
             ...feature.properties,
             fid: featureId,           // Original feature ID

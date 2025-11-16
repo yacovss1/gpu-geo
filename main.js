@@ -159,7 +159,8 @@ async function main() {
                 markerResources.markerPipeline,
                 markerResources.markerBuffer,
                 markerResources.markerBindGroupLayout,
-                renderer.buffers.uniform
+                renderer.buffers.uniform,
+                renderer.buffers.zoomInfo
             );
             
             // Upload and render labels

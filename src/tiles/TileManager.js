@@ -210,9 +210,11 @@ export class TileManager {
         this.device.queue.writeBuffer(vertexBuffer, 0, this.padToAlignment(vertices));
         this.totalBuffersCreated++;
         
-        // Create hidden buffers only for flat features
+        // Create hidden buffers (separate geometry for picking/compute)
+        // For buildings: flat base polygon at roof height (z coordinate)
+        // For flat features: same as visible geometry
         let hiddenVertexBuffer, hiddenFillIndexBuffer;
-        if (!use3DGeometry) {
+        if (hiddenVertices.length > 0 && hiddenfillIndices.length > 0) {
             hiddenVertexBuffer = this.device.createBuffer({
                 size: this.alignBufferSize(hiddenVertices.byteLength),
                 usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
@@ -258,9 +260,9 @@ export class TileManager {
             newHiddenTileBuffers.set(layerId, []);
         }
         newHiddenTileBuffers.get(layerId).push({
-            vertexBuffer: use3DGeometry ? vertexBuffer : hiddenVertexBuffer,
-            hiddenFillIndexBuffer: use3DGeometry ? fillIndexBuffer : hiddenFillIndexBuffer,
-            hiddenfillIndexCount: use3DGeometry ? fillIndices.length : hiddenfillIndices.length,
+            vertexBuffer: hiddenVertexBuffer || vertexBuffer,
+            hiddenFillIndexBuffer: hiddenFillIndexBuffer || fillIndexBuffer,
+            hiddenfillIndexCount: hiddenFillIndexBuffer ? hiddenfillIndices.length : fillIndices.length,
             properties,
             zoomLevel: z,
             tileX: x,

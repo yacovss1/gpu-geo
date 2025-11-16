@@ -15,6 +15,7 @@ struct VertexInput {
 
 @group(0) @binding(0) var<uniform> cameraMatrix: mat4x4<f32>;
 @group(0) @binding(1) var<storage, read> markers: array<Marker>;
+@group(0) @binding(2) var<uniform> zoomInfo: vec4<f32>; // Keep for compatibility but not needed now
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -34,15 +35,16 @@ fn main(input: VertexInput) -> VertexOutput {
     }
     
     // Marker center is from compute shader reading hidden texture
-    // Hidden texture applied same isometric offset as visible geometry
-    // So marker position is already correct - use directly
+    // Hidden texture now has base polygon AT THE ROOF HEIGHT (z = heightZ)
+    // So the 2D screen position already includes the isometric offset!
+    // Just use the position directly!
     let markerSize = 0.02;
     
     var output: VertexOutput;
     output.position = vec4<f32>(
         marker.center.x + input.quadPos.x * markerSize,
         marker.center.y + input.quadPos.y * markerSize,
-        0.5,
+        0.5, // Depth - can use marker.height later if needed for layering
         1.0
     );
     

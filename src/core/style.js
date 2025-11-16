@@ -147,6 +147,21 @@ export function getLayer(layerId) {
 }
 
 /**
+ * Get the array index of a layer by its ID
+ * Used for encoding layer IDs in the blue channel of the hidden buffer
+ * @param {string} layerId - Layer ID
+ * @returns {number} Array index (0-255), or 255 if not found
+ */
+export function getLayerIndex(layerId) {
+    if (!currentStyle || !currentStyle.layers) {
+        return 255;
+    }
+    
+    const index = currentStyle.layers.findIndex(l => l.id === layerId);
+    return index >= 0 ? index : 255;
+}
+
+/**
  * Get all symbol (text/icon) layers for a specific source
  * @param {string} sourceId - Source ID
  * @returns {Array<Object>} Array of symbol layer configurations

@@ -213,7 +213,7 @@ export const edgeDetectionFragmentShaderCode = `
         } else if (isSelected) {
             return vec4<f32>(1.0, 1.0, 0.0, 1.0);  // Yellow highlight
         } else if (isDifferent) {
-            return vec4<f32>(0.0, 0.0, 0.0, 1.0);  // Black borders
+            return centerColor;  // OUTLINES DISABLED - just return color
         } else {
             // FIXED: Only add interior patterns at very high zoom
             if (displayZoom > 22.0) {
