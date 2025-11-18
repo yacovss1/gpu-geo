@@ -615,22 +615,11 @@ export function getFeatureId(feature, sourceId, featureIndex = 0) {
 
     // Fall back to feature.id if present (check both top-level and in properties)
     if (feature.id !== undefined && feature.id !== null) {
-        // Map to valid 16-bit range - use directly if in range, hash if too large
-        let mappedId;
-        if (feature.id >= 1 && feature.id <= 65534) {
-            mappedId = feature.id;
-        } else {
-            // For large IDs, use multiplicative hashing for better distribution
-            // This reduces collisions compared to simple modulo
-            const id = Math.abs(feature.id);
-            const hash = (id * 2654435761) >>> 0; // Knuth's multiplicative hash
-            mappedId = (hash % 65533) + 1;
-        }
-        if (!window._featureIdLogged && Math.random() < 0.01) {
-            console.log(`✅ Using feature.id: ${feature.id} → ${mappedId} for class=${feature.properties?.class}`);
+        if (!window._featureIdLogged && Math.random() < 0.001) {
+            console.log(`✅ Using feature.id: ${feature.id} for`, feature.properties);
             window._featureIdLogged = true;
         }
-        return mappedId;
+        return feature.id;
     }
     
     // Also check properties.id which some tile sources use
@@ -675,8 +664,8 @@ function generateFeatureId(feature, fallbackIndex = 0) {
             hash = ((hash << 5) - hash) + stableName.charCodeAt(i);
             hash = hash & hash;
         }
-        // Map to full 16-bit range for better distribution
-        return ((Math.abs(hash) % 65533) + 1);
+        // Better distribution: use prime number 9973 instead of 9999
+        return ((Math.abs(hash) % 9973) + 1);
     }
     
     // For features without names, try to use class/type + approximate position
@@ -703,8 +692,7 @@ function generateFeatureId(feature, fallbackIndex = 0) {
             hash = ((hash << 5) - hash) + str.charCodeAt(i);
             hash = hash & hash;
         }
-        // Map to full 16-bit range for better distribution
-        return ((Math.abs(hash) % 65533) + 1);
+        return ((Math.abs(hash) % 9973) + 1);
     }
     
     // If we have a fallback index (from batch processing), use it directly

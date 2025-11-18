@@ -24,9 +24,11 @@ fn main(@location(0) inPosition: vec3<f32>, @location(1) inColor: vec4<f32>) -> 
     // CRITICAL: Set depth AFTER transformation for proper Z-ordering
     // Depth comparison is 'less', so SMALLER depth = closer to camera
     // Strategy: All flat features get depth ~0.95, buildings get much smaller depth
-    // Layer ordering handled by draw order (renderingUtils iterates style.layers in order)
+    // This ensures ANY building geometry (even base at z=0.0001) renders over flat features
     let baseDepth = 0.95;
-    output.position.z = baseDepth - (inPosition.z * 10.0);
+    // Add tiny offset for flat features to prevent z-fighting between overlapping polys
+    let flatOffset = select(0.0, 0.00001, inPosition.z < 0.00001);
+    output.position.z = baseDepth - (inPosition.z * 10.0) + flatOffset;
 
     // Pass along coordinates for fragment shader
     output.fragCoord = output.position.xy;
@@ -128,10 +130,10 @@ export const edgeDetectionFragmentShaderCode = `
     fn main(@location(0) texCoord: vec2<f32>) -> @location(0) vec4<f32> {
         let texelSize = 1.0 / canvasSize;
         
-        // Get center color and decode 24-bit ID from R+G+B channels
+        // Get center color and decode 16-bit ID from red+green channels
         let centerColor = textureSample(colorTexture, mysampler, texCoord);
         let centerPixel = textureSample(idTexture, mysampler, texCoord);
-        let id = centerPixel.r * 255.0 * 65536.0 + centerPixel.g * 255.0 * 256.0 + centerPixel.b * 255.0;
+        let id = centerPixel.r * 255.0 * 256.0 + centerPixel.g * 255.0;
         
         // FIXED: Use actual display zoom (same as used in the vertex shader)
         let displayZoom = zoomInfo.x;
@@ -141,18 +143,18 @@ export const edgeDetectionFragmentShaderCode = `
         // Keep edge detection at 1-pixel width always
         let sampleOffset = texelSize;
         
-        // Sample neighbors with adapted offset and decode 24-bit IDs
+        // Sample neighbors with adapted offset and decode 16-bit IDs
         let leftPixel = textureSample(idTexture, mysampler, texCoord + vec2<f32>(-sampleOffset.x, 0.0));
-        let leftId = leftPixel.r * 255.0 * 65536.0 + leftPixel.g * 255.0 * 256.0 + leftPixel.b * 255.0;
+        let leftId = leftPixel.r * 255.0 * 256.0 + leftPixel.g * 255.0;
         
         let rightPixel = textureSample(idTexture, mysampler, texCoord + vec2<f32>(sampleOffset.x, 0.0));
-        let rightId = rightPixel.r * 255.0 * 65536.0 + rightPixel.g * 255.0 * 256.0 + rightPixel.b * 255.0;
+        let rightId = rightPixel.r * 255.0 * 256.0 + rightPixel.g * 255.0;
         
         let upPixel = textureSample(idTexture, mysampler, texCoord + vec2<f32>(0.0, -sampleOffset.y));
-        let upId = upPixel.r * 255.0 * 65536.0 + upPixel.g * 255.0 * 256.0 + upPixel.b * 255.0;
+        let upId = upPixel.r * 255.0 * 256.0 + upPixel.g * 255.0;
         
         let downPixel = textureSample(idTexture, mysampler, texCoord + vec2<f32>(0.0, sampleOffset.y));
-        let downId = downPixel.r * 255.0 * 65536.0 + downPixel.g * 255.0 * 256.0 + downPixel.b * 255.0;
+        let downId = downPixel.r * 255.0 * 256.0 + downPixel.g * 255.0;
 
         let hasFeature = id > 0.1;
         let isDifferent = hasFeature && (
@@ -162,14 +164,14 @@ export const edgeDetectionFragmentShaderCode = `
             abs(id - downId) > 0.1
         );
         
-        // Decode layer ID from alpha channel
-        let layerId = centerPixel.a * 255.0;
+        // Decode layer IDs from blue channel
+        let layerId = centerPixel.b * 255.0;
         let pickedLayerIdValue = pickedLayerId;  // From uniform
         
         // Exact match for selection - both feature ID and layer ID must match
         let isSelected = hasFeature && 
-                        (abs(id - pickedId) < 0.5) && 
-                        (abs(layerId - pickedLayerIdValue) < 0.5);
+                        (abs(id - pickedId) < 0.01) && 
+                        (abs(layerId - pickedLayerIdValue) < 0.01);
 
         // CRITICAL FIX: Delay pattern changes until much higher zoom levels (20+)
         if (!hasFeature) {

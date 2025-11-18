@@ -173,24 +173,12 @@ export function setupEventListeners(canvas, camera, device, renderer, tileBuffer
             
             const data = new Uint8Array(sharedReadBuffer.getMappedRange());
             
-            // Decode 24-bit feature ID from R+G+B channels (format is BGRA, so indices are reversed)
+            // Decode 16-bit feature ID from red and green channels (format is BGRA, so indices are reversed)
             // BGRA format: B=data[0], G=data[1], R=data[2], A=data[3]
-            const redChannel = data[2];    // High byte (bits 16-23)
-            const greenChannel = data[1];  // Mid byte (bits 8-15)
-            const blueChannel = data[0];   // Low byte (bits 0-7)
-            const alphaChannel = data[3];  // Layer ID
-            const featureId = redChannel * 65536 + greenChannel * 256 + blueChannel;
-            const layerId = alphaChannel;
-            
-            console.log('🖱️ Click pixel data:', {
-                red: redChannel,
-                green: greenChannel,
-                blue: blueChannel,
-                alpha: alphaChannel,
-                featureId: featureId,
-                layerId: layerId,
-                hexColor: `rgba(${redChannel}, ${greenChannel}, ${blueChannel}, ${alphaChannel})`
-            });
+            const redChannel = data[2];   // High byte
+            const greenChannel = data[1]; // Low byte
+            const blueChannel = data[0];  // Layer ID
+            const featureId = redChannel * 256 + greenChannel;
             
             // Ignore clicks where there's no feature
             if (!featureId) {
@@ -210,18 +198,15 @@ export function setupEventListeners(canvas, camera, device, renderer, tileBuffer
                 // Log feature properties on click
                 console.log('🎯 Clicked feature:', {
                     featureId,
-                    layerId: layerId,
                     properties: feature.properties,
                     sourceLayer: feature.properties?.sourceLayer
                 });
                 
-                // Write the raw values directly - feature ID (24-bit) and layer ID (8-bit)
-                console.log('📤 Setting uniforms:', { pickedId: featureId, pickedLayerId: layerId });
+                // Write the raw values directly - feature ID and layer ID
                 device.queue.writeBuffer(renderer.buffers.pickedId, 0, new Float32Array([featureId]));
-                device.queue.writeBuffer(renderer.buffers.pickedLayerId, 0, new Float32Array([layerId]));
+                device.queue.writeBuffer(renderer.buffers.pickedLayerId, 0, new Float32Array([blueChannel]));
             } else {
                 // Clear selection
-                console.log('❌ No feature found, clearing selection');
                 device.queue.writeBuffer(renderer.buffers.pickedId, 0, new Float32Array([0]));
                 device.queue.writeBuffer(renderer.buffers.pickedLayerId, 0, new Float32Array([0]));
             }

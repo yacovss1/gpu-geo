@@ -25,8 +25,8 @@ function getCountryId(countryName) {
         hash = ((hash << 5) - hash) + countryName.charCodeAt(i);
         hash = hash & hash;
     }
-    // Map to full 16-bit range (1-65533) for better distribution
-    return ((Math.abs(hash) % 65533) + 1);
+    // Map to 1-9973 range (prime number for better distribution, under 10000 MAX_FEATURES)
+    return ((Math.abs(hash) % 9973) + 1);
 }
 
 export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], sourceId = null, zoom = 0) {
@@ -132,6 +132,14 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                 feature, zoom);
             if (fillColorValue) {
                 _fillColor = parseColor(fillColorValue);
+            }
+            
+            // Get opacity separately (defaults to 1.0 if not specified)
+            const opacityValue = getPaintProperty(activeLayer.id,
+                extrusionLayer ? 'fill-extrusion-opacity' : 'fill-opacity',
+                feature, zoom);
+            if (opacityValue !== null && opacityValue !== undefined) {
+                _fillColor[3] = opacityValue; // Set alpha channel
             }
         }
 
@@ -249,43 +257,43 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
 
     // Create two separate vertex arrays for visible and hidden rendering
     // NOTE: Coordinates are PRE-TRANSFORMED by vectorTileParser - use directly!
-    const coordsToVertices = (coords, color, targetArray, layerName = 'unknown') => {
+    const coordsToVertices = (coords, color, targetArray) => {
         const vertexStartIndex = targetArray.length / 7;
-        
         coords.forEach(coord => {
             const [x, y] = coord; // Coordinates already in Mercator clip space!
             targetArray.push(
-                x, y, 0.0,     // Position (z=0 for flat features)
-                ...color       // RGBA from paint color (preserve alpha for opacity)
+                x, y, 0.0, // Position (z=0 for flat map)
+                ...color   // Color
             );
         });
         return vertexStartIndex;
     };
 
     // NOTE: Coordinates are PRE-TRANSFORMED - use directly!
-    // Encode feature ID (24-bit) and layer ID (8-bit) into RGBA channels for hidden buffer
+    // Encode feature ID and layer ID into RGBA channels for hidden buffer
     const coordsToIdVertices = (coords, featureId, targetArray, zHeight = 0.0, layerName = 'unknown') => {
         const vertexStartIndex = targetArray.length / 7;
         
-        // Encode feature ID as 24-bit across R+G+B channels (16M unique IDs)
-        // R = high byte (bits 16-23), G = mid byte (bits 8-15), B = low byte (bits 0-7)
-        const safeId = Math.max(1, Math.min(16777214, featureId || 1)); // 24-bit range (avoid 0 and 16777215)
-        const highByte = Math.floor(safeId / 65536);        // Red channel
-        const midByte = Math.floor((safeId % 65536) / 256); // Green channel  
-        const lowByte = safeId % 256;                       // Blue channel
+        // Encode feature ID as 16-bit across red and green channels
+        // R = high byte (bits 8-15), G = low byte (bits 0-7)
+        const safeId = Math.max(1, Math.min(65534, featureId || 1)); // 16-bit range (avoid 0 and 65535)
+        const highByte = Math.floor(safeId / 256); // Red channel
+        const lowByte = safeId % 256;              // Green channel
         const normalizedR = highByte / 255.0;
-        const normalizedG = midByte / 255.0;
-        const normalizedB = lowByte / 255.0;
+        const normalizedG = lowByte / 255.0;
         
-        // Get proper layer ID index (0-255) and encode in alpha channel
+        // Get proper layer ID index (0-255) using getLayerIndex
         const layerIdx = getLayerIndex(layerName);
-        const normalizedA = layerIdx / 255.0;
+        const normalizedB = layerIdx / 255.0;
+        
+        // Alpha channel can be used for other purposes if needed (currently unused)
+        const normalizedA = 1.0;
         
         coords.forEach(coord => {
             const [x, y] = coord; // Coordinates already in Mercator clip space!
             targetArray.push(
                 x, y, zHeight,    // Position with Z height (for roof elevation)
-                normalizedR, normalizedG, normalizedB, normalizedA  // R+G+B=ID (24-bit), A=layerID
+                normalizedR, normalizedG, normalizedB, normalizedA  // R+G=ID, B=layerID, A=unused
             );
         });
         return vertexStartIndex;
@@ -296,19 +304,8 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
 
     const featureId = getFeatureId();
     
-    // Map feature ID to valid 24-bit range for rendering (1-16777214)
-    // We use 24-bit encoding: R (high byte) + G (mid byte) + B (low byte) = 16M unique IDs
-    // For IDs in range: use directly. For large IDs: use hash for better distribution
-    // Range: 1-16777214 (avoid 0=background, 16777215=reserved)
-    let clampedFeatureId;
-    if (featureId >= 1 && featureId <= 16777214) {
-        clampedFeatureId = featureId; // Already in range, use as-is
-    } else {
-        // For extremely large IDs, use multiplicative hashing
-        const id = Math.abs(featureId);
-        const hash = (id * 2654435761) >>> 0; // Knuth's multiplicative hash
-        clampedFeatureId = (hash % 16777213) + 1;
-    }
+    // Clamp feature ID to valid range for rendering (1-9999)
+    const clampedFeatureId = Math.max(1, Math.min(9999, featureId));
     
     if (processedFeatures.has(featureId)) {
         return null;
@@ -391,7 +388,7 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                 });
             } else {
                 // Flat polygon at z=0
-                const fillStartIndex = coordsToVertices(allCoords, _fillColor, fillVertices, layerId);
+                const fillStartIndex = coordsToVertices(allCoords, _fillColor, fillVertices);
                 
                 // Add triangle indices
                 triangles.forEach(index => {
@@ -415,7 +412,7 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
             // Note: Outlines for extruded buildings are now generated inside generateExtrusion()
             // For flat polygons, add ground-level outline
             if (!isExtruded || extrusionHeight === 0) {
-                const outlineStartIndex = coordsToVertices(outerRing, _borderColor, fillVertices, layerId);
+                const outlineStartIndex = coordsToVertices(outerRing, _borderColor, fillVertices);
                 for (let i = 0; i < outerRing.length - 1; i++) {
                     outlineIndices.push(outlineStartIndex + i, outlineStartIndex + i + 1);
                 }
@@ -491,7 +488,7 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                     });
                 } else {
                     // Flat polygon rendering
-                    const fillStartIndex = coordsToVertices(allCoords, _fillColor, fillVertices, layerId);
+                    const fillStartIndex = coordsToVertices(allCoords, _fillColor, fillVertices);
                     const hiddenStartIndex = coordsToIdVertices(allCoords, 
                         clampedFeatureId,
                         hiddenVertices,

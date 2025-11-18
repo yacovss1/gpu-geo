@@ -212,10 +212,10 @@
       "source-layer": "building",
       "minzoom": 14,
       "paint": {
-        "fill-extrusion-color": "#5D8AA8",
+        "fill-extrusion-color": "#a99a86",
         "fill-extrusion-height": ["get", "render_height"],
         "fill-extrusion-base": ["get", "render_min_height"],
-        "fill-extrusion-opacity": 1
+        "fill-extrusion-opacity": 0.8
       }
     },
     {
