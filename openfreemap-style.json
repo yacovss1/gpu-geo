@@ -21,7 +21,12 @@
       "type": "fill",
       "source": "openmaptiles",
       "source-layer": "water",
-      "minzoom": 0, 
+      "minzoom": 0,
+      "metadata": {
+        "shader-effects": {
+          "type": "animated-water"
+        }
+      },
       "paint": {
         "fill-color": "#aad3df"
       }
@@ -211,11 +216,16 @@
       "source": "openmaptiles",
       "source-layer": "building",
       "minzoom": 14,
+      "metadata": {
+        "shader-effects": {
+          "type": "glass"
+        }
+      },
       "paint": {
         "fill-extrusion-color": "#a99a86",
         "fill-extrusion-height": ["get", "render_height"],
         "fill-extrusion-base": ["get", "render_min_height"],
-        "fill-extrusion-opacity": 0.8
+        "fill-extrusion-opacity": 1
       }
     },
     {

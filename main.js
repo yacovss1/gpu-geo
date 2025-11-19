@@ -112,9 +112,18 @@ async function main() {
 
     // ===== Rendering State =====
     let isReadingMarkers = false;
+    let lastFrameTime = performance.now();
 
     // ===== Render Loop =====
     async function frame() {
+        // Calculate delta time for animations
+        const currentTime = performance.now();
+        const deltaTime = (currentTime - lastFrameTime) / 1000; // Convert to seconds
+        lastFrameTime = currentTime;
+        
+        // Update shader effect animations
+        renderer.updateEffectTime(deltaTime);
+        
         camera.updatePosition();
         const transformMatrix = camera.getMatrix();
         renderer.updateCameraTransform(transformMatrix);

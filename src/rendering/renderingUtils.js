@@ -125,20 +125,42 @@ export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, text
             const buffers = tileBuffers.get(layerId);
             if (!buffers) continue;
             
+            // Check for shader effects in layer metadata
+            const effectType = layer.metadata?.['shader-effects']?.type;
+            
             buffers.forEach(({ vertexBuffer, fillIndexBuffer, fillIndexCount, isLine }) => {
                 if (layerType === 'fill-extrusion' && fillIndexCount > 0) {
-                    colorPass.setPipeline(renderer.pipelines.extrusion);
-                    colorPass.setVertexBuffer(0, vertexBuffer);
-                    colorPass.setIndexBuffer(fillIndexBuffer, "uint32");
-                    colorPass.setBindGroup(0, renderer.bindGroups.main);
-                    colorPass.drawIndexed(fillIndexCount);
-                } else if (layerType === 'fill' && fillIndexCount > 0) {
-                    const useBias = fillsWithExtrusions.has(layerId);
-                    const pipeline = useBias ? renderer.pipelines.fillWithBias : renderer.pipelines.fill;
+                    // Check if extrusion has glass effect
+                    let pipeline, bindGroup;
+                    if (effectType === 'glass') {
+                        pipeline = renderer.getOrCreateEffectPipeline('glass');
+                        bindGroup = renderer.bindGroups.main; // Glass uses standard bind group
+                    } else {
+                        pipeline = renderer.pipelines.extrusion;
+                        bindGroup = renderer.bindGroups.main;
+                    }
+                    
                     colorPass.setPipeline(pipeline);
                     colorPass.setVertexBuffer(0, vertexBuffer);
                     colorPass.setIndexBuffer(fillIndexBuffer, "uint32");
-                    colorPass.setBindGroup(0, renderer.bindGroups.main);
+                    colorPass.setBindGroup(0, bindGroup);
+                    colorPass.drawIndexed(fillIndexCount);
+                } else if (layerType === 'fill' && fillIndexCount > 0) {
+                    // Check for water or grass effects
+                    let pipeline, bindGroup;
+                    if (effectType === 'animated-water' || effectType === 'grass') {
+                        pipeline = renderer.getOrCreateEffectPipeline(effectType);
+                        bindGroup = renderer.getOrCreateEffectBindGroup(effectType);
+                    } else {
+                        const useBias = fillsWithExtrusions.has(layerId);
+                        pipeline = useBias ? renderer.pipelines.fillWithBias : renderer.pipelines.fill;
+                        bindGroup = renderer.bindGroups.main;
+                    }
+                    
+                    colorPass.setPipeline(pipeline);
+                    colorPass.setVertexBuffer(0, vertexBuffer);
+                    colorPass.setIndexBuffer(fillIndexBuffer, "uint32");
+                    colorPass.setBindGroup(0, bindGroup);
                     colorPass.drawIndexed(fillIndexCount);
                 } else if (layerType === 'line' && isLine && fillIndexCount > 0) {
                     colorPass.setPipeline(renderer.pipelines.fill);

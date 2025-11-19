@@ -25,8 +25,8 @@ function getCountryId(countryName) {
         hash = ((hash << 5) - hash) + countryName.charCodeAt(i);
         hash = hash & hash;
     }
-    // Map to 1-9973 range (prime number for better distribution, under 10000 MAX_FEATURES)
-    return ((Math.abs(hash) % 9973) + 1);
+    // Map to 16-bit range (1-65533) for better distribution
+    return ((Math.abs(hash) % 65533) + 1);
 }
 
 export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], sourceId = null, zoom = 0) {
@@ -304,8 +304,19 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
 
     const featureId = getFeatureId();
     
-    // Clamp feature ID to valid range for rendering (1-9999)
-    const clampedFeatureId = Math.max(1, Math.min(9999, featureId));
+    // Map feature ID to valid 16-bit range for rendering (1-65534)
+    // We use 16-bit encoding: R (high byte) + G (low byte) = 65K unique IDs
+    // For IDs in range: use directly. For large IDs: use hash for better distribution
+    // Range: 1-65534 (avoid 0=background, 65535=reserved)
+    let clampedFeatureId;
+    if (featureId >= 1 && featureId <= 65534) {
+        clampedFeatureId = featureId; // Already in range, use as-is
+    } else {
+        // For extremely large IDs, use multiplicative hashing
+        const id = Math.abs(featureId);
+        const hash = (id * 2654435761) >>> 0; // Knuth's multiplicative hash
+        clampedFeatureId = (hash % 65533) + 1;
+    }
     
     if (processedFeatures.has(featureId)) {
         return null;

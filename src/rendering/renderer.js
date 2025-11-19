@@ -4,6 +4,7 @@ import {
     debugVertexShaderCode, debugFragmentShaderCode 
 } from '../shaders/shaders.js';
 import { GPUTextRenderer } from '../text/gpuTextRenderer.js';
+import { ShaderEffectManager } from '../core/shaderEffectManager.js';
 
 // Cache shaders and layouts to avoid recreation
 let cachedShaders = { 
@@ -214,6 +215,10 @@ export class MapRenderer {
         this.textures = {};
         this.buffers = {};
         this._lastLoggedVisualZoom = -1;
+        
+        // Initialize shader effect manager
+        this.effectManager = new ShaderEffectManager(device);
+        this.effectBindGroups = new Map(); // Cache bind groups for effects
         
         // Initialize pipelines
         this.initializePipelines();
@@ -586,6 +591,42 @@ export class MapRenderer {
                 indicator.style.borderLeft = `4px solid rgba(255,100,0,${effectStrength})`;
             }
         }
+    }
+    
+    /**
+     * Get or create an effect pipeline
+     */
+    getOrCreateEffectPipeline(effectType) {
+        const pipelineKey = `effect-${effectType}`;
+        
+        if (!this.pipelines[pipelineKey]) {
+            this.pipelines[pipelineKey] = this.effectManager.createEffectPipeline(effectType, this.format);
+        }
+        
+        return this.pipelines[pipelineKey];
+    }
+    
+    /**
+     * Get or create bind group for effect pipeline
+     */
+    getOrCreateEffectBindGroup(effectType) {
+        if (!this.effectBindGroups.has(effectType)) {
+            const pipeline = this.getOrCreateEffectPipeline(effectType);
+            if (pipeline) {
+                this.effectBindGroups.set(
+                    effectType,
+                    this.effectManager.createEffectBindGroup(pipeline, this.buffers.uniform)
+                );
+            }
+        }
+        return this.effectBindGroups.get(effectType);
+    }
+    
+    /**
+     * Update animation time for effects
+     */
+    updateEffectTime(deltaTime) {
+        this.effectManager.updateTime(deltaTime);
     }
     
     // Simplified rendering method for debug view
