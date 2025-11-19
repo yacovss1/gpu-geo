@@ -61,28 +61,10 @@ export class LabelManager {
                     // Evaluate text-field expression
                     const textField = matchingSymbolLayer.layout['text-field'];
                     labelText = this.evaluateTextField(textField, tileBuffer.properties);
-                } else {
-                    // Fallback to legacy name properties
-                    labelText = tileBuffer.properties.NAME || tileBuffer.properties.name || 
-                               tileBuffer.properties.ADM0_A3 || tileBuffer.properties.ISO_A3;
                 }
                 
-                // For buildings WITHOUT labels, create a synthetic label showing height
-                if (!labelText && sourceLayer === 'building' && clampedFid) {
-                    // Find the fill-extrusion layer for this source-layer to get height
-                    const extrusionLayer = style?.layers?.find(layer => 
-                        layer.type === 'fill-extrusion' && 
-                        layer['source-layer'] === sourceLayer
-                    );
-                    
-                    if (extrusionLayer) {
-                        const heightValue = getPaintProperty(extrusionLayer.id, 'fill-extrusion-height', 
-                            { properties: tileBuffer.properties }, currentZoom);
-                        if (heightValue > 0) {
-                            labelText = `${Math.round(heightValue)}m`; // Create synthetic label
-                        }
-                    }
-                }
+                // Only add labels for features that have a matching symbol layer with text-field
+                // (Don't create synthetic labels for buildings without text-field definitions)
                 
                 if (clampedFid && labelText) {
                     // Extract building height from fill-extrusion paint properties
