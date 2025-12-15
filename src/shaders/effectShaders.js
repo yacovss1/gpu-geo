@@ -88,26 +88,19 @@ fn main(@location(0) fragCoord: vec2<f32>,
         @location(1) color: vec4<f32>, 
         @location(2) worldZ: f32) -> @location(0) vec4<f32> {
     
-    // Convert Z to building height in meters
-    let buildingHeight = worldZ * 300.0;
-    let heightThreshold = 50.0; // Start glass effect above 50m
+    // Sky color for reflection (bright blue)
+    let skyColor = vec3<f32>(0.5, 0.75, 1.0);
     
-    if (buildingHeight > heightThreshold) {
-        // Sky color for reflection (light blue)
-        let skyColor = vec3<f32>(0.53, 0.81, 0.92);
-        
-        // Calculate reflection amount (0.0 to 0.7 max)
-        let reflectionAmount = min((buildingHeight - heightThreshold) / 100.0, 0.7);
-        
-        // Mix building color with sky reflection
-        let glassColor = mix(color.rgb, skyColor, reflectionAmount);
-        
-        // Make glass slightly transparent
-        return vec4<f32>(glassColor, color.a * 0.85);
-    }
+    // Apply glass effect based on height
+    // worldZ represents building height in world units
+    // Higher buildings get more reflection
+    let reflectionAmount = clamp(worldZ * 0.3, 0.0, 0.6);
     
-    // Normal rendering for buildings below threshold
-    return color;
+    // Mix building color with sky reflection
+    let glassColor = mix(color.rgb, skyColor, reflectionAmount);
+    
+    // Slight transparency for glass effect
+    return vec4<f32>(glassColor, color.a * 0.95);
 }
 `;
 

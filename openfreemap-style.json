@@ -222,7 +222,14 @@
         }
       },
       "paint": {
-        "fill-extrusion-color": "#a99a86",
+        "fill-extrusion-color": [
+          "interpolate",
+          ["linear"],
+          ["get", "render_height"],
+          0, "#a99a86",
+          30, "#8899aa",
+          60, "#6688bb"
+        ],
         "fill-extrusion-height": ["get", "render_height"],
         "fill-extrusion-base": ["get", "render_min_height"],
         "fill-extrusion-opacity": 1
