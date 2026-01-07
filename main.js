@@ -172,11 +172,11 @@ async function main() {
                 renderer.buffers.zoomInfo
             );
             
-            // Upload and render labels
+            // Upload and render labels (uses cached collision data)
             const sourceId = styleManager.getStyle()?.sources 
                 ? Object.keys(styleManager.getStyle().sources).find(key => styleManager.getStyle().sources[key].type === 'vector') 
                 : null;
-            textRenderer.uploadLabelData(featureNames, camera, sourceId);
+            textRenderer.uploadLabelData(featureNames, camera, sourceId, markerResources.markerBuffer);
             textRenderer.render(overlayEncoder, textureView, markerResources.markerBuffer, renderer.buffers.uniform);
             
             device.queue.submit([overlayEncoder.finish()]);

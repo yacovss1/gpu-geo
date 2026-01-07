@@ -145,6 +145,16 @@ export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, text
                     colorPass.setIndexBuffer(fillIndexBuffer, "uint32");
                     colorPass.setBindGroup(0, bindGroup);
                     colorPass.drawIndexed(fillIndexCount);
+                } else if (layerType === 'line-extrusion') {
+                    // Render 3D tubes/pipes - for now render as thick lines
+                    // TODO: Implement full cylinder geometry with proper tube shader
+                    if (isLine && fillIndexCount > 0) {
+                        colorPass.setPipeline(renderer.pipelines.fill);
+                        colorPass.setVertexBuffer(0, vertexBuffer);
+                        colorPass.setIndexBuffer(fillIndexBuffer, "uint32");
+                        colorPass.setBindGroup(0, renderer.bindGroups.main);
+                        colorPass.drawIndexed(fillIndexCount);
+                    }
                 } else if (layerType === 'fill' && fillIndexCount > 0) {
                     // Check for water or grass effects
                     let pipeline, bindGroup;

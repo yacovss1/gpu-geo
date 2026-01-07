@@ -24,7 +24,11 @@ struct Label {
     featureId: u32,
     charStart: u32,
     charCount: u32,
-    padding: u32,
+    mode: u32,              // 0=DIRECT, 1=OFFSET_3D, 2=HIDDEN
+    anchorPos: vec3<f32>,   // 3D position of feature
+    padding1: f32,
+    offsetVector: vec3<f32>, // Displacement from anchor
+    padding2: f32,
 };
 
 struct CharMetrics {
@@ -147,16 +151,33 @@ fn vertexMain(
         uv = vec2<f32>(metrics.u0, metrics.v0);
     }
     
+    // Handle different label placement modes
+    if (label.mode == 2u) {
+        // HIDDEN mode - discard
+        output.position = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+        return output;
+    }
+    
     // Position text slightly above the marker
     // Marker position already has isometric offset applied (from hidden texture)
     let labelOffset = 0.035;
     
-    output.position = vec4<f32>(
-        marker.center.x + xOffset + corner.x,
-        marker.center.y + labelOffset + corner.y,
-        0.5,
-        1.0
-    );
+    var finalX: f32;
+    var finalY: f32;
+    
+    if (label.mode == 1u) {
+        // OFFSET_3D mode - use anchor + offset
+        // For now, just apply the offset in 2D screen space
+        // TODO: Implement proper 3D projection with depth
+        finalX = marker.center.x + label.offsetVector.x + xOffset + corner.x;
+        finalY = marker.center.y + label.offsetVector.y + labelOffset + corner.y;
+    } else {
+        // DIRECT mode - place at marker position
+        finalX = marker.center.x + xOffset + corner.x;
+        finalY = marker.center.y + labelOffset + corner.y;
+    }
+    
+    output.position = vec4<f32>(finalX, finalY, 0.5, 1.0);
     output.texCoord = uv;
     
     return output;

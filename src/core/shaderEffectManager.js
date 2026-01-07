@@ -7,7 +7,7 @@ import {
     glassFragmentShaderCode, 
     grassVertexShaderCode,
     standardFragmentShaderCode 
-} from '../shaders/effectShaders.js';
+} from '../shaders/effects/index.js';
 import { vertexShaderCode } from '../shaders/shaders.js';
 
 export class ShaderEffectManager {
@@ -118,13 +118,13 @@ export class ShaderEffectManager {
             },
             depthStencil: {
                 format: 'depth24plus',
-                depthWriteEnabled: true,
+                depthWriteEnabled: false,  // Don't write depth for 2D water - use painter's algorithm
                 depthCompare: 'less-equal',
             },
             multisample: { count: 4 }
         });
     }
-    
+
     /**
      * Create glass effect pipeline (for tall buildings)
      */

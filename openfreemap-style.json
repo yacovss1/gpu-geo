@@ -127,6 +127,27 @@
       }
     },
     {
+      "id": "pipes_water",
+      "type": "line-extrusion",
+      "source": "openmaptiles",
+      "source-layer": "transportation",
+      "minzoom": 14,
+      "filter": ["==", ["get", "class"], "service"],
+      "metadata": {
+        "pipe-config": {
+          "radius": 0.5,
+          "depth": -5.0,
+          "segments": 8
+        }
+      },
+      "paint": {
+        "line-color": "#4488ff",
+        "line-width": 2.0,
+        "line-depth": -5.0,
+        "line-radius": 0.5
+      }
+    },
+    {
       "id": "road_motorway",
       "type": "line",
       "source": "openmaptiles",

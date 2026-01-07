@@ -19,9 +19,17 @@ export async function initWebGPU(canvas) {
         }
     });
     
-    // Log uncaptured errors
+    // Log uncaptured errors with full details
     device.addEventListener('uncapturederror', (event) => {
         console.error('WebGPU uncaptured error:', event.error);
+        console.error('Error details:', {
+            message: event.error.message,
+            reason: event.error.reason
+        });
+        // Print stack trace if available
+        if (event.error.stack) {
+            console.error('Stack:', event.error.stack);
+        }
     });
     
     const context = canvas.getContext('webgpu');

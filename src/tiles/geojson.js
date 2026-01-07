@@ -96,9 +96,16 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
             l.layout?.visibility !== 'none' &&
             (!l.filter || evaluateFilter(l.filter, feature, zoom))
         );
+        
+        const lineExtrusionLayer = layers.find(l => 
+            l.type === 'line-extrusion' && 
+            (!l['source-layer'] || l['source-layer'] === feature.layer?.name) &&
+            l.layout?.visibility !== 'none' &&
+            (!l.filter || evaluateFilter(l.filter, feature, zoom))
+        );
 
-        // Prefer fill-extrusion over fill, then line
-        const activeLayer = extrusionLayer || fillLayer || lineLayer;
+        // Prefer fill-extrusion over fill, then line-extrusion, then line
+        const activeLayer = extrusionLayer || fillLayer || lineExtrusionLayer || lineLayer;
         
         // If no visible layer found, skip this feature silently
         if (!activeLayer) {
@@ -143,8 +150,9 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
             }
         }
 
-        if (lineLayer) {
-            const lineColorValue = getPaintProperty(lineLayer.id, 'line-color', feature, zoom);
+        if (lineLayer || lineExtrusionLayer) {
+            const activeLineLayer = lineExtrusionLayer || lineLayer;
+            const lineColorValue = getPaintProperty(activeLineLayer.id, 'line-color', feature, zoom);
             if (lineColorValue) {
                 _borderColor = parseColor(lineColorValue);
             }
@@ -528,7 +536,7 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
             if (style && sourceId) {
                 const layers = getLayersBySource(sourceId);
                 const lineLayer = layers.find(l => 
-                    l.type === 'line' && 
+                    (l.type === 'line' || l.type === 'line-extrusion') && 
                     (!l['source-layer'] || l['source-layer'] === feature.layer?.name) &&
                     l.layout?.visibility !== 'none'
                 );

@@ -5,6 +5,7 @@ import {
 } from '../shaders/shaders.js';
 import { GPUTextRenderer } from '../text/gpuTextRenderer.js';
 import { ShaderEffectManager } from '../core/shaderEffectManager.js';
+import { TubePipeline } from './tubePipeline.js';
 
 // Cache shaders and layouts to avoid recreation
 let cachedShaders = { 
@@ -220,6 +221,9 @@ export class MapRenderer {
         this.effectManager = new ShaderEffectManager(device);
         this.effectBindGroups = new Map(); // Cache bind groups for effects
         
+        // Initialize tube/pipe renderer
+        this.tubePipeline = new TubePipeline(device, format);
+        
         // Initialize pipelines
         this.initializePipelines();
     }
@@ -321,6 +325,9 @@ export class MapRenderer {
             layout: this.pipelines.debug.getBindGroupLayout(0),
             entries: [{ binding: 0, resource: this.textures.hidden.createView() }]
         });
+        
+        // Initialize tube pipeline with camera buffer
+        await this.tubePipeline.initialize(this.buffers.uniform);
         
         // Update initial camera transform
         this.updateCameraTransform(camera.getMatrix());

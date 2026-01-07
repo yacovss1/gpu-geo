@@ -3,10 +3,18 @@
 
 import { getSymbolLayers } from '../core/style.js';
 import { textShaderCode } from '../shaders/textShaders.js';
+import { LabelCollisionDetector } from './labelCollisionDetector.js';
 
 const MAX_LABELS = 10000;
 const MAX_CHARS_PER_LABEL = 32;
 const MAX_TOTAL_CHARS = MAX_LABELS * MAX_CHARS_PER_LABEL;
+
+// Label placement modes
+export const LabelMode = {
+    DIRECT: 0,      // Place directly on feature (no offset)
+    OFFSET_3D: 1,   // Offset in 3D space with leader line
+    HIDDEN: 2       // Don't render (too crowded)
+};
 
 /**
  * GPU-Native TextRenderer - all geometry generation happens on GPU
@@ -24,6 +32,9 @@ export class GPUTextRenderer {
         this.initialized = false;
         this.labelCount = 0;
         this.totalCharCount = 0;  // Track actual character count
+        this.collisionDetector = new LabelCollisionDetector();
+        this.cachedMarkerPositions = new Map(); // Cache marker positions to avoid reading every frame
+        this.isReadingMarkers = false;
     }
 
     /**
@@ -37,8 +48,16 @@ export class GPUTextRenderer {
             this.fontMetrics = metrics;
             
             // Create storage buffers
+            // Label buffer layout (48 bytes per label):
+            // - featureId: u32 (4 bytes)
+            // - charStart: u32 (4 bytes)
+            // - charCount: u32 (4 bytes)
+            // - mode: u32 (4 bytes) - DIRECT, OFFSET_3D, or HIDDEN
+            // - anchorPos: vec3<f32> (12 bytes) - feature's 3D position
+            // - offsetVector: vec3<f32> (12 bytes) - displacement from anchor
+            // - padding: vec2<f32> (8 bytes) - alignment
             this.labelBuffer = this.device.createBuffer({
-                size: MAX_LABELS * 16, // 4 floats per label: vec2 position (unused, from marker), u32 charStart, u32 charCount
+                size: MAX_LABELS * 48, // 12 floats per label (expanded for 3D data)
                 usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
             });
             
@@ -213,8 +232,9 @@ export class GPUTextRenderer {
 
     /**
      * Upload label data to GPU - called once per frame
+     * Uses cached marker positions from previous frame for collision detection (non-blocking)
      */
-    uploadLabelData(featureNames, camera, sourceId = null) {
+    uploadLabelData(featureNames, camera, sourceId = null, markerBuffer = null) {
         if (!this.initialized || featureNames.size === 0) {
             this.labelCount = 0;
             return;
@@ -224,10 +244,12 @@ export class GPUTextRenderer {
         const symbolLayers = sourceId ? getSymbolLayers(sourceId) : [];
         const currentZoom = camera ? camera.zoom : 0;
         
-        const labelData = [];
+        // First pass: collect label candidates for collision detection
+        const labelCandidates = [];
         const textData = [];
         let charOffset = 0;
         
+        // Collect label candidates
         for (const [featureId, featureData] of featureNames) {
             const name = typeof featureData === 'string' ? featureData : featureData.name;
             const sourceLayer = typeof featureData === 'object' ? featureData.sourceLayer : null;
@@ -270,14 +292,99 @@ export class GPUTextRenderer {
             
             // Limit label length
             const labelText = name.substring(0, MAX_CHARS_PER_LABEL);
+            
+            labelCandidates.push({
+                featureId,
+                text: labelText,
+                sourceLayer,
+                priority: 0  // Will be set by collision detector
+            });
+            
+            if (labelCandidates.length >= MAX_LABELS) break;
+        }
+        
+        // Update cached marker positions asynchronously (non-blocking)
+        if (markerBuffer && labelCandidates.length > 0 && !this.isReadingMarkers) {
+            this.isReadingMarkers = true;
+            
+            // Read marker positions in background without blocking render
+            (async () => {
+                try {
+                    const stagingBuffer = this.device.createBuffer({
+                        size: markerBuffer.size,
+                        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+                    });
+                    
+                    const encoder = this.device.createCommandEncoder();
+                    encoder.copyBufferToBuffer(markerBuffer, 0, stagingBuffer, 0, markerBuffer.size);
+                    this.device.queue.submit([encoder.finish()]);
+                    
+                    await this.device.queue.onSubmittedWorkDone();
+                    await stagingBuffer.mapAsync(GPUMapMode.READ);
+                    
+                    const markerData = new Float32Array(stagingBuffer.getMappedRange());
+                    const newPositions = new Map();
+                    
+                    const MARKER_STRIDE = 10;
+                    for (let i = 0; i < Math.min(65535, markerData.length / MARKER_STRIDE); i++) {
+                        const offset = i * MARKER_STRIDE;
+                        const centerX = markerData[offset];
+                        const centerY = markerData[offset + 1];
+                        const height = markerData[offset + 2];
+                        const featureId = Math.round(markerData[offset + 8]);
+                        
+                        if (centerX !== 0 || centerY !== 0) {
+                            newPositions.set(featureId, {
+                                x: centerX,
+                                y: centerY,
+                                z: height
+                            });
+                        }
+                    }
+                    
+                    this.cachedMarkerPositions = newPositions;
+                    stagingBuffer.unmap();
+                    stagingBuffer.destroy();
+                } catch (error) {
+                    console.error('❌ Failed to read marker buffer:', error);
+                } finally {
+                    this.isReadingMarkers = false;
+                }
+            })();
+        }
+        
+        // Run collision detection with cached marker positions (from previous frame)
+        const processedLabels = this.collisionDetector.detectCollisions(labelCandidates, this.cachedMarkerPositions);
+        
+        // Build final label data with collision-resolved modes and offsets
+        const labelData = [];
+        for (const label of processedLabels) {
+            const labelText = label.text;
             const charCount = labelText.length;
             
-            // Store label metadata: featureId, charStart, charCount, padding
+            // Store label metadata (48 bytes = 12 floats):
+            // u32: featureId, charStart, charCount, mode
+            // vec3: anchorPos
+            // vec3: offsetVector
+            // vec2: padding
+            const featureIdBits = new Float32Array(new Uint32Array([label.featureId]).buffer)[0];
+            const charStartBits = new Float32Array(new Uint32Array([charOffset]).buffer)[0];
+            const charCountBits = new Float32Array(new Uint32Array([charCount]).buffer)[0];
+            const modeBits = new Float32Array(new Uint32Array([label.mode]).buffer)[0];
+            
             labelData.push(
-                featureId,           // Will index into marker buffer
-                charOffset,          // Where this label's text starts
-                charCount,           // How many chars
-                0                    // Padding
+                featureIdBits,           // u32 as float bits
+                charStartBits,           // u32 as float bits
+                charCountBits,           // u32 as float bits
+                modeBits,                // u32 as float bits
+                label.anchorPos[0],      // anchor X
+                label.anchorPos[1],      // anchor Y
+                label.anchorPos[2],      // anchor Z
+                0,                       // padding
+                label.offsetVector[0],   // offset X
+                label.offsetVector[1],   // offset Y
+                label.offsetVector[2],   // offset Z
+                0                        // padding
             );
             
             // Store character ASCII values
@@ -286,11 +393,9 @@ export class GPUTextRenderer {
             }
             
             charOffset += charCount;
-            
-            if (labelData.length / 4 >= MAX_LABELS) break;
         }
         
-        this.labelCount = labelData.length / 4;
+        this.labelCount = labelData.length / 12;  // 12 floats per label now
         this.totalCharCount = charOffset;  // Store actual total
         
         if (this.labelCount === 0) return 0;
@@ -299,7 +404,7 @@ export class GPUTextRenderer {
         this.device.queue.writeBuffer(
             this.labelBuffer, 
             0, 
-            new Uint32Array(labelData)
+            new Float32Array(labelData)  // Use Float32Array since we have mixed float/u32 data
         );
         
         this.device.queue.writeBuffer(
