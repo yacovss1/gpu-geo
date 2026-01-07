@@ -127,24 +127,20 @@
       }
     },
     {
-      "id": "pipes_water",
+      "id": "pipes_test",
       "type": "line-extrusion",
       "source": "openmaptiles",
-      "source-layer": "transportation",
-      "minzoom": 14,
-      "filter": ["==", ["get", "class"], "service"],
+      "source-layer": "waterway",
+      "minzoom": 8,
       "metadata": {
-        "pipe-config": {
-          "radius": 0.5,
-          "depth": -5.0,
-          "segments": 8
-        }
+        "render-as-tubes": true,
+        "tube-shape": "circular"
       },
       "paint": {
-        "line-color": "#4488ff",
+        "line-color": "#4da6ff",
         "line-width": 2.0,
-        "line-depth": -5.0,
-        "line-radius": 0.5
+        "line-extrusion-height": 5,
+        "line-extrusion-base": 0
       }
     },
     {
@@ -153,7 +149,7 @@
       "source": "openmaptiles",
       "source-layer": "transportation",
       "minzoom": 5,
-      "filter": ["==", ["get", "class"], "motorway"],
+      "filter": ["==", ["get", "class"], "DISABLED_motorway"],
       "paint": {
         "line-color": "#fc8",
         "line-width": ["interpolate", ["exponential", 1.5], ["zoom"], 5, 0.8, 8, 2, 12, 4, 14, 6]

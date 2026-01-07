@@ -35,6 +35,7 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
     const fillIndices = [];
     const outlineIndices = [];
     const hiddenfillIndices = [];
+    const lineSegments = []; // For line-extrusion 3D tube rendering
     let isFilled = true;
     let isLine = true;
 
@@ -560,27 +561,276 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
             // Coordinates are already transformed - use directly
             const transformedLineCoords = feature.geometry.coordinates;
             
+            // Check if this is a line-extrusion layer (needs 3D tube geometry)
+            const isLineExtrusion = style && sourceId && getLayersBySource(sourceId).some(l =>
+                (l.type === 'line-extrusion' || l.metadata?.['render-as-tubes'] === true) &&
+                l.id === layerId
+            );
+            
             // Convert line width from pixels to world space
             const worldWidth = screenWidthToWorld(lineWidth, zoom, 512);
             
             // Tessellate line into triangles
             const tessellated = tessellateLine(transformedLineCoords, worldWidth, lineCap, lineJoin, miterLimit);
             
-            // Add tessellated vertices and indices
-            const lineStartIndex = fillVertices.length / 7;
-            for (let i = 0; i < tessellated.vertices.length; i += 2) {
-                fillVertices.push(
-                    tessellated.vertices[i],     // x
-                    tessellated.vertices[i + 1], // y
-                    0.0,                          // z
-                    ..._borderColor               // color
-                );
+            if (isLineExtrusion && tessellated.vertices.length > 0) {
+                console.log(`🟣 LINE EXTRUSION: layer=${layerId}, coords=${transformedLineCoords.length}, tessVertices=${tessellated.vertices.length}`);
+                
+                // Check tube shape from metadata
+                const tubeShape = style?.layers?.find(l => l.id === layerId)?.metadata?.['tube-shape'] || 'rectangular';
+                
+                // Generate 3D extruded TUBE geometry with WIDTH (not just a thin ribbon)
+                const lineExtrusionHeight = getPaintProperty(style, layerId, 'line-extrusion-height', {}) || 10;
+                const lineExtrusionBase = getPaintProperty(style, layerId, 'line-extrusion-base', {}) || 0;
+                const lineWidth = getPaintProperty(style, layerId, 'line-width', {}) || 3.0;
+                
+                // Convert line width from pixels to meters (approximate - depends on zoom)
+                // At zoom 14, roughly 1 pixel = 2.4 meters
+                const widthInMeters = lineWidth * 2.4;
+                const radius = (widthInMeters * zoomExtrusion) / 2;
+                
+                const heightZ = lineExtrusionHeight * zoomExtrusion;
+                const baseZ = lineExtrusionBase * zoomExtrusion;
+                
+                console.log(`🟣 Shape=${tubeShape}, Height=${lineExtrusionHeight}m, Width=${widthInMeters}m, radius=${radius}`);
+                console.log(`🟣 heightZ=${heightZ}, baseZ=${baseZ}, zoomExtrusion=${zoomExtrusion}`);
+                
+                if (tubeShape === 'circular') {
+                    // ===== CIRCULAR TUBE GEOMETRY =====
+                    const segments = 12; // Number of sides around the circle (12 = dodecagon)
+                    
+                    console.log(`🔵 CIRCULAR TUBE: coords=${transformedLineCoords.length}, segments=${segments}`);
+                    
+                    // Step 1: Generate all circle cross-sections along the line path
+                    const circles = [];
+                    for (let i = 0; i < transformedLineCoords.length; i++) {
+                        const [cx, cy] = transformedLineCoords[i];
+                        
+                        // Calculate perpendicular direction at this point
+                        let perpX, perpY;
+                        if (i === 0) {
+                            // First point
+                            const [nx, ny] = transformedLineCoords[i + 1];
+                            const dx = nx - cx, dy = ny - cy;
+                            const len = Math.sqrt(dx * dx + dy * dy);
+                            perpX = -dy / len;
+                            perpY = dx / len;
+                        } else if (i === transformedLineCoords.length - 1) {
+                            // Last point
+                            const [px, py] = transformedLineCoords[i - 1];
+                            const dx = cx - px, dy = cy - py;
+                            const len = Math.sqrt(dx * dx + dy * dy);
+                            perpX = -dy / len;
+                            perpY = dx / len;
+                        } else {
+                            // Middle point - average direction
+                            const [px, py] = transformedLineCoords[i - 1];
+                            const [nx, ny] = transformedLineCoords[i + 1];
+                            const dx1 = cx - px, dy1 = cy - py;
+                            const dx2 = nx - cx, dy2 = ny - cy;
+                            const len1 = Math.sqrt(dx1 * dx1 + dy1 * dy1);
+                            const len2 = Math.sqrt(dx2 * dx2 + dy2 * dy2);
+                            perpX = -(dy1 / len1 + dy2 / len2) / 2;
+                            perpY = (dx1 / len1 + dx2 / len2) / 2;
+                            const perpLen = Math.sqrt(perpX * perpX + perpY * perpY);
+                            perpX /= perpLen;
+                            perpY /= perpLen;
+                        }
+                        
+                        circles.push({ cx, cy, perpX, perpY });
+                    }
+                    
+                    // Step 2: Generate vertices for all circles
+                    const circleStartIdx = fillVertices.length / 7;
+                    for (let i = 0; i < circles.length; i++) {
+                        const { cx, cy, perpX, perpY } = circles[i];
+                        
+                        // Create ring of vertices around circle
+                        for (let s = 0; s < segments; s++) {
+                            const angle = (s / segments) * Math.PI * 2;
+                            
+                            // Circle in horizontal plane (XY) and vertical (Z)
+                            const horizontalOffset = Math.cos(angle) * radius;
+                            const verticalOffset = Math.sin(angle) * radius;
+                            
+                            // Apply horizontal offset perpendicular to path
+                            const vx = cx + perpX * horizontalOffset;
+                            const vy = cy + perpY * horizontalOffset;
+                            const vz = (baseZ + heightZ) / 2 + verticalOffset;
+                            
+                            // Calculate lighting based on surface normal
+                            const normalX = perpX * Math.cos(angle);
+                            const normalY = perpY * Math.cos(angle);
+                            const normalZ = Math.sin(angle);
+                            
+                            const normalAngle = Math.atan2(normalY, normalX);
+                            const sunAngle = Math.PI * 0.75;
+                            const lightDot = Math.cos(normalAngle - sunAngle) * 0.7 + normalZ * 0.3;
+                            const lightFactor = 0.5 + lightDot * 0.3;
+                            
+                            const color = [
+                                _borderColor[0] * lightFactor,
+                                _borderColor[1] * lightFactor,
+                                _borderColor[2] * lightFactor,
+                                _borderColor[3]
+                            ];
+                            
+                            fillVertices.push(vx, vy, vz, ...color);
+                        }
+                    }
+                    
+                    // Step 3: Connect adjacent circles with quad strips
+                    for (let i = 0; i < circles.length - 1; i++) {
+                        const ring1Start = circleStartIdx + i * segments;
+                        const ring2Start = circleStartIdx + (i + 1) * segments;
+                        
+                        for (let s = 0; s < segments; s++) {
+                            const next = (s + 1) % segments;
+                            const v1 = ring1Start + s;
+                            const v2 = ring1Start + next;
+                            const v3 = ring2Start + next;
+                            const v4 = ring2Start + s;
+                            
+                            // Two triangles per quad
+                            fillIndices.push(v1, v2, v3);
+                            fillIndices.push(v1, v3, v4);
+                        }
+                    }
+                    
+                    const vertCount = fillVertices.length / 7;
+                    const idxCount = fillIndices.length;
+                    console.log(`🔵 CIRCULAR COMPLETE: vertices=${vertCount}, indices=${idxCount}`);
+                    
+                } else {
+                    // ===== RECTANGULAR TUBE GEOMETRY (existing code) =====
+                    const leftEdge = [];
+                    const rightEdge = [];
+                
+                    for (let i = 0; i < transformedLineCoords.length; i++) {
+                        const [x, y] = transformedLineCoords[i];
+                        
+                        // Calculate perpendicular direction
+                        let perpX, perpY;
+                        if (i === 0) {
+                            // First point - use direction to next point
+                            const [nx, ny] = transformedLineCoords[i + 1];
+                            const dx = nx - x;
+                            const dy = ny - y;
+                            const len = Math.sqrt(dx * dx + dy * dy);
+                            perpX = -dy / len;
+                            perpY = dx / len;
+                        } else if (i === transformedLineCoords.length - 1) {
+                            // Last point - use direction from previous point
+                            const [px, py] = transformedLineCoords[i - 1];
+                            const dx = x - px;
+                            const dy = y - py;
+                            const len = Math.sqrt(dx * dx + dy * dy);
+                            perpX = -dy / len;
+                            perpY = dx / len;
+                        } else {
+                            // Middle point - average of incoming and outgoing directions
+                            const [px, py] = transformedLineCoords[i - 1];
+                            const [nx, ny] = transformedLineCoords[i + 1];
+                            const dx1 = x - px, dy1 = y - py;
+                            const dx2 = nx - x, dy2 = ny - y;
+                            const len1 = Math.sqrt(dx1 * dx1 + dy1 * dy1);
+                            const len2 = Math.sqrt(dx2 * dx2 + dy2 * dy2);
+                            perpX = -(dy1 / len1 + dy2 / len2) / 2;
+                            perpY = (dx1 / len1 + dx2 / len2) / 2;
+                            const perpLen = Math.sqrt(perpX * perpX + perpY * perpY);
+                            perpX /= perpLen;
+                            perpY /= perpLen;
+                        }
+                        
+                        leftEdge.push([x + perpX * radius, y + perpY * radius]);
+                        rightEdge.push([x - perpX * radius, y - perpY * radius]);
+                    }
+                    
+                    // Now create the tube geometry using the left/right edges as a closed polygon
+                    // Bottom face, top face, and walls around perimeter
+                    const tubeStartIndex = fillVertices.length / 7;
+                    
+                    // Bottom face vertices (left edge + right edge reversed)
+                    const bottomVerts = [];
+                    leftEdge.forEach(([x, y]) => {
+                        fillVertices.push(x, y, baseZ, ..._borderColor);
+                        bottomVerts.push(fillVertices.length / 7 - 1);
+                    });
+                    rightEdge.slice().reverse().forEach(([x, y]) => {
+                        fillVertices.push(x, y, baseZ, ..._borderColor);
+                        bottomVerts.push(fillVertices.length / 7 - 1);
+                    });
+                    
+                    // Top face vertices (same outline at heightZ)
+                    const topVerts = [];
+                    leftEdge.forEach(([x, y]) => {
+                        fillVertices.push(x, y, heightZ, ..._borderColor);
+                        topVerts.push(fillVertices.length / 7 - 1);
+                    });
+                    rightEdge.slice().reverse().forEach(([x, y]) => {
+                        fillVertices.push(x, y, heightZ, ..._borderColor);
+                        topVerts.push(fillVertices.length / 7 - 1);
+                    });
+                    
+                    // Triangulate bottom and top faces using earcut
+                    const bottomCoords = [];
+                    leftEdge.forEach(([x, y]) => bottomCoords.push(x, y));
+                    rightEdge.slice().reverse().forEach(([x, y]) => bottomCoords.push(x, y));
+                    const bottomIndices = earcut(bottomCoords, null, 2);
+                    bottomIndices.forEach(idx => fillIndices.push(bottomVerts[idx]));
+                    bottomIndices.forEach(idx => fillIndices.push(topVerts[idx]));  // Same triangulation for top
+                    
+                    // Create walls around the perimeter with lighting
+                    const createWall = (edge, isLeftSide) => {
+                        for (let i = 0; i < edge.length - 1; i++) {
+                            const [x1, y1] = edge[i];
+                            const [x2, y2] = edge[i + 1];
+                            
+                            // Calculate lighting
+                            const dx = x2 - x1, dy = y2 - y1;
+                            const angle = Math.atan2(dy, dx);
+                            const sunAngle = Math.PI * 0.75;
+                            const lightDot = Math.cos(angle - sunAngle) * (isLeftSide ? 1 : -1);
+                            const lightFactor = 0.4 + lightDot * 0.4;
+                            
+                            const wallColor = [
+                                _borderColor[0] * lightFactor,
+                                _borderColor[1] * lightFactor,
+                                _borderColor[2] * lightFactor,
+                                _borderColor[3]
+                            ];
+                            
+                            const vOff = fillVertices.length / 7;
+                            fillVertices.push(x1, y1, baseZ, ...wallColor);
+                            fillVertices.push(x2, y2, baseZ, ...wallColor);
+                            fillVertices.push(x2, y2, heightZ, ...wallColor);
+                            fillVertices.push(x1, y1, heightZ, ...wallColor);
+                            
+                            fillIndices.push(vOff, vOff + 1, vOff + 2, vOff, vOff + 2, vOff + 3);
+                        }
+                    };
+                    
+                    createWall(leftEdge, true);
+                    createWall(rightEdge, false);
+                }
+                
+            } else {
+                // Regular flat 2D line rendering
+                const lineStartIndex = fillVertices.length / 7;
+                for (let i = 0; i < tessellated.vertices.length; i += 2) {
+                    fillVertices.push(
+                        tessellated.vertices[i],     // x
+                        tessellated.vertices[i + 1], // y
+                        0.0,                          // z
+                        ..._borderColor               // color
+                    );
+                }
+                
+                // Add indices for flat line
+                for (let i = 0; i < tessellated.indices.length; i++) {
+                    fillIndices.push(lineStartIndex + tessellated.indices[i]);
+                }
             }
-            
-            // Add triangle indices (lines render as filled triangles)
-            tessellated.indices.forEach(idx => {
-                fillIndices.push(lineStartIndex + idx);
-            });
             break;
         case 'MultiLineString':
             isFilled = false;
@@ -653,6 +903,7 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
         fillIndices: new Uint32Array(fillIndices),
         outlineIndices: new Uint32Array(outlineIndices),
         hiddenfillIndices: new Uint32Array(hiddenfillIndices),
+        lineSegments: lineSegments.length > 0 ? lineSegments : null, // For 3D tube rendering
         isFilled,
         isLine,
         layerId,  // Add layerId to return object

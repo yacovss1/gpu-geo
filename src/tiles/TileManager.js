@@ -252,7 +252,8 @@ export class TileManager {
             tileX: x,
             tileY: y,
             vertices: vertices,
-            layerId: layerId
+            layerId: layerId,
+            lineSegments: parsedFeature.lineSegments // Add line segment data for 3D tubes
         });
         
         // Add to hidden tile buffers

@@ -129,7 +129,7 @@ export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, text
             const effectType = layer.metadata?.['shader-effects']?.type;
             
             buffers.forEach(({ vertexBuffer, fillIndexBuffer, fillIndexCount, isLine }) => {
-                if (layerType === 'fill-extrusion' && fillIndexCount > 0) {
+                if ((layerType === 'fill-extrusion' || layerType === 'line-extrusion') && fillIndexCount > 0) {
                     // Check if extrusion has glass effect
                     let pipeline, bindGroup;
                     if (effectType === 'glass') {
@@ -145,16 +145,6 @@ export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, text
                     colorPass.setIndexBuffer(fillIndexBuffer, "uint32");
                     colorPass.setBindGroup(0, bindGroup);
                     colorPass.drawIndexed(fillIndexCount);
-                } else if (layerType === 'line-extrusion') {
-                    // Render 3D tubes/pipes - for now render as thick lines
-                    // TODO: Implement full cylinder geometry with proper tube shader
-                    if (isLine && fillIndexCount > 0) {
-                        colorPass.setPipeline(renderer.pipelines.fill);
-                        colorPass.setVertexBuffer(0, vertexBuffer);
-                        colorPass.setIndexBuffer(fillIndexBuffer, "uint32");
-                        colorPass.setBindGroup(0, renderer.bindGroups.main);
-                        colorPass.drawIndexed(fillIndexCount);
-                    }
                 } else if (layerType === 'fill' && fillIndexCount > 0) {
                     // Check for water or grass effects
                     let pipeline, bindGroup;
@@ -173,13 +163,29 @@ export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, text
                     colorPass.setBindGroup(0, bindGroup);
                     colorPass.drawIndexed(fillIndexCount);
                 } else if (layerType === 'line' && isLine && fillIndexCount > 0) {
-                    colorPass.setPipeline(renderer.pipelines.fill);
-                    colorPass.setVertexBuffer(0, vertexBuffer);
-                    colorPass.setIndexBuffer(fillIndexBuffer, "uint32");
-                    colorPass.setBindGroup(0, renderer.bindGroups.main);
-                    colorPass.drawIndexed(fillIndexCount);
+                    // Skip if this is a tube layer (will be rendered by tubePipeline)
+                    const layer = style?.layers?.find(l => l.id === layerId);
+                    const isTubeLayer = layer?.metadata?.['render-as-tubes'] === true;
+                    
+                    if (!isTubeLayer) {
+                        colorPass.setPipeline(renderer.pipelines.fill);
+                        colorPass.setVertexBuffer(0, vertexBuffer);
+                        colorPass.setIndexBuffer(fillIndexBuffer, "uint32");
+                        colorPass.setBindGroup(0, renderer.bindGroups.main);
+                        colorPass.drawIndexed(fillIndexCount);
+                    }
                 }
             });
+        }
+    }
+    
+    // Render 3D tubes/pipes for layers with render-as-tubes metadata
+    if (style?.layers && renderer.tubePipeline) {
+        for (const layer of style.layers) {
+            const hasTubeMetadata = layer.metadata?.['render-as-tubes'] === true;
+            if (hasTubeMetadata && shouldRenderLayer(layer.id, renderZoom)) {
+                renderer.tubePipeline.render(colorPass, tileBuffers, layer, renderZoom);
+            }
         }
     }
     
