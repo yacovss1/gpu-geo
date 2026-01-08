@@ -63,20 +63,36 @@ export function parseVectorTile(pbfData, tileX, tileY, zoom) {
   
   const layers = {};
   
+  // Track IDs per layer to detect duplicates
+  const seenIds = new Map(); // layerName -> Set of ids
+  
   // Process each layer in the tile
   for (const layerName in tile.layers) {
     const layer = tile.layers[layerName];
     const features = [];
     
+    if (!seenIds.has(layerName)) {
+      seenIds.set(layerName, new Set());
+    }
+    const layerSeenIds = seenIds.get(layerName);
+    
     // Process each feature in the layer
     for (let i = 0; i < layer.length; i++) {
       const vt2Feature = layer.feature(i);
+      
+      // Check for duplicate IDs
+      const featureId = vt2Feature.id;
+      if (featureId !== undefined && layerSeenIds.has(featureId)) {
+        console.warn(`⚠️ DUPLICATE ID in tile ${zoom}/${tileX}/${tileY} layer=${layerName}: id=${featureId}`);
+      }
+      if (featureId !== undefined) {
+        layerSeenIds.add(featureId);
+      }
       
       // loadGeometry() returns array of rings: [{x, y}, {x, y}, ...]
       const geometry = vt2Feature.loadGeometry();
       const extent = layer.extent || 4096;
       
-      // Transform and structure based on geometry type
       const geoJSONFeature = {
         type: 'Feature',
         id: vt2Feature.id,

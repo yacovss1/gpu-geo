@@ -18,6 +18,31 @@ import {
 
 const tileCache = new TileCache();
 
+// Global feature ID counter for unique picking IDs
+// This ensures every feature rendered gets a unique ID for picking
+let globalFeatureIdCounter = 1;
+const MAX_FEATURE_ID = 65534; // 16-bit limit (avoid 0 and 65535)
+
+// Track hash collisions globally
+const hashToOriginalId = new Map(); // clampedId -> first originalId that mapped to it
+
+// Reset counter (call when clearing all tiles)
+export function resetFeatureIdCounter() {
+    globalFeatureIdCounter = 1;
+    hashToOriginalId.clear();
+}
+
+// Get next unique feature ID
+function getNextFeatureId() {
+    const id = globalFeatureIdCounter;
+    globalFeatureIdCounter++;
+    if (globalFeatureIdCounter > MAX_FEATURE_ID) {
+        globalFeatureIdCounter = 1; // Wrap around (unlikely with normal usage)
+        console.warn('⚠️ Feature ID counter wrapped around - some IDs may duplicate');
+    }
+    return id;
+}
+
 // Create deterministic ID from country name (no collision resolution - let GPU handle duplicates)
 function getCountryId(countryName) {
     let hash = 0;
@@ -164,25 +189,53 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
         _fillColor = getColorOfCountries(countryCode, [0.7, 0.7, 0.7, 1.0]);
     }
 
-    // Get feature ID using style configuration or fallback
+    // Get feature ID - use the original ID from the vector tile
+    // Vector tiles provide consistent IDs across tile boundaries
     const getFeatureId = () => {
-        // For country features, ALWAYS use our deterministic hash (ignore style system)
-        const countryName = feature.properties?.NAME || feature.properties?.ADM0_A3 || feature.properties?.ISO_A3;
-        
-        if (countryName) {
-            // Use hash-based ID for ANY feature with a country name
-            const hashedId = getCountryId(countryName);
-            return hashedId;
+        // Use the feature's original ID from the vector tile
+        const originalId = feature.id ?? feature.properties?.id;
+        if (originalId !== undefined && originalId !== null && typeof originalId === 'number') {
+            // Return the original ID - clamping/hashing happens later
+            return originalId;
         }
         
-        // For other features, use style-based ID or fallback
-        if (style && sourceId) {
-            return getStyleFeatureId(feature, sourceId);
-        }
-        // Legacy fallback
-        const rawId = parseInt(feature.properties?.fid || feature.id) || 1;
-        return rawId;
+        // Fallback for features without IDs
+        return getNextFeatureId();
     };
+    
+    // Deduplicate features by tracking processed feature IDs
+    const processedFeatures = new Set();
+
+    const featureId = getFeatureId();
+    
+    // Map feature ID to valid 16-bit range for rendering (1-65534)
+    // We use 16-bit encoding: R (high byte) + G (low byte) = 65K unique IDs
+    // For IDs in range: use directly. For large IDs: use hash for better distribution
+    // Range: 1-65534 (avoid 0=background, 65535=reserved)
+    let clampedFeatureId;
+    if (featureId >= 1 && featureId <= 65534) {
+        clampedFeatureId = featureId; // Already in range, use as-is
+    } else {
+        // For extremely large IDs, use multiplicative hashing (Knuth's method)
+        const id = Math.abs(featureId);
+        const hash = (id * 2654435761) >>> 0; // Knuth's multiplicative hash
+        clampedFeatureId = (hash % 65533) + 1;
+    }
+    
+    // Check for hash collisions globally
+    if (hashToOriginalId.has(clampedFeatureId)) {
+        const firstId = hashToOriginalId.get(clampedFeatureId);
+        if (firstId !== featureId) {
+            console.warn(`⚠️ HASH COLLISION: ${featureId} and ${firstId} both map to clampedId=${clampedFeatureId}`);
+        }
+    } else {
+        hashToOriginalId.set(clampedFeatureId, featureId);
+    }
+    
+    if (processedFeatures.has(featureId)) {
+        return null;
+    }
+    processedFeatures.add(featureId);
     
     // Helper to generate extruded building geometry (walls + roof)
     // 28-byte format: position(12) + visual color(16)
@@ -308,30 +361,6 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
         return vertexStartIndex;
     };
 
-    // Deduplicate features by tracking processed feature IDs
-    const processedFeatures = new Set();
-
-    const featureId = getFeatureId();
-    
-    // Map feature ID to valid 16-bit range for rendering (1-65534)
-    // We use 16-bit encoding: R (high byte) + G (low byte) = 65K unique IDs
-    // For IDs in range: use directly. For large IDs: use hash for better distribution
-    // Range: 1-65534 (avoid 0=background, 65535=reserved)
-    let clampedFeatureId;
-    if (featureId >= 1 && featureId <= 65534) {
-        clampedFeatureId = featureId; // Already in range, use as-is
-    } else {
-        // For extremely large IDs, use multiplicative hashing
-        const id = Math.abs(featureId);
-        const hash = (id * 2654435761) >>> 0; // Knuth's multiplicative hash
-        clampedFeatureId = (hash % 65533) + 1;
-    }
-    
-    if (processedFeatures.has(featureId)) {
-        return null;
-    }
-    processedFeatures.add(featureId);
-
     switch (feature.geometry.type) {
         case 'Polygon':
             // Combine all rings into a single array with holes
@@ -370,10 +399,6 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                     return null;
                 }
                 
-                console.log(`🏢 EXTRUSION: ${extrusionHeight}m for feature ${clampedFeatureId}`);
-                console.log(`  Outer ring coords sample:`, outerRing.slice(0, 3));
-                console.log(`  Vertices before:`, fillVertices.length / 7, 'indices before:', fillIndices.length);
-                
                 // Generate 3D building geometry (walls + roof)
                 const roofStartIndex = generateExtrusion(
                     allCoords,
@@ -386,7 +411,6 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                     [] // Don't generate outline indices for buildings
                 );
                 
-                console.log(`  Vertices after:`, fillVertices.length / 7, 'indices after:', fillIndices.length);
                 // Triangulate the roof
                 triangles.forEach(index => {
                     fillIndices.push(roofStartIndex + index);
@@ -543,10 +567,8 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                 );
                 
                 if (!lineLayer) {
-                    // Road not matching any visible line layer - log for debugging
-                    if (feature.layer?.name === 'transportation') {
-                        console.log(`⚠️ LineString in 'transportation' not matching any layer. Properties:`, feature.properties, `zoom: ${zoom}`);
-                    }
+                    // Road not matching any visible line layer - skip silently
+                    // (many transportation features are filtered by zoom/style)
                 }
                 
                 if (lineLayer) {
@@ -574,8 +596,6 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
             const tessellated = tessellateLine(transformedLineCoords, worldWidth, lineCap, lineJoin, miterLimit);
             
             if (isLineExtrusion && tessellated.vertices.length > 0) {
-                console.log(`🟣 LINE EXTRUSION: layer=${layerId}, coords=${transformedLineCoords.length}, tessVertices=${tessellated.vertices.length}`);
-                
                 // Check tube shape from metadata
                 const tubeShape = style?.layers?.find(l => l.id === layerId)?.metadata?.['tube-shape'] || 'rectangular';
                 
@@ -592,14 +612,9 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                 const heightZ = lineExtrusionHeight * zoomExtrusion;
                 const baseZ = lineExtrusionBase * zoomExtrusion;
                 
-                console.log(`🟣 Shape=${tubeShape}, Height=${lineExtrusionHeight}m, Width=${widthInMeters}m, radius=${radius}`);
-                console.log(`🟣 heightZ=${heightZ}, baseZ=${baseZ}, zoomExtrusion=${zoomExtrusion}`);
-                
                 if (tubeShape === 'circular') {
                     // ===== CIRCULAR TUBE GEOMETRY =====
                     const segments = 12; // Number of sides around the circle (12 = dodecagon)
-                    
-                    console.log(`🔵 CIRCULAR TUBE: coords=${transformedLineCoords.length}, segments=${segments}`);
                     
                     // Step 1: Generate all circle cross-sections along the line path
                     const circles = [];
@@ -696,10 +711,6 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                             fillIndices.push(v1, v3, v4);
                         }
                     }
-                    
-                    const vertCount = fillVertices.length / 7;
-                    const idxCount = fillIndices.length;
-                    console.log(`🔵 CIRCULAR COMPLETE: vertices=${vertCount}, indices=${idxCount}`);
                     
                 } else {
                     // ===== RECTANGULAR TUBE GEOMETRY (existing code) =====
@@ -830,6 +841,30 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                 for (let i = 0; i < tessellated.indices.length; i++) {
                     fillIndices.push(lineStartIndex + tessellated.indices[i]);
                 }
+                
+                // Generate hidden buffer for line picking (CRITICAL - was missing!)
+                const hiddenLineStartIndex = hiddenVertices.length / 7;
+                const safeId = Math.max(1, Math.min(65534, clampedFeatureId || 1));
+                const highByte = Math.floor(safeId / 256);
+                const lowByte = safeId % 256;
+                const normalizedR = highByte / 255.0;
+                const normalizedG = lowByte / 255.0;
+                const layerIdx = getLayerIndex(layerId);
+                const normalizedB = layerIdx / 255.0;
+                
+                for (let i = 0; i < tessellated.vertices.length; i += 2) {
+                    hiddenVertices.push(
+                        tessellated.vertices[i],     // x
+                        tessellated.vertices[i + 1], // y
+                        0.0,                          // z
+                        normalizedR, normalizedG, normalizedB, 1.0  // R+G=ID, B=layerID
+                    );
+                }
+                
+                // Add hidden indices for line picking
+                for (let i = 0; i < tessellated.indices.length; i++) {
+                    hiddenfillIndices.push(hiddenLineStartIndex + tessellated.indices[i]);
+                }
             }
             break;
         case 'MultiLineString':
@@ -864,6 +899,15 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
             // Convert line width from pixels to world space
             const multiWorldWidth = screenWidthToWorld(multiLineWidth, zoom, 512);
             
+            // Pre-compute ID encoding for hidden buffer (same for all lines in this feature)
+            const multiSafeId = Math.max(1, Math.min(65534, clampedFeatureId || 1));
+            const multiHighByte = Math.floor(multiSafeId / 256);
+            const multiLowByte = multiSafeId % 256;
+            const multiNormalizedR = multiHighByte / 255.0;
+            const multiNormalizedG = multiLowByte / 255.0;
+            const multiLayerIdx = getLayerIndex(layerId);
+            const multiNormalizedB = multiLayerIdx / 255.0;
+            
             feature.geometry.coordinates.forEach(line => {
                 // Coordinates are already transformed
                 const transformedLine = line;
@@ -885,6 +929,22 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                 // Add triangle indices
                 lineTessellated.indices.forEach(idx => {
                     fillIndices.push(multiLineStartIndex + idx);
+                });
+                
+                // Generate hidden buffer for line picking (CRITICAL - was missing!)
+                const hiddenMultiLineStartIndex = hiddenVertices.length / 7;
+                for (let i = 0; i < lineTessellated.vertices.length; i += 2) {
+                    hiddenVertices.push(
+                        lineTessellated.vertices[i],
+                        lineTessellated.vertices[i + 1],
+                        0.0,
+                        multiNormalizedR, multiNormalizedG, multiNormalizedB, 1.0
+                    );
+                }
+                
+                // Add hidden indices for line picking
+                lineTessellated.indices.forEach(idx => {
+                    hiddenfillIndices.push(hiddenMultiLineStartIndex + idx);
                 });
             });
             break;
@@ -1109,6 +1169,7 @@ export async function fetchVectorTile(x, y, z, abortSignal = null) {
 // Helper function to clear tile cache
 export function clearTileCache() {
     tileCache.clear();
+    resetFeatureIdCounter(); // Reset IDs when cache is cleared
 }
 
 // Reset the not-found tiles tracking

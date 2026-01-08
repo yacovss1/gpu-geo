@@ -186,6 +186,8 @@ export function setupEventListeners(canvas, camera, device, renderer, tileBuffer
                 bufferIsMapped = false; // Clear mapping flag
                 return;
             }
+            
+            console.log(`🖱️ Click detected: featureId=${featureId}, layerId=${blueChannel}`);
 
             // Find feature across all layers
             let feature = null;
@@ -194,21 +196,13 @@ export function setupEventListeners(canvas, camera, device, renderer, tileBuffer
                 if (feature) break;
             }
             
+            // Write the picked ID for shader highlighting
+            console.log(`🎯 Setting picked: featureId=${featureId}, layerId=${blueChannel}, foundFeature=${!!feature}`);
+            device.queue.writeBuffer(renderer.buffers.pickedId, 0, new Float32Array([featureId]));
+            device.queue.writeBuffer(renderer.buffers.pickedLayerId, 0, new Float32Array([blueChannel]));
+            
             if (feature) {
-                // Log feature properties on click
-                console.log('🎯 Clicked feature:', {
-                    featureId,
-                    properties: feature.properties,
-                    sourceLayer: feature.properties?.sourceLayer
-                });
-                
-                // Write the raw values directly - feature ID and layer ID
-                device.queue.writeBuffer(renderer.buffers.pickedId, 0, new Float32Array([featureId]));
-                device.queue.writeBuffer(renderer.buffers.pickedLayerId, 0, new Float32Array([blueChannel]));
-            } else {
-                // Clear selection
-                device.queue.writeBuffer(renderer.buffers.pickedId, 0, new Float32Array([0]));
-                device.queue.writeBuffer(renderer.buffers.pickedLayerId, 0, new Float32Array([0]));
+                console.log('📋 Feature properties:', feature.properties);
             }
 
             sharedReadBuffer.unmap();

@@ -199,7 +199,6 @@ export class TubePipeline {
      */
     render(passEncoder, tileBuffers, layer, zoom) {
         if (!this.initialized || !this.pipeline) {
-            console.log('🔴 TUBE RENDER: Not initialized or no pipeline');
             return 0;
         }
 
@@ -227,7 +226,6 @@ export class TubePipeline {
         const layerBuffers = tileBuffers.get(layer.id);
         
         if (!layerBuffers || layerBuffers.length === 0) {
-            console.log(`🔴 TUBE RENDER: No buffers for layer ${layer.id}`);
             return 0;
         }
 
@@ -240,7 +238,6 @@ export class TubePipeline {
         }
 
         if (segmentData.length === 0) {
-            console.log(`🔴 TUBE RENDER: No segment data for layer ${layer.id}`);
             return 0;
         }
 
