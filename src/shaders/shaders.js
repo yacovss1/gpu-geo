@@ -14,26 +14,23 @@ struct VertexOutput {
 fn main(@location(0) inPosition: vec3<f32>, @location(1) inColor: vec4<f32>) -> VertexOutput {
     var output: VertexOutput;
     
-    // Isometric offset - shift Y based on Z height for visual effect
-    let isoY = inPosition.y - inPosition.z * 0.3;
-    let pos = vec4<f32>(inPosition.x, isoY, 0.0, 1.0);
+    // Use true 3D coordinates - camera matrix handles projection
+    // For orthographic (pitch=0): matrix includes isometric shear
+    // For perspective (pitch>0): matrix does true 3D projection
+    let pos = vec4<f32>(inPosition.x, inPosition.y, inPosition.z, 1.0);
 
-    // Apply camera transform
+    // Apply camera transform (handles both orthographic and perspective)
     output.position = uniforms * pos;
-
-    // CRITICAL: Set depth AFTER transformation for proper Z-ordering
-    // Depth comparison is 'less', so SMALLER depth = closer to camera
-    // Strategy: All flat features get depth ~0.95, buildings get much smaller depth
-    // This ensures ANY building geometry (even base at z=0.0001) renders over flat features
-    let baseDepth = 0.95;
-    // Add tiny offset for flat features to prevent z-fighting between overlapping polys
-    let flatOffset = select(0.0, 0.00001, inPosition.z < 0.00001);
-    output.position.z = baseDepth - (inPosition.z * 10.0) + flatOffset;
+    
+    // Depth biasing: buildings (Z > 0) should render ON TOP of flat geometry (Z = 0)
+    // Smaller depth = closer to camera = renders on top
+    // Flat features: depth ~0.5, Buildings: depth decreases with height
+    output.position.z = 0.5 - inPosition.z * 100.0;
 
     // Pass along coordinates for fragment shader
     output.fragCoord = output.position.xy;
     output.color = inColor;
-    output.worldZ = inPosition.z; // Pass Z to fragment shader for shading
+    output.worldZ = inPosition.z;
     
     return output;
 }
@@ -74,17 +71,14 @@ struct VertexOutput {
 fn main(@location(0) inPosition: vec3<f32>, @location(1) inColor: vec4<f32>) -> VertexOutput {
     var output: VertexOutput;
     
-    // Apply SAME isometric offset as visible rendering
-    let isoY = inPosition.y - inPosition.z * 0.3;
-    let pos = vec4<f32>(inPosition.x, isoY, 0.0, 1.0);
+    // Use true 3D coordinates - same as visible shader
+    let pos = vec4<f32>(inPosition.x, inPosition.y, inPosition.z, 1.0);
 
     // Apply camera transform
     output.position = uniforms * pos;
-
-    // Set depth same as visible geometry
-    let baseDepth = 0.95;
-    let flatOffset = select(0.0, 0.00001, inPosition.z < 0.00001);
-    output.position.z = baseDepth - (inPosition.z * 10.0) + flatOffset;
+    
+    // Same depth biasing as visible shader
+    output.position.z = 0.5 - inPosition.z * 100.0;
 
     output.fragCoord = output.position.xy;
     output.color = inColor;

@@ -81,94 +81,50 @@ export class Camera extends EventTarget {
         const aspectRatio = this.viewportWidth / this.viewportHeight;
         const effectiveZoom = Math.pow(2, this.zoom);
 
-        // When there's no pitch, use the original simple approach
-        if (this.pitch === 0 && this.bearing === 0) {
-            const matrix = mat4.create();
-            mat4.scale(matrix, matrix, [effectiveZoom / aspectRatio, effectiveZoom, effectiveZoom]);
-            mat4.translate(matrix, matrix, [-this.position[0], -this.position[1], 0]);
-            
-            this._visualZoom = effectiveZoom;
-            this._zoomDebug.visual = effectiveZoom;
-            this._cachedMatrix = matrix;
-            this._lastState = { 
-                pos: [...this.position], 
-                zoom: this.zoom,
-                pitch: this.pitch,
-                bearing: this.bearing
-            };
-            return matrix;
-        }
-
-        // With pitch/bearing: use proper view-projection separation
-        // Compute orthographic extents in world units
-        const halfWidth = aspectRatio / effectiveZoom;
-        const halfHeight = 1.0 / effectiveZoom;
+        // UNIFIED APPROACH: Use orthographic with adjustable isometric shear
+        // Pitch controls building height exaggeration
+        // Bearing rotates the entire view
         
-        // Projection: standard orthographic
-        const proj = mat4.create();
-        mat4.ortho(
-            proj, 
-            -halfWidth, 
-            halfWidth, 
-            -halfHeight, 
-            halfHeight, 
-            -10.0,   // near plane - conservative for 2D-ish content
-            10.0     // far plane
-        );
-
-        // View matrix: translate then rotate
-        const view = mat4.create();
-        mat4.identity(view);
-        
-        // Move camera back along Z when tilted so we can see more
-        const pitchRadians = (this.pitch * Math.PI) / 180;
-        if (this.pitch > 0) {
-            const pullback = Math.tan(pitchRadians) * 0.5; // Pull camera back based on tilt
-            mat4.translate(view, view, [0, 0, pullback]);
-        }
-        
-        // Apply rotations
-        if (this.pitch > 0) {
-            mat4.rotateX(view, view, -pitchRadians);
-        }
-        
-        if (this.bearing !== 0) {
-            const bearingRadians = (this.bearing * Math.PI) / 180;
-            mat4.rotateZ(view, view, -bearingRadians);
-        }
-        
-        // Translate to camera position
-        mat4.translate(view, view, [-this.position[0], -this.position[1], 0]);
-
-        // final matrix = projection * view
         const matrix = mat4.create();
-        mat4.multiply(matrix, proj, view);
-
-        // Debug: Log camera setup when pitch changes
-        if (this._lastState.pitch !== this.pitch || !this._debugLogged) {
-            console.log('🎥 Camera:', {
-                position: this.position,
-                zoom: this.zoom,
-                pitch: this.pitch,
-                bearing: this.bearing,
-                effectiveZoom,
-                halfWidth,
-                halfHeight
-            });
-            this._debugLogged = true;
+        const bearingRadians = this.bearing * Math.PI / 180;
+        
+        // Scale XY by zoom, Z stays constant
+        mat4.scale(matrix, matrix, [effectiveZoom / aspectRatio, effectiveZoom, 1.0]);
+        
+        // Apply bearing rotation BEFORE translation
+        // This rotates the world around the origin (screen center)
+        if (this.bearing !== 0) {
+            mat4.rotateZ(matrix, matrix, bearingRadians);
         }
-
+        
+        // Translate to camera position (in rotated world coordinates)
+        mat4.translate(matrix, matrix, [-this.position[0], -this.position[1], 0]);
+        
+        // Apply isometric shear - the amount increases with pitch
+        // At pitch=0: shear = 0.5 (slight isometric)
+        // At pitch=60: shear = 1.0 (more dramatic 3D effect)
+        const baseShear = 0.5;
+        const pitchShear = (this.pitch / 60) * 0.5; // Max additional 0.5 at 60 degrees
+        const totalShear = baseShear + pitchShear;
+        
+        // The shear direction needs to account for bearing rotation
+        // so buildings always extrude "up" relative to the rotated view
+        const shear = mat4.create();
+        const shearY = -totalShear * Math.cos(bearingRadians);
+        const shearX = -totalShear * Math.sin(bearingRadians);
+        shear[8] = shearX;   // X affected by Z
+        shear[9] = shearY;   // Y affected by Z
+        mat4.multiply(matrix, matrix, shear);
+        
         this._visualZoom = effectiveZoom;
         this._zoomDebug.visual = effectiveZoom;
-
         this._cachedMatrix = matrix;
-        this._lastState = {
-            pos: [...this.position],
+        this._lastState = { 
+            pos: [...this.position], 
             zoom: this.zoom,
             pitch: this.pitch,
             bearing: this.bearing
         };
-
         return matrix;
     }
 
