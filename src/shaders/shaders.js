@@ -17,18 +17,10 @@ fn main(@location(0) inPosition: vec3<f32>, @location(1) inColor: vec4<f32>) -> 
     // Full 3D position including height
     let pos = vec4<f32>(inPosition.x, inPosition.y, inPosition.z, 1.0);
 
-    // Apply camera transform
+    // Apply camera transform - always perspective
     output.position = uniforms * pos;
     
-    // Detect if we're using perspective projection by checking the matrix structure
-    // In a perspective matrix, element [2][3] is -1 (for standard perspective)
-    let isPerspective = uniforms[2][3] < -0.5;
-    
-    if (!isPerspective) {
-        // ORTHOGRAPHIC MODE: Manual depth biasing for building occlusion
-        output.position.z = 0.5 - inPosition.z * 100.0;
-    }
-    // PERSPECTIVE MODE: Leave Z from matrix for proper depth
+    // Perspective matrix handles depth correctly via Z/W
 
     // Pass along coordinates for fragment shader
     output.fragCoord = output.position.xy;
@@ -77,16 +69,10 @@ fn main(@location(0) inPosition: vec3<f32>, @location(1) inColor: vec4<f32>) -> 
     // Full 3D position including height
     let pos = vec4<f32>(inPosition.x, inPosition.y, inPosition.z, 1.0);
 
-    // Apply camera transform
+    // Apply camera transform - always perspective
     output.position = uniforms * pos;
     
-    // Detect perspective vs orthographic
-    let isPerspective = uniforms[2][3] < -0.5;
-    
-    if (!isPerspective) {
-        // ORTHOGRAPHIC: Manual depth biasing
-        output.position.z = 0.5 - inPosition.z * 100.0;
-    }
+    // Perspective matrix handles depth correctly
 
     output.fragCoord = output.position.xy;
     output.color = inColor;

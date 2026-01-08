@@ -85,13 +85,8 @@ export class Camera extends EventTarget {
 
         let matrix;
         
-        // Use orthographic for pitch=0 (top-down view), perspective for tilted views
-        // This avoids the issue where perspective at pitch=0 doesn't show the map
-        if (this.pitch === 0) {
-            matrix = this._buildOrthographicMatrix(aspectRatio, effectiveZoom, bearingRadians);
-        } else {
-            matrix = this._buildPerspectiveMatrix(aspectRatio, effectiveZoom, bearingRadians, pitchRadians);
-        }
+        // Always use perspective - works at all pitch values including 0
+        matrix = this._buildPerspectiveMatrix(aspectRatio, effectiveZoom, bearingRadians, pitchRadians);
         
         this._visualZoom = effectiveZoom;
         this._zoomDebug.visual = effectiveZoom;
@@ -133,58 +128,64 @@ export class Camera extends EventTarget {
     }
 
     _buildPerspectiveMatrix(aspectRatio, effectiveZoom, bearingRadians, pitchRadians) {
-        // TRUE 3D PERSPECTIVE
+        // TRUE 3D PERSPECTIVE using lookAt for clarity
         //
         // Our world: XY plane is the map, +Z is up (buildings)
-        // Camera: above the map looking down
+        // Camera orbits around the look-at point based on pitch
         //
         // At pitch=0: camera directly above, looking straight down
-        // At pitch=60: camera tilted, horizon visible at top of screen
-        //
-        // Key insight: we need to transform from "camera looking down -Z" (GL convention)
-        // to "camera above XY plane looking down at it"
+        // At pitch=60: camera tilted back, showing horizon
         
         const matrix = mat4.create();
         
         // Field of view
         const fov = 0.6435011087932844; // ~36.87 degrees
-        const cameraHeight = 1.0 / Math.tan(fov / 2);
+        const cameraDistance = 1.0 / Math.tan(fov / 2);
         
         // Near/far planes
-        const nearZ = 0.1;
-        const farZ = cameraHeight * 2 + 10.0;
+        const nearZ = cameraDistance * 0.01;
+        const farZ = cameraDistance * 10;
         
         // === PROJECTION ===
         const proj = mat4.create();
         mat4.perspective(proj, fov, aspectRatio, nearZ, farZ);
         
-        // === VIEW MATRIX - built step by step ===
+        // === VIEW MATRIX using lookAt ===
+        // Camera position: orbits around origin based on pitch
+        // At pitch=0: directly above at (0, 0, distance)
+        // At pitch=60: in front and above, looking back at origin
+        
+        // Camera position in world space (before bearing rotation)
+        const camX = 0;
+        const camY = cameraDistance * Math.sin(pitchRadians);
+        const camZ = cameraDistance * Math.cos(pitchRadians);
+        
+        // Look at origin, with +Y being "up" on screen initially
+        // But our world has +Z as up (buildings), so we need to handle this
+        
+        // The "up" vector for the camera
+        // At pitch=0: up is +Y (north = up on screen)  
+        // As pitch increases, up tilts toward -Z (so buildings appear to go up)
+        const upX = 0;
+        const upY = Math.cos(pitchRadians);
+        const upZ = -Math.sin(pitchRadians);
+        
         const view = mat4.create();
+        mat4.lookAt(view, 
+            [camX, camY, camZ],  // Camera position
+            [0, 0, 0],            // Look at origin
+            [upX, upY, upZ]       // Up vector
+        );
         
-        // Step 1: Start with identity (camera at origin, looking down -Z)
+        // Apply bearing rotation (rotate world before camera view)
+        const bearingMat = mat4.create();
+        mat4.rotateZ(bearingMat, bearingMat, bearingRadians);
+        mat4.multiply(view, view, bearingMat);
         
-        // Step 2: Move camera back so it can see the origin
-        mat4.translate(view, view, [0, 0, -cameraHeight]);
-        
-        // Step 3: Rotate to look down at XY plane instead of down -Z
-        // Rotate 90° around X to point camera down at the floor
-        // POSITIVE rotation tips the camera forward (nose down)
-        mat4.rotateX(view, view, Math.PI / 2);
-        
-        // Now camera is above origin, looking down at XY plane
-        // +Y in world is "up" on screen, +X is right
-        
-        // Step 4: Apply pitch - tilt camera to see horizon
-        // Negative pitch = tilt back to see further (horizon at top)
-        mat4.rotateX(view, view, -pitchRadians);
-        
-        // Step 5: Apply bearing - rotate view around vertical axis
-        mat4.rotateZ(view, view, -bearingRadians);
-        
-        // Step 6: Apply zoom
+        // Apply zoom (scale the world)
         mat4.scale(view, view, [effectiveZoom, effectiveZoom, effectiveZoom]);
         
-        // Step 7: Translate to world position
+        // Translate to world position
         mat4.translate(view, view, [-this.position[0], -this.position[1], 0]);
         
         // Combine: projection * view
