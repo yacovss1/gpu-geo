@@ -14,18 +14,21 @@ struct VertexOutput {
 fn main(@location(0) inPosition: vec3<f32>, @location(1) inColor: vec4<f32>) -> VertexOutput {
     var output: VertexOutput;
     
-    // Use true 3D coordinates - camera matrix handles projection
-    // For orthographic (pitch=0): matrix includes isometric shear
-    // For perspective (pitch>0): matrix does true 3D projection
+    // Full 3D position including height
     let pos = vec4<f32>(inPosition.x, inPosition.y, inPosition.z, 1.0);
 
-    // Apply camera transform (handles both orthographic and perspective)
+    // Apply camera transform
     output.position = uniforms * pos;
     
-    // Depth biasing: buildings (Z > 0) should render ON TOP of flat geometry (Z = 0)
-    // Smaller depth = closer to camera = renders on top
-    // Flat features: depth ~0.5, Buildings: depth decreases with height
-    output.position.z = 0.5 - inPosition.z * 100.0;
+    // Detect if we're using perspective projection by checking the matrix structure
+    // In a perspective matrix, element [2][3] is -1 (for standard perspective)
+    let isPerspective = uniforms[2][3] < -0.5;
+    
+    if (!isPerspective) {
+        // ORTHOGRAPHIC MODE: Manual depth biasing for building occlusion
+        output.position.z = 0.5 - inPosition.z * 100.0;
+    }
+    // PERSPECTIVE MODE: Leave Z from matrix for proper depth
 
     // Pass along coordinates for fragment shader
     output.fragCoord = output.position.xy;
@@ -55,7 +58,7 @@ fn main(@location(0) fragCoord: vec2<f32>, @location(1) color: vec4<f32>, @locat
 }
 `;
 
-// Hidden buffer vertex shader - MUST apply SAME isometric offset as visible rendering
+// Hidden buffer vertex shader - MUST apply SAME transforms as visible rendering
 // This ensures the 2D screen position matches exactly between visible and hidden
 export const hiddenVertexShaderCode = `
 struct VertexOutput {
@@ -71,14 +74,19 @@ struct VertexOutput {
 fn main(@location(0) inPosition: vec3<f32>, @location(1) inColor: vec4<f32>) -> VertexOutput {
     var output: VertexOutput;
     
-    // Use true 3D coordinates - same as visible shader
+    // Full 3D position including height
     let pos = vec4<f32>(inPosition.x, inPosition.y, inPosition.z, 1.0);
 
     // Apply camera transform
     output.position = uniforms * pos;
     
-    // Same depth biasing as visible shader
-    output.position.z = 0.5 - inPosition.z * 100.0;
+    // Detect perspective vs orthographic
+    let isPerspective = uniforms[2][3] < -0.5;
+    
+    if (!isPerspective) {
+        // ORTHOGRAPHIC: Manual depth biasing
+        output.position.z = 0.5 - inPosition.z * 100.0;
+    }
 
     output.fragCoord = output.position.xy;
     output.color = inColor;

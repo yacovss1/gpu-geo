@@ -80,41 +80,18 @@ export class Camera extends EventTarget {
 
         const aspectRatio = this.viewportWidth / this.viewportHeight;
         const effectiveZoom = Math.pow(2, this.zoom);
-
-        // UNIFIED APPROACH: Use orthographic with adjustable isometric shear
-        // Pitch controls building height exaggeration
-        // Bearing rotates the entire view
-        
-        const matrix = mat4.create();
         const bearingRadians = this.bearing * Math.PI / 180;
+        const pitchRadians = this.pitch * Math.PI / 180;
+
+        let matrix;
         
-        // Scale XY by zoom, Z stays constant
-        mat4.scale(matrix, matrix, [effectiveZoom / aspectRatio, effectiveZoom, 1.0]);
-        
-        // Apply bearing rotation BEFORE translation
-        // This rotates the world around the origin (screen center)
-        if (this.bearing !== 0) {
-            mat4.rotateZ(matrix, matrix, bearingRadians);
+        // Use orthographic for pitch=0 (top-down view), perspective for tilted views
+        // This avoids the issue where perspective at pitch=0 doesn't show the map
+        if (this.pitch === 0) {
+            matrix = this._buildOrthographicMatrix(aspectRatio, effectiveZoom, bearingRadians);
+        } else {
+            matrix = this._buildPerspectiveMatrix(aspectRatio, effectiveZoom, bearingRadians, pitchRadians);
         }
-        
-        // Translate to camera position (in rotated world coordinates)
-        mat4.translate(matrix, matrix, [-this.position[0], -this.position[1], 0]);
-        
-        // Apply isometric shear - the amount increases with pitch
-        // At pitch=0: shear = 0.5 (slight isometric)
-        // At pitch=60: shear = 1.0 (more dramatic 3D effect)
-        const baseShear = 0.5;
-        const pitchShear = (this.pitch / 60) * 0.5; // Max additional 0.5 at 60 degrees
-        const totalShear = baseShear + pitchShear;
-        
-        // The shear direction needs to account for bearing rotation
-        // so buildings always extrude "up" relative to the rotated view
-        const shear = mat4.create();
-        const shearY = -totalShear * Math.cos(bearingRadians);
-        const shearX = -totalShear * Math.sin(bearingRadians);
-        shear[8] = shearX;   // X affected by Z
-        shear[9] = shearY;   // Y affected by Z
-        mat4.multiply(matrix, matrix, shear);
         
         this._visualZoom = effectiveZoom;
         this._zoomDebug.visual = effectiveZoom;
@@ -125,6 +102,94 @@ export class Camera extends EventTarget {
             pitch: this.pitch,
             bearing: this.bearing
         };
+        return matrix;
+    }
+
+    _buildOrthographicMatrix(aspectRatio, effectiveZoom, bearingRadians) {
+        // Original orthographic with isometric shear for buildings
+        const matrix = mat4.create();
+        
+        // Scale XY by zoom, Z stays constant
+        mat4.scale(matrix, matrix, [effectiveZoom / aspectRatio, effectiveZoom, 1.0]);
+        
+        // Apply bearing rotation
+        if (this.bearing !== 0) {
+            mat4.rotateZ(matrix, matrix, bearingRadians);
+        }
+        
+        // Translate to camera position
+        mat4.translate(matrix, matrix, [-this.position[0], -this.position[1], 0]);
+        
+        // Apply isometric shear for building extrusion
+        const totalShear = 0.5;
+        const shear = mat4.create();
+        const shearY = -totalShear * Math.cos(bearingRadians);
+        const shearX = -totalShear * Math.sin(bearingRadians);
+        shear[8] = shearX;
+        shear[9] = shearY;
+        mat4.multiply(matrix, matrix, shear);
+        
+        return matrix;
+    }
+
+    _buildPerspectiveMatrix(aspectRatio, effectiveZoom, bearingRadians, pitchRadians) {
+        // TRUE 3D PERSPECTIVE
+        //
+        // Our world: XY plane is the map, +Z is up (buildings)
+        // Camera: above the map looking down
+        //
+        // At pitch=0: camera directly above, looking straight down
+        // At pitch=60: camera tilted, horizon visible at top of screen
+        //
+        // Key insight: we need to transform from "camera looking down -Z" (GL convention)
+        // to "camera above XY plane looking down at it"
+        
+        const matrix = mat4.create();
+        
+        // Field of view
+        const fov = 0.6435011087932844; // ~36.87 degrees
+        const cameraHeight = 1.0 / Math.tan(fov / 2);
+        
+        // Near/far planes
+        const nearZ = 0.1;
+        const farZ = cameraHeight * 2 + 10.0;
+        
+        // === PROJECTION ===
+        const proj = mat4.create();
+        mat4.perspective(proj, fov, aspectRatio, nearZ, farZ);
+        
+        // === VIEW MATRIX - built step by step ===
+        const view = mat4.create();
+        
+        // Step 1: Start with identity (camera at origin, looking down -Z)
+        
+        // Step 2: Move camera back so it can see the origin
+        mat4.translate(view, view, [0, 0, -cameraHeight]);
+        
+        // Step 3: Rotate to look down at XY plane instead of down -Z
+        // Rotate 90° around X to point camera down at the floor
+        // POSITIVE rotation tips the camera forward (nose down)
+        mat4.rotateX(view, view, Math.PI / 2);
+        
+        // Now camera is above origin, looking down at XY plane
+        // +Y in world is "up" on screen, +X is right
+        
+        // Step 4: Apply pitch - tilt camera to see horizon
+        // Negative pitch = tilt back to see further (horizon at top)
+        mat4.rotateX(view, view, -pitchRadians);
+        
+        // Step 5: Apply bearing - rotate view around vertical axis
+        mat4.rotateZ(view, view, -bearingRadians);
+        
+        // Step 6: Apply zoom
+        mat4.scale(view, view, [effectiveZoom, effectiveZoom, effectiveZoom]);
+        
+        // Step 7: Translate to world position
+        mat4.translate(view, view, [-this.position[0], -this.position[1], 0]);
+        
+        // Combine: projection * view
+        mat4.multiply(matrix, proj, view);
+        
         return matrix;
     }
 
