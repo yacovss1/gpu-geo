@@ -42,19 +42,38 @@ export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, text
     
     const renderZoom = camera.zoom;
     
+    // Check for fills with extrusions (need depth bias) - same logic as color pass
+    const fillsWithExtrusions = new Set();
+    if (style?.layers) {
+        for (const extrusionLayer of style.layers.filter(l => l.type === 'fill-extrusion')) {
+            const matchingFills = style.layers.filter(l => 
+                l.type === 'fill' &&
+                l.source === extrusionLayer.source &&
+                l['source-layer'] === extrusionLayer['source-layer']
+            );
+            matchingFills.forEach(f => fillsWithExtrusions.add(f.id));
+        }
+    }
+    
     // Render hidden buffers in style layer order (same as color pass)
+    // CRITICAL: Must use matching depth bias as color pass for consistent depth testing
     if (style?.layers) {
         for (const layer of style.layers) {
             const layerId = layer.id;
+            const layerType = layer.type;
             
             if (!shouldRenderLayer(layerId, renderZoom)) continue;
             
             const buffers = hiddenTileBuffers.get(layerId);
             if (!buffers) continue;
             
+            // Determine if this layer needs depth bias (same logic as color pass)
+            const useBias = layerType === 'fill' && fillsWithExtrusions.has(layerId);
+            const hiddenPipeline = useBias ? renderer.pipelines.hiddenWithBias : renderer.pipelines.hidden;
+            
             buffers.forEach(({ vertexBuffer, hiddenFillIndexBuffer, hiddenfillIndexCount }) => {
                 if (hiddenfillIndexCount > 0) {
-                    hiddenPass.setPipeline(renderer.pipelines.hidden);
+                    hiddenPass.setPipeline(hiddenPipeline);
                     hiddenPass.setVertexBuffer(0, vertexBuffer);
                     hiddenPass.setIndexBuffer(hiddenFillIndexBuffer, "uint32");
                     hiddenPass.setBindGroup(0, renderer.bindGroups.picking);
@@ -101,18 +120,7 @@ export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, text
         }
     });
     
-    // Check for fills with extrusions (need depth bias)
-    const fillsWithExtrusions = new Set();
-    if (style?.layers) {
-        for (const extrusionLayer of style.layers.filter(l => l.type === 'fill-extrusion')) {
-            const matchingFills = style.layers.filter(l => 
-                l.type === 'fill' &&
-                l.source === extrusionLayer.source &&
-                l['source-layer'] === extrusionLayer['source-layer']
-            );
-            matchingFills.forEach(f => fillsWithExtrusions.add(f.id));
-        }
-    }
+    // fillsWithExtrusions already computed above for hidden pass
     
     // Render ALL geometry in true style order
     if (style?.layers) {

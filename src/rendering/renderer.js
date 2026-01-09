@@ -87,13 +87,14 @@ export function createRenderPipeline(device, format, topology, isHidden = false,
         depthStencil: {
             format: 'depth24plus',
             depthWriteEnabled: true,
-            depthCompare: 'less-equal',  // Allow equal depth to overwrite based on draw order
+            depthCompare: 'less-equal',
             ...(depthBias !== 0 && topology !== 'line-list' ? {
                 depthBias: depthBias,
-                depthBiasSlopeScale: 1.0
+                depthBiasSlopeScale: 2.0,
+                depthBiasClamp: 0.01
             } : {})
         },
-        multisample: { count: isHidden ? 1 : 4 }  // No MSAA for hidden buffer (exact feature IDs needed)
+        multisample: { count: isHidden ? 1 : 4 }
     });
 }
 
@@ -101,8 +102,8 @@ export function createRenderPipeline(device, format, topology, isHidden = false,
 export function createEdgeDetectionPipeline(device, format) {
     initCachedShaders(device);
     
-    // FORCE: Recreate layout due to new binding 6 (pickedLayerId)
     // Cache bind group layout for edge detection
+    // binding 2 = linear sampler for color, binding 7 = nearest sampler for IDs
     cachedLayouts.edgeDetection = device.createBindGroupLayout({
         entries: [
             { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
@@ -111,7 +112,8 @@ export function createEdgeDetectionPipeline(device, format) {
             { binding: 3, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
             { binding: 4, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
             { binding: 5, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
-            { binding: 6, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } }
+            { binding: 6, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+            { binding: 7, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'non-filtering' } }
         ]
     });
     
@@ -234,10 +236,13 @@ export class MapRenderer {
         this.pipelines.fill = createRenderPipeline(this.device, this.format, "triangle-list", false, 0);
         // Fill with depth bias - ONLY for fills that have a corresponding extrusion
         this.pipelines.fillWithBias = createRenderPipeline(this.device, this.format, "triangle-list", false, 100);
-        // Extrusion pipeline without depth bias - renders at true depth
-        this.pipelines.extrusion = createRenderPipeline(this.device, this.format, "triangle-list", false, 0);
+        // Extrusion pipeline - small depth bias to reduce z-fighting between adjacent walls
+        this.pipelines.extrusion = createRenderPipeline(this.device, this.format, "triangle-list", false, 2);
         this.pipelines.outline = createRenderPipeline(this.device, this.format, "line-list", false, 0);
+        // Hidden pipelines - MUST match depth bias of corresponding color pipelines
+        // to ensure consistent depth test results between passes
         this.pipelines.hidden = createRenderPipeline(this.device, this.format, "triangle-list", true, 0);
+        this.pipelines.hiddenWithBias = createRenderPipeline(this.device, this.format, "triangle-list", true, 100);
         this.pipelines.edgeDetection = createEdgeDetectionPipeline(this.device, this.format);
         this.pipelines.debug = createDebugTexturePipeline(this.device, this.format);
     }
@@ -290,11 +295,17 @@ export class MapRenderer {
         const initialConfig = new Uint32Array(16).fill(255);
         this.device.queue.writeBuffer(this.buffers.layerConfig, 0, initialConfig);
         
-        // Create sampler
+        // Create sampler for color texture (linear filtering for smooth appearance)
         this.sampler = this.device.createSampler({
             magFilter: 'linear',
             minFilter: 'linear',
             mipmapFilter: 'linear',
+        });
+        
+        // Create nearest-neighbor sampler for ID texture (no interpolation - exact values needed)
+        this.samplerNearest = this.device.createSampler({
+            magFilter: 'nearest',
+            minFilter: 'nearest',
         });
         
         // Create bind groups
@@ -317,7 +328,8 @@ export class MapRenderer {
                 { binding: 3, resource: { buffer: this.buffers.canvasSize } },
                 { binding: 4, resource: { buffer: this.buffers.pickedId } },
                 { binding: 5, resource: { buffer: this.buffers.zoomInfo } },
-                { binding: 6, resource: { buffer: this.buffers.pickedLayerId } }
+                { binding: 6, resource: { buffer: this.buffers.pickedLayerId } },
+                { binding: 7, resource: this.samplerNearest }  // Nearest sampler for ID texture
             ]
         });
         
@@ -423,7 +435,8 @@ export class MapRenderer {
                 { binding: 3, resource: { buffer: this.buffers.canvasSize } },
                 { binding: 4, resource: { buffer: this.buffers.pickedId } },
                 { binding: 5, resource: { buffer: this.buffers.zoomInfo } },
-                { binding: 6, resource: { buffer: this.buffers.pickedLayerId } }
+                { binding: 6, resource: { buffer: this.buffers.pickedLayerId } },
+                { binding: 7, resource: this.samplerNearest }  // Nearest sampler for ID texture
             ]
         });
         

@@ -26,12 +26,12 @@ fn main(@location(0) inPosition: vec3<f32>, @location(1) inColor: vec4<f32>) -> 
     
     // Apply camera transform WITHOUT any displacement
     // The geometry stays in place, only the visual appearance changes
-    let pos = vec4<f32>(inPosition.x, inPosition.y, 0.0, 1.0);
+    // Use inPosition.z for layer-based Z offset (for proper depth ordering)
+    let pos = vec4<f32>(inPosition.x, inPosition.y, inPosition.z, 1.0);
     output.position = uniforms * pos;
     
-    // Set depth for flat features
-    output.position.z = 0.95;
-    
+    // Depth is handled by the perspective matrix
+
     output.fragCoord = output.position.xy;
     output.color = inColor;
     output.worldZ = inPosition.z;
@@ -132,17 +132,16 @@ fn main(@location(0) inPosition: vec3<f32>, @location(1) inColor: vec4<f32>) -> 
     let windX = sin(inPosition.x * windFrequency + time * windSpeed) * windStrength;
     let windY = cos(inPosition.x * windFrequency * 0.5 + time * windSpeed * 0.8) * windStrength * 0.3;
     
-    // Apply wind displacement
+    // Apply wind displacement - use inPosition.z for layer-based Z offset
     let pos = vec4<f32>(
         inPosition.x + windX, 
         inPosition.y + windY, 
-        0.0, 
+        inPosition.z, 
         1.0
     );
     
-    // Apply camera transform
+    // Apply camera transform - perspective matrix handles depth correctly
     output.position = uniforms * pos;
-    output.position.z = 0.95;
     
     output.fragCoord = output.position.xy;
     output.color = inColor;

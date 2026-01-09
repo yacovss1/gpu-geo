@@ -26,15 +26,11 @@ fn main(@location(0) inPosition: vec3<f32>, @location(1) inColor: vec4<f32>) -> 
     
     // Apply camera transform WITHOUT any displacement
     // The geometry stays in place, only the visual appearance changes
-    let pos = vec4<f32>(inPosition.x, inPosition.y, 0.0, 1.0);
+    // Use inPosition.z for layer-based Z offset (for proper depth ordering)
+    let pos = vec4<f32>(inPosition.x, inPosition.y, inPosition.z, 1.0);
     output.position = uniforms * pos;
     
-    // Use same depth calculation as standard shader for consistent layering
-    // Depth comparison is 'less', so SMALLER depth = closer to camera
-    // All flat features get depth ~0.95, buildings get smaller depth based on height
-    let baseDepth = 0.95;
-    let flatOffset = select(0.0, 0.00001, inPosition.z < 0.00001);
-    output.position.z = baseDepth - (inPosition.z * 10.0) + flatOffset;
+    // Perspective matrix handles depth correctly via Z/W - don't override it
     
     output.fragCoord = output.position.xy;
     output.color = inColor;

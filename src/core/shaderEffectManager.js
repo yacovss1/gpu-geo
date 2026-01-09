@@ -118,7 +118,7 @@ export class ShaderEffectManager {
             },
             depthStencil: {
                 format: 'depth24plus',
-                depthWriteEnabled: false,  // Don't write depth for 2D water - use painter's algorithm
+                depthWriteEnabled: false,  // Water doesn't write depth - rendered via painter's algorithm
                 depthCompare: 'less-equal',
             },
             multisample: { count: 4 }

@@ -29,17 +29,16 @@ fn main(@location(0) inPosition: vec3<f32>, @location(1) inColor: vec4<f32>) -> 
     let windX = sin(inPosition.x * windFrequency + time * windSpeed) * windStrength;
     let windY = cos(inPosition.x * windFrequency * 0.5 + time * windSpeed * 0.8) * windStrength * 0.3;
     
-    // Apply wind displacement
+    // Apply wind displacement - use inPosition.z for layer-based Z offset
     let pos = vec4<f32>(
         inPosition.x + windX, 
         inPosition.y + windY, 
-        0.0, 
+        inPosition.z, 
         1.0
     );
     
-    // Apply camera transform
+    // Apply camera transform - perspective matrix handles depth correctly
     output.position = uniforms * pos;
-    output.position.z = 0.95;
     
     output.fragCoord = output.position.xy;
     output.color = inColor;

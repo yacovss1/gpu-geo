@@ -113,14 +113,17 @@ export const edgeDetectionFragmentShaderCode = `
     @group(0) @binding(4) var<uniform> pickedId: f32;
     @group(0) @binding(5) var<uniform> zoomInfo: vec4<f32>; // [displayZoom, fetchZoom, effectStrength, extremeZoom]
     @group(0) @binding(6) var<uniform> pickedLayerId: f32;
+    @group(0) @binding(7) var idSampler: sampler;  // Nearest-neighbor sampler for ID texture
 
     @fragment
     fn main(@location(0) texCoord: vec2<f32>) -> @location(0) vec4<f32> {
         let texelSize = 1.0 / canvasSize;
         
-        // Get center color and decode 16-bit ID from red+green channels
+        // Get center color (use linear filtering for smooth appearance)
         let centerColor = textureSample(colorTexture, mysampler, texCoord);
-        let centerPixel = textureSample(idTexture, mysampler, texCoord);
+        
+        // Get center ID pixel (use NEAREST filtering - no interpolation for exact IDs)
+        let centerPixel = textureSample(idTexture, idSampler, texCoord);
         let id = centerPixel.r * 255.0 * 256.0 + centerPixel.g * 255.0;
         
         // FIXED: Use actual display zoom (same as used in the vertex shader)
@@ -131,17 +134,17 @@ export const edgeDetectionFragmentShaderCode = `
         // Keep edge detection at 1-pixel width always
         let sampleOffset = texelSize;
         
-        // Sample neighbors with adapted offset and decode 16-bit IDs
-        let leftPixel = textureSample(idTexture, mysampler, texCoord + vec2<f32>(-sampleOffset.x, 0.0));
+        // Sample neighbors with NEAREST filtering (exact IDs, no interpolation)
+        let leftPixel = textureSample(idTexture, idSampler, texCoord + vec2<f32>(-sampleOffset.x, 0.0));
         let leftId = leftPixel.r * 255.0 * 256.0 + leftPixel.g * 255.0;
         
-        let rightPixel = textureSample(idTexture, mysampler, texCoord + vec2<f32>(sampleOffset.x, 0.0));
+        let rightPixel = textureSample(idTexture, idSampler, texCoord + vec2<f32>(sampleOffset.x, 0.0));
         let rightId = rightPixel.r * 255.0 * 256.0 + rightPixel.g * 255.0;
         
-        let upPixel = textureSample(idTexture, mysampler, texCoord + vec2<f32>(0.0, -sampleOffset.y));
+        let upPixel = textureSample(idTexture, idSampler, texCoord + vec2<f32>(0.0, -sampleOffset.y));
         let upId = upPixel.r * 255.0 * 256.0 + upPixel.g * 255.0;
         
-        let downPixel = textureSample(idTexture, mysampler, texCoord + vec2<f32>(0.0, sampleOffset.y));
+        let downPixel = textureSample(idTexture, idSampler, texCoord + vec2<f32>(0.0, sampleOffset.y));
         let downId = downPixel.r * 255.0 * 256.0 + downPixel.g * 255.0;
 
         let hasFeature = id > 0.1;
@@ -156,10 +159,15 @@ export const edgeDetectionFragmentShaderCode = `
         let layerId = centerPixel.b * 255.0;
         let pickedLayerIdValue = pickedLayerId;  // From uniform
         
-        // Exact match for selection - both feature ID and layer ID must match
-        let isSelected = hasFeature && 
-                        (abs(id - pickedId) < 0.01) && 
-                        (abs(layerId - pickedLayerIdValue) < 0.01);
+        // Check if this pixel's feature matches the picked feature
+        let featureMatch = hasFeature && 
+                          (abs(id - pickedId) < 0.01) && 
+                          (abs(layerId - pickedLayerIdValue) < 0.01);
+        
+        // Only highlight if the picked feature is actually visible at this pixel
+        // If another feature (different ID or layer) is at this pixel, it's occluding the picked feature
+        // So we should NOT highlight - just show the occluding feature's color
+        let isSelected = featureMatch;
 
         // CRITICAL FIX: Delay pattern changes until much higher zoom levels (20+)
         if (!hasFeature) {
