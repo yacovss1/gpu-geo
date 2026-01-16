@@ -207,7 +207,8 @@ export const edgeDetectionFragmentShaderCode = `
             }
             return centerColor;
         } else if (isSelected) {
-            return vec4<f32>(1.0, 1.0, 0.0, 1.0);  // Yellow highlight
+            // Highlight selected feature with yellow tint
+            return mix(centerColor, vec4<f32>(1.0, 1.0, 0.0, 1.0), 0.4);
         } else if (isDifferent) {
             return centerColor;  // OUTLINES DISABLED - just return color
         } else {
