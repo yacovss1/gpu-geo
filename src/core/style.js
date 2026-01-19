@@ -324,7 +324,69 @@ export function isTileInBounds(x, y, z, sourceId) {
  * @returns {*}
  */
 export function evaluateExpression(expression, feature, zoom) {
-    // Handle literal values
+    // Handle literal values (non-arrays, non-objects)
+    if (expression === null || expression === undefined) {
+        return expression;
+    }
+    
+    // Handle legacy zoom function format: { base, stops: [[z1, val1], [z2, val2], ...] }
+    if (typeof expression === 'object' && !Array.isArray(expression) && expression.stops) {
+        const stops = expression.stops;
+        const base = expression.base || 1;
+        
+        // Property function: { property, stops } or { property, type, stops }
+        if (expression.property) {
+            const propValue = feature?.properties?.[expression.property];
+            // Find matching stop for property value
+            for (const [stopVal, output] of stops) {
+                if (propValue === stopVal) {
+                    return evaluateExpression(output, feature, zoom);
+                }
+            }
+            // Return last value as fallback
+            return evaluateExpression(stops[stops.length - 1][1], feature, zoom);
+        }
+        
+        // Zoom function: interpolate based on zoom
+        if (zoom === undefined || zoom === null) {
+            return evaluateExpression(stops[0][1], feature, zoom);
+        }
+        
+        // Find the two stops to interpolate between
+        for (let i = 0; i < stops.length - 1; i++) {
+            const [z1, val1] = stops[i];
+            const [z2, val2] = stops[i + 1];
+            
+            if (zoom >= z1 && zoom <= z2) {
+                // Calculate interpolation factor
+                let t;
+                if (base === 1) {
+                    t = (zoom - z1) / (z2 - z1);
+                } else {
+                    t = (Math.pow(base, zoom - z1) - 1) / (Math.pow(base, z2 - z1) - 1);
+                }
+                
+                // Interpolate values
+                const v1 = evaluateExpression(val1, feature, zoom);
+                const v2 = evaluateExpression(val2, feature, zoom);
+                
+                if (typeof v1 === 'number' && typeof v2 === 'number') {
+                    return v1 + t * (v2 - v1);
+                }
+                
+                // For colors/non-numbers, return the lower stop value
+                return v1;
+            }
+        }
+        
+        // Outside stops range - clamp to nearest
+        if (zoom < stops[0][0]) {
+            return evaluateExpression(stops[0][1], feature, zoom);
+        }
+        return evaluateExpression(stops[stops.length - 1][1], feature, zoom);
+    }
+    
+    // Handle non-array literals
     if (!Array.isArray(expression)) {
         return expression;
     }
@@ -548,6 +610,38 @@ export function parseColor(color) {
             const b = parseInt(hex.slice(4, 6), 16) / 255;
             const a = hex.length === 8 ? parseInt(hex.slice(6, 8), 16) / 255 : 1.0;
             return [r, g, b, a];
+        }
+
+        // HSL/HSLA - hsl(h, s%, l%) or hsla(h, s%, l%, a)
+        if (color.startsWith('hsl')) {
+            const match = color.match(/[\d.]+/g);
+            if (match) {
+                const h = parseFloat(match[0]) / 360;
+                const s = parseFloat(match[1]) / 100;
+                const l = parseFloat(match[2]) / 100;
+                const a = match[3] !== undefined ? parseFloat(match[3]) : 1.0;
+                
+                // Convert HSL to RGB
+                let r, g, b;
+                if (s === 0) {
+                    r = g = b = l;
+                } else {
+                    const hue2rgb = (p, q, t) => {
+                        if (t < 0) t += 1;
+                        if (t > 1) t -= 1;
+                        if (t < 1/6) return p + (q - p) * 6 * t;
+                        if (t < 1/2) return q;
+                        if (t < 2/3) return p + (q - p) * (2/3 - t) * 6;
+                        return p;
+                    };
+                    const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+                    const p = 2 * l - q;
+                    r = hue2rgb(p, q, h + 1/3);
+                    g = hue2rgb(p, q, h);
+                    b = hue2rgb(p, q, h - 1/3);
+                }
+                return [r, g, b, a];
+            }
         }
 
         // RGB/RGBA

@@ -244,10 +244,48 @@ export class LabelCollisionDetector {
             placed.add(idx);
         }
 
-        // Hide labels that are too crowded (>5 in collision group)
-        for (const label of this.labels) {
-            if (label.collisionGroup && label.collisionGroup.length > 5) {
+        // Hide labels that are too crowded (>3 in collision group)
+        // Also hide duplicate text labels that are very close together
+        const textPositions = new Map(); // Track text -> positions
+        
+        for (let i = 0; i < this.labels.length; i++) {
+            const label = this.labels[i];
+            
+            // Hide if too many collisions
+            if (label.collisionGroup && label.collisionGroup.length > 3) {
                 label.mode = LabelMode.HIDDEN;
+                continue;
+            }
+            
+            // Skip deduplication if no position data
+            if (!label.position || label.mode === LabelMode.HIDDEN) {
+                continue;
+            }
+            
+            // Deduplicate labels with same text that are close together
+            if (!textPositions.has(label.text)) {
+                textPositions.set(label.text, []);
+            }
+            
+            const positions = textPositions.get(label.text);
+            let tooCloseToExisting = false;
+            
+            for (const existingPos of positions) {
+                const dx = label.position.x - existingPos.x;
+                const dy = label.position.y - existingPos.y;
+                const distSq = dx * dx + dy * dy;
+                
+                // Hide if within 0.2 clip units (more aggressive deduplication)
+                if (distSq < 0.04) {
+                    tooCloseToExisting = true;
+                    break;
+                }
+            }
+            
+            if (tooCloseToExisting) {
+                label.mode = LabelMode.HIDDEN;
+            } else {
+                positions.push({x: label.position.x, y: label.position.y});
             }
         }
     }

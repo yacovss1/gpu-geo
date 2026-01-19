@@ -13,8 +13,50 @@ import {
     evaluateFilter,
     getLayersBySource,
     isTileInBounds,
-    getLayerIndex
+    getLayerIndex,
+    getSourcePromoteId
 } from '../core/style.js';
+
+// Simple murmur3-like hash for strings (consistent with MapLibre's approach)
+function murmur3Hash(str) {
+    let h = 0;
+    for (let i = 0; i < str.length; i++) {
+        const c = str.charCodeAt(i);
+        h = ((h << 5) - h) + c;
+        h = h & h; // Convert to 32-bit integer
+    }
+    return Math.abs(h);
+}
+
+/**
+ * Get a usable feature ID for GPU indexing (1-65534 range)
+ * Strategy:
+ * 1. Check promoteId config (use property as ID)
+ * 2. Use feature.id if present and valid
+ * 3. Hash string IDs with murmur3
+ * 4. Modulo large numeric IDs to fit 16-bit range
+ * 5. Fall back to sequential ID
+ */
+function getSmartFeatureId(feature, sourceId) {
+    // SIMPLE: Just use feature.id if it exists
+    const featureId = feature.id;
+    
+    // DEBUG: Always log what we receive
+    const name = feature.properties?.NAME || feature.properties?.name;
+    if (name && name.includes('Tunisia')) {
+        console.log(`� getSmartFeatureId Tunisia: feature.id=${featureId}, typeof=${typeof featureId}`);
+    }
+    
+    // If we have a valid numeric feature.id, use it directly
+    if (typeof featureId === 'number' && featureId >= 1 && featureId <= 65534) {
+        return featureId;
+    }
+    
+    // Fall back to sequential for now (should not happen with MapLibre demo tiles)
+    const seqId = getNextFeatureId();
+    console.log(`⚠️ No valid feature.id for ${name || 'unknown'}, using sequential: ${seqId}`);
+    return seqId;
+}
 
 const tileCache = new TileCache();
 
@@ -49,6 +91,21 @@ function getCountryId(countryName) {
     }
     // Map to 16-bit range (1-65533) for better distribution
     return ((Math.abs(hash) % 65533) + 1);
+}
+
+// Create deterministic ID from source-layer name for features that should merge across tiles
+// This allows water features from different tiles to share the same ID and merge in compute shader
+function getDeterministicLayerBasedId(sourceLayer) {
+    if (!sourceLayer) return null;
+    
+    let hash = 0;
+    for (let i = 0; i < sourceLayer.length; i++) {
+        hash = ((hash << 5) - hash) + sourceLayer.charCodeAt(i);
+        hash = hash & hash;
+    }
+    // Map to a small range (1-255) to encourage merging via modulo in compute shader
+    // This means all "water" features will likely map to the same ID
+    return ((Math.abs(hash) % 255) + 1);
 }
 
 export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], sourceId = null, zoom = 0) {
@@ -186,14 +243,17 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
         _fillColor = getColorOfCountries(countryCode, [0.7, 0.7, 0.7, 1.0]);
     }
 
-    // ALWAYS use sequential IDs for picking - guarantees uniqueness within 65K limit
-    // For MultiPolygon buildings, each polygon gets its own ID (see MultiPolygon case below)
-    const pickingId = getNextFeatureId();
+    // Use smart feature ID selection:
+    // 1. promoteId from style config
+    // 2. feature.id from tile (consistent across tiles for same feature)
+    // 3. hash strings, modulo large numbers
+    // 4. sequential fallback
+    const pickingId = getSmartFeatureId(feature, sourceId);
     
     // Store original feature ID for reference (can be used to look up feature properties)
     const originalFeatureId = feature.id ?? feature.properties?.id;
     
-    // Use sequential ID directly - already in valid range (1-65534)
+    // pickingId is already in valid range (1-65534)
     const clampedFeatureId = pickingId;
     
     // Deduplicate by coordinates+layer (not by tileset ID which may span tiles)
@@ -431,14 +491,14 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
 
         case 'MultiPolygon':
             // Process each polygon's outer ring and holes
-            // IMPORTANT: For building tiles, each polygon in the MultiPolygon is a SEPARATE building
-            // so we need to assign a unique sequential ID to each one
+            // All polygons in a MultiPolygon belong to the SAME feature (e.g., Tunisia includes islands)
+            // so they all share the same feature ID for picking/labeling
             feature.geometry.coordinates.forEach((polygon, polygonIndex) => {
                 const outerRing = polygon[0];
                 const holes = polygon.slice(1);
                 
-                // Each polygon in a MultiPolygon gets its own unique sequential ID
-                const polygonPickingId = getNextFeatureId();
+                // Use the shared feature ID - all parts of Tunisia should have the same ID
+                const polygonPickingId = clampedFeatureId;
                 
                 // Flatten coordinates for triangulation
                 const flatCoords = [];

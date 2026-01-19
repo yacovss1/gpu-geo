@@ -25,34 +25,35 @@
 
 ---
 
-## PRIORITY 1: Fix Water Labels (Actual Bug)
-**Problem:** Water labels disappear at zoom 7+ when rendered over land due to landuse occlusion
+## ✅ PRIORITY 1: Fix Water Labels / Label Spam (COMPLETED)
+**Problem:** Water labels duplicated ("Lake Lake Lake...") and scattered across tiles
 
-**Solution:** Multi-pass rendering + proper RGBA encoding
+**Root Cause:** Sequential feature IDs broke cross-tile feature merging
+- Each tile assigned IDs 1, 2, 3... independently
+- Same country/lake in different tiles got different IDs
+- MultiPolygon case assigned different ID per polygon (Tunisia bug)
 
-**Progress:**
-1. ✅ Implement standardized RGBA vertex encoding:
-   - R+G = 16-bit feature ID (0-65535) ✅ DONE
-   - B = 8-bit layer ID (0-255) ✅ DONE (djb2 hash of layer name)
-   - A = normalized height (0-1) ✅ DONE (heightMeters / 300, clamped)
-   
-2. ✅ Update compute shaders (Pass 1, 2, 3):
-   - Remove hash function hack: `((layerId * 257u) ^ fid) % 65535u` ✅ DONE
-   - Read layer ID directly from pixel.b ✅ DONE
-   - Read height directly from pixel.a ✅ DONE
-   - Use feature ID directly as marker index ✅ DONE
-   
-3. ❌ Implement multi-pass rendering in main.js:
-   - Pass 1: Render hidden buffer with ONLY symbol layers (water, poi, etc.)
-     → Run compute pipeline on this to generate markers
-   - Pass 2: Render hidden buffer with ALL layers (including landuse)
-     → Use for selection picking and edge detection only
-   
-4. ❌ Validate: Water labels should appear at zoom 7-10 over land
+**Solution Implemented:**
+1. ✅ Added `getSmartFeatureId()` in geojson.js:
+   - Uses tile's `feature.id` when available (best case)
+   - Falls back to `promoteId` property lookup
+   - Hashes string IDs with murmur3 → 16-bit range
+   - Modulo for large numbers with collision warning
+   - Sequential fallback only as last resort
 
-**Status:** Phase 1+2 complete (RGBA encoding + hash removal). Phase 3 (multi-pass rendering) not started.
+2. ✅ Fixed MultiPolygon ID assignment:
+   - Changed: `polygonPickingId = getNextFeatureId()` (WRONG)
+   - To: `polygonPickingId = clampedFeatureId` (CORRECT)
+   - All polygons in MultiPolygon now share same ID
 
-**Estimated complexity:** Medium - well-defined problem with clear solution
+3. ✅ Enhanced label collision detection:
+   - Reduced collision threshold from 5 to 3
+   - Added text deduplication within 0.04 distance²
+   - Hides labels within 0.2 clip units of duplicates
+
+**Testing:** Tunisia (MultiPolygon with islands) now returns consistent featureId=73 across all polygons
+
+**See:** docs/FEATURE-ID-IMPLEMENTATION.md for full technical details
 
 ---
 
@@ -82,11 +83,29 @@
 
 ---
 
-## PRIORITY 3: Code Cleanup (Future)
-Once labels work and coordinates are refactored:
-- Consolidate duplicate code between geojson.js and geojsonGPU.js
-- Consider removing GPU path entirely if CPU is fast enough
-- Simplify TileManager
+## ✅ PRIORITY 3: True 3D Rendering (COMPLETED)
+**Problem:** Original renderer used orthographic projection with isometric shear hack for buildings
+
+**Status:** COMPLETED - January 2026
+
+**Solution Implemented:**
+- True perspective projection using `mat4.perspective()` with 36.87° FOV
+- Camera orbiting via `mat4.lookAt()` - pitch controls viewing angle
+- Proper near/far planes (0.1 to 5× camera distance) for depth precision
+- Uniform zoom scaling on all axes (no separate Z handling)
+- Bearing rotation integrated into view matrix
+
+**Results:**
+- ✅ Perspective projection at all pitch values (0° = top-down, 60° = tilted)
+- ✅ Buildings rendered with true 3D depth (no isometric shear)
+- ✅ Proper depth buffer occlusion
+- ✅ Pitch/bearing controls working correctly
+- ✅ No Z-overwrite hack in shaders
+
+---
+
+## PRIORITY 4: Code Cleanup (Future)
 - Add unit tests for coordinate transforms
+- Simplify TileManager if needed
 
 

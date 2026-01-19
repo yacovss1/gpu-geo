@@ -38,12 +38,38 @@ export class StyleManager {
             
             if (firstVectorSource) {
                 const [sourceId, source] = firstVectorSource;
+                
+                // Handle direct tile URLs
                 if (source.tiles && source.tiles.length > 0) {
                     setTileSource({
                         url: source.tiles[0],
                         maxZoom: source.maxzoom || 14,
                         timeout: 10000
                     });
+                }
+                // Handle TileJSON URL (source.url points to tiles.json)
+                else if (source.url) {
+                    try {
+                        console.log(`📦 Fetching TileJSON from: ${source.url}`);
+                        const tileJsonResponse = await fetch(source.url);
+                        const tileJson = await tileJsonResponse.json();
+                        
+                        if (tileJson.tiles && tileJson.tiles.length > 0) {
+                            console.log(`📦 TileJSON resolved to: ${tileJson.tiles[0]}`);
+                            setTileSource({
+                                url: tileJson.tiles[0],
+                                maxZoom: tileJson.maxzoom || source.maxzoom || 14,
+                                timeout: 10000
+                            });
+                            
+                            // Update the source in the style with resolved tiles
+                            source.tiles = tileJson.tiles;
+                            if (tileJson.maxzoom) source.maxzoom = tileJson.maxzoom;
+                            if (tileJson.minzoom) source.minzoom = tileJson.minzoom;
+                        }
+                    } catch (err) {
+                        console.error(`❌ Failed to fetch TileJSON from ${source.url}:`, err);
+                    }
                 }
             }
         }
