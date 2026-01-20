@@ -42,18 +42,44 @@ export function createRenderPipeline(device, format, topology, isHidden = false,
     initCachedShaders(device);
     
     // Create and cache layout for render pipelines
+    // Group 0: Camera uniform only (compatible with effect shaders)
     if (!cachedLayouts.render) {
         cachedLayouts.render = device.createBindGroupLayout({
-            entries: [{
-                binding: 0,
-                visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
-                buffer: { type: "uniform" }
-            }]
+            entries: [
+                {
+                    binding: 0,
+                    visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+                    buffer: { type: "uniform" }
+                }
+            ]
+        });
+    }
+    
+    // Group 1: Terrain data (optional - for GPU terrain projection)
+    if (!cachedLayouts.terrain) {
+        cachedLayouts.terrain = device.createBindGroupLayout({
+            entries: [
+                {
+                    binding: 0,
+                    visibility: GPUShaderStage.VERTEX,
+                    texture: { sampleType: 'float' }
+                },
+                {
+                    binding: 1,
+                    visibility: GPUShaderStage.VERTEX,
+                    sampler: { type: 'filtering' }
+                },
+                {
+                    binding: 2,
+                    visibility: GPUShaderStage.VERTEX,
+                    buffer: { type: "uniform" }
+                }
+            ]
         });
     }
     
     const pipelineLayout = device.createPipelineLayout({ 
-        bindGroupLayouts: [cachedLayouts.render] 
+        bindGroupLayouts: [cachedLayouts.render, cachedLayouts.terrain] 
     });
     
     return device.createRenderPipeline({
@@ -219,6 +245,9 @@ export class MapRenderer {
         this.buffers = {};
         this._lastLoggedVisualZoom = -1;
         
+        // Terrain layer reference (set via setTerrainLayer)
+        this.terrainLayer = null;
+        
         // Initialize shader effect manager
         this.effectManager = new ShaderEffectManager(device);
         this.effectBindGroups = new Map(); // Cache bind groups for effects
@@ -228,6 +257,10 @@ export class MapRenderer {
         
         // Initialize pipelines
         this.initializePipelines();
+    }
+    
+    setTerrainLayer(terrainLayer) {
+        this.terrainLayer = terrainLayer;
     }
     
     initializePipelines() {
@@ -308,15 +341,72 @@ export class MapRenderer {
             minFilter: 'nearest',
         });
         
-        // Create bind groups
+        // Create terrain sampler for vector shaders
+        this.terrainSampler = this.device.createSampler({
+            magFilter: 'linear',
+            minFilter: 'linear',
+            addressModeU: 'clamp-to-edge',
+            addressModeV: 'clamp-to-edge'
+        });
+        
+        // Create dummy 1x1 terrain texture (used when terrain is disabled)
+        this.dummyTerrainTexture = this.device.createTexture({
+            size: [1, 1],
+            format: 'rgba8unorm',
+            usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
+        });
+        // Initialize with sea level (R=128, G=0, B=0 = height 0 in Terrarium encoding)
+        this.device.queue.writeTexture(
+            { texture: this.dummyTerrainTexture },
+            new Uint8Array([128, 0, 0, 255]),
+            { bytesPerRow: 4 },
+            [1, 1]
+        );
+        
+        // Create terrain bounds uniform buffer (32 bytes = 8 floats)
+        this.buffers.terrainBounds = this.device.createBuffer({
+            size: 32,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+        });
+        // Initialize with disabled state
+        this.device.queue.writeBuffer(this.buffers.terrainBounds, 0, new Float32Array([
+            -1, -1, 1, 1,  // minX, minY, maxX, maxY
+            1.5,           // exaggeration
+            0,             // enabled (0 = disabled)
+            0, 0           // padding
+        ]));
+        
+        // Create bind groups - separate camera (group 0) and terrain (group 1)
         this.bindGroups.main = this.device.createBindGroup({
             layout: this.pipelines.fill.getBindGroupLayout(0),
-            entries: [{ binding: 0, resource: { buffer: this.buffers.uniform } }],
+            entries: [
+                { binding: 0, resource: { buffer: this.buffers.uniform } }
+            ],
+        });
+        
+        this.bindGroups.terrain = this.device.createBindGroup({
+            layout: this.pipelines.fill.getBindGroupLayout(1),
+            entries: [
+                { binding: 0, resource: this.dummyTerrainTexture.createView() },
+                { binding: 1, resource: this.terrainSampler },
+                { binding: 2, resource: { buffer: this.buffers.terrainBounds } }
+            ],
         });
         
         this.bindGroups.picking = this.device.createBindGroup({
             layout: this.pipelines.hidden.getBindGroupLayout(0),
-            entries: [{ binding: 0, resource: { buffer: this.buffers.uniform } }],
+            entries: [
+                { binding: 0, resource: { buffer: this.buffers.uniform } }
+            ],
+        });
+        
+        this.bindGroups.pickingTerrain = this.device.createBindGroup({
+            layout: this.pipelines.hidden.getBindGroupLayout(1),
+            entries: [
+                { binding: 0, resource: this.dummyTerrainTexture.createView() },
+                { binding: 1, resource: this.terrainSampler },
+                { binding: 2, resource: { buffer: this.buffers.terrainBounds } }
+            ],
         });
         
         this.bindGroups.edgeDetection = this.device.createBindGroup({
@@ -343,6 +433,60 @@ export class MapRenderer {
         
         // Update initial camera transform
         this.updateCameraTransform(camera.getMatrix());
+    }
+    
+    /**
+     * Update terrain data for GPU-based vector projection
+     * Call this each frame to update terrain texture and bounds
+     */
+    updateTerrainForProjection(camera, zoom) {
+        if (!this.terrainLayer || !this.terrainLayer.enabled) {
+            // Disable terrain in shader
+            this.device.queue.writeBuffer(this.buffers.terrainBounds, 0, new Float32Array([
+                -1, -1, 1, 1,
+                1.5, 0, 0, 0  // enabled = 0
+            ]));
+            return;
+        }
+        
+        // Get visible terrain tiles and build atlas
+        const visibleTiles = this.terrainLayer.getVisibleTerrainTiles(camera, zoom);
+        const atlas = this.terrainLayer.buildTerrainAtlas(visibleTiles);
+        
+        if (!atlas) {
+            this.device.queue.writeBuffer(this.buffers.terrainBounds, 0, new Float32Array([
+                -1, -1, 1, 1,
+                this.terrainLayer.exaggeration, 0, 0, 0
+            ]));
+            return;
+        }
+        
+        // Update bounds uniform with atlas bounds
+        this.device.queue.writeBuffer(this.buffers.terrainBounds, 0, new Float32Array([
+            atlas.bounds.minX, atlas.bounds.minY, atlas.bounds.maxX, atlas.bounds.maxY,
+            this.terrainLayer.exaggeration,
+            1.0,  // enabled
+            0, 0  // padding
+        ]));
+        
+        // Recreate terrain bind groups with atlas texture
+        this.bindGroups.terrain = this.device.createBindGroup({
+            layout: this.pipelines.fill.getBindGroupLayout(1),
+            entries: [
+                { binding: 0, resource: atlas.texture.createView() },
+                { binding: 1, resource: this.terrainSampler },
+                { binding: 2, resource: { buffer: this.buffers.terrainBounds } }
+            ],
+        });
+        
+        this.bindGroups.pickingTerrain = this.device.createBindGroup({
+            layout: this.pipelines.hidden.getBindGroupLayout(1),
+            entries: [
+                { binding: 0, resource: atlas.texture.createView() },
+                { binding: 1, resource: this.terrainSampler },
+                { binding: 2, resource: { buffer: this.buffers.terrainBounds } }
+            ],
+        });
     }
     
     // Add method to create textures with specific dimensions

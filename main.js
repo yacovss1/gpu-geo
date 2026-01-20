@@ -75,12 +75,11 @@ async function main() {
     const terrainLayer = new TerrainLayer(device);
     await terrainLayer.initialize(format);
     terrainLayer.setCameraBuffer(renderer.buffers.uniform);
-    // Terrain disabled by default - enable with window.mapTerrain.enable()
+    // Connect terrain layer to renderer for GPU-based projection
+    renderer.setTerrainLayer(terrainLayer);
 
     // ===== Initialize TileManager =====
     const tileManager = new TileManager(device, performanceManager.stats);
-    // Connect terrain layer to tile manager for vertex height projection
-    tileManager.setTerrainLayer(terrainLayer);
     
     // ===== Initialize Marker Resources =====
     const markerResources = initMarkerResources(
@@ -139,6 +138,9 @@ async function main() {
 
         const currentTexture = context.getCurrentTexture();
         const textureView = currentTexture.createView();
+
+        // Update terrain for GPU-based vector projection
+        renderer.updateTerrainForProjection(camera, camera.zoom);
 
         // Render map geometry
         const mapEncoder = renderMap(
@@ -251,44 +253,24 @@ function setupGlobalAPI(device, camera, tileManager, performanceManager, styleMa
         disableLiveMonitoring: () => performanceManager.disableLiveMonitoring()
     };
     
-    // Terrain API
-    // Helper to reload tiles when terrain state changes
-    const reloadTilesForTerrain = async () => {
-        // Clear tile buffers and reload to apply/remove terrain height projection
-        await destroyAllBuffers(device, tileManager.visibleTileBuffers, tileManager.hiddenTileBuffers);
-        tileManager.visibleTileBuffers.clear();
-        tileManager.hiddenTileBuffers.clear();
-        // Trigger tile reload via camera event
-        camera.triggerEvent('zoomend');
-    };
-    
+    // Terrain API (GPU-based projection - no tile reload needed)
     window.mapTerrain = {
-        enable: async () => {
+        enable: () => {
             terrainLayer.setEnabled(true);
-            console.log('🏔️ Terrain enabled (visible at zoom ' + terrainLayer.getMinDisplayZoom() + '+)');
-            console.log('🔄 Reloading tiles with terrain projection...');
-            await reloadTilesForTerrain();
+            console.log('🏔️ Terrain enabled');
         },
-        disable: async () => {
+        disable: () => {
             terrainLayer.setEnabled(false);
             console.log('🏔️ Terrain disabled');
-            console.log('🔄 Reloading tiles without terrain projection...');
-            await reloadTilesForTerrain();
         },
-        toggle: async () => {
+        toggle: () => {
             terrainLayer.setEnabled(!terrainLayer.enabled);
             console.log(`🏔️ Terrain ${terrainLayer.enabled ? 'enabled' : 'disabled'}`);
-            console.log('🔄 Reloading tiles...');
-            await reloadTilesForTerrain();
         },
         isEnabled: () => terrainLayer.enabled,
-        setExaggeration: async (factor) => {
+        setExaggeration: (factor) => {
             terrainLayer.setExaggeration(factor);
             console.log(`🏔️ Terrain exaggeration set to ${factor}`);
-            if (terrainLayer.enabled) {
-                console.log('🔄 Reloading tiles with new exaggeration...');
-                await reloadTilesForTerrain();
-            }
         },
         setMinZoom: (zoom) => {
             terrainLayer.setMinDisplayZoom(zoom);

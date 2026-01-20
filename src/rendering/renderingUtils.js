@@ -85,6 +85,10 @@ export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, text
                     hiddenPass.setVertexBuffer(0, vertexBuffer);
                     hiddenPass.setIndexBuffer(hiddenFillIndexBuffer, "uint32");
                     hiddenPass.setBindGroup(0, renderer.bindGroups.picking);
+                    // Set terrain bind group for GPU terrain projection
+                    if (renderer.bindGroups.pickingTerrain) {
+                        hiddenPass.setBindGroup(1, renderer.bindGroups.pickingTerrain);
+                    }
                     hiddenPass.drawIndexed(hiddenfillIndexCount);
                 }
             });
@@ -128,11 +132,6 @@ export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, text
         }
     });
     
-    // ===== RENDER TERRAIN FIRST (underneath vector data) =====
-    if (terrainLayer && terrainLayer.enabled) {
-        terrainLayer.render(colorPass, camera.getMatrix(), camera, renderZoom);
-    }
-    
     // fillsWithExtrusions already computed above for hidden pass
     
     // Render ALL geometry in true style order
@@ -165,6 +164,11 @@ export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, text
                     colorPass.setVertexBuffer(0, vertexBuffer);
                     colorPass.setIndexBuffer(fillIndexBuffer, "uint32");
                     colorPass.setBindGroup(0, bindGroup);
+                    // Set terrain bind group for GPU terrain projection
+                    // Glass uses standard vertex shader which requires terrain bind group
+                    if (renderer.bindGroups.terrain) {
+                        colorPass.setBindGroup(1, renderer.bindGroups.terrain);
+                    }
                     colorPass.drawIndexed(fillIndexCount);
                 } else if (layerType === 'fill' && fillIndexCount > 0) {
                     // Check for water or grass effects
@@ -182,6 +186,10 @@ export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, text
                     colorPass.setVertexBuffer(0, vertexBuffer);
                     colorPass.setIndexBuffer(fillIndexBuffer, "uint32");
                     colorPass.setBindGroup(0, bindGroup);
+                    // Set terrain bind group for GPU terrain projection (all fill layers need this)
+                    if (renderer.bindGroups.terrain) {
+                        colorPass.setBindGroup(1, renderer.bindGroups.terrain);
+                    }
                     colorPass.drawIndexed(fillIndexCount);
                 } else if (layerType === 'line' && isLine && fillIndexCount > 0) {
                     // Skip if this is a tube layer (will be rendered by tubePipeline)
@@ -193,6 +201,10 @@ export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, text
                         colorPass.setVertexBuffer(0, vertexBuffer);
                         colorPass.setIndexBuffer(fillIndexBuffer, "uint32");
                         colorPass.setBindGroup(0, renderer.bindGroups.main);
+                        // Set terrain bind group for GPU terrain projection
+                        if (renderer.bindGroups.terrain) {
+                            colorPass.setBindGroup(1, renderer.bindGroups.terrain);
+                        }
                         colorPass.drawIndexed(fillIndexCount);
                     }
                 }
@@ -208,6 +220,12 @@ export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, text
                 renderer.tubePipeline.render(colorPass, tileBuffers, layer, renderZoom);
             }
         }
+    }
+    
+    // Render terrain hillshade overlay AFTER vectors (on top)
+    // Terrain mesh at Z=0 with depthCompare:'always' renders as transparent overlay
+    if (terrainLayer && terrainLayer.enabled) {
+        terrainLayer.render(colorPass, camera.getMatrix(), camera, renderZoom);
     }
     
     colorPass.end();

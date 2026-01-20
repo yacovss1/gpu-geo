@@ -4,6 +4,7 @@
 /**
  * Water Effect - Animated wave vertex shader
  * Applies sine wave displacement to create flowing water effect
+ * Includes terrain projection to stay aligned with other features
  */
 export const waterVertexShaderCode = `
 struct VertexOutput {
@@ -14,8 +15,49 @@ struct VertexOutput {
     @location(3) worldPos: vec2<f32>
 };
 
+struct TerrainBounds {
+    minX: f32,
+    minY: f32,
+    maxX: f32,
+    maxY: f32,
+    exaggeration: f32,
+    enabled: f32,
+    _pad1: f32,
+    _pad2: f32
+};
+
 @group(0) @binding(0) var<uniform> uniforms: mat4x4<f32>;
 @group(0) @binding(1) var<uniform> time: f32;
+
+// Terrain data in bind group 1
+@group(1) @binding(0) var terrainTexture: texture_2d<f32>;
+@group(1) @binding(1) var terrainSampler: sampler;
+@group(1) @binding(2) var<uniform> terrainBounds: TerrainBounds;
+
+fn sampleTerrainHeight(clipX: f32, clipY: f32) -> f32 {
+    if (terrainBounds.enabled < 0.5) {
+        return 0.0;
+    }
+    
+    let margin = 0.001;
+    if (clipX < terrainBounds.minX - margin || clipX > terrainBounds.maxX + margin ||
+        clipY < terrainBounds.minY - margin || clipY > terrainBounds.maxY + margin) {
+        return 0.0;
+    }
+    
+    let u = clamp((clipX - terrainBounds.minX) / (terrainBounds.maxX - terrainBounds.minX), 0.001, 0.999);
+    let v = clamp(1.0 - (clipY - terrainBounds.minY) / (terrainBounds.maxY - terrainBounds.minY), 0.001, 0.999);
+    
+    let pixel = textureSampleLevel(terrainTexture, terrainSampler, vec2<f32>(u, v), 0.0);
+    
+    let r = pixel.r * 255.0;
+    let g = pixel.g * 255.0;
+    let b = pixel.b * 255.0;
+    let rawHeight = (r * 256.0 + g + b / 256.0) - 32768.0;
+    let height = clamp(rawHeight, 0.0, 9000.0);
+    
+    return (height / 50000000.0) * terrainBounds.exaggeration;
+}
 
 @vertex
 fn main(@location(0) inPosition: vec3<f32>, @location(1) inColor: vec4<f32>) -> VertexOutput {
@@ -24,17 +66,16 @@ fn main(@location(0) inPosition: vec3<f32>, @location(1) inColor: vec4<f32>) -> 
     // Store world position for fragment shader
     output.worldPos = inPosition.xy;
     
-    // Apply camera transform WITHOUT any displacement
-    // The geometry stays in place, only the visual appearance changes
-    // Use inPosition.z for layer-based Z offset (for proper depth ordering)
-    let pos = vec4<f32>(inPosition.x, inPosition.y, inPosition.z, 1.0);
-    output.position = uniforms * pos;
+    // Sample terrain height to stay aligned with other features
+    let terrainHeight = sampleTerrainHeight(inPosition.x, inPosition.y);
     
-    // Perspective matrix handles depth correctly via Z/W - don't override it
+    // Apply camera transform with terrain projection
+    let pos = vec4<f32>(inPosition.x, inPosition.y, inPosition.z + terrainHeight, 1.0);
+    output.position = uniforms * pos;
     
     output.fragCoord = output.position.xy;
     output.color = inColor;
-    output.worldZ = inPosition.z;
+    output.worldZ = inPosition.z + terrainHeight;
     
     return output;
 }

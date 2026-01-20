@@ -30,16 +30,6 @@ export class TileManager {
         this.maxTilesPerLayer = 100; // Configurable limit
         this.totalBuffersCreated = 0;
         this.totalBuffersDestroyed = 0;
-        
-        // Terrain layer for vertex projection (set via setTerrainLayer)
-        this.terrainLayer = null;
-    }
-    
-    /**
-     * Set the terrain layer for vertex height projection
-     */
-    setTerrainLayer(terrainLayer) {
-        this.terrainLayer = terrainLayer;
     }
     
     /**
@@ -200,7 +190,7 @@ export class TileManager {
      * Create GPU buffers for a single feature
      */
     createBuffersForFeature(parsedFeature, z, x, y, newTileBuffers, newHiddenTileBuffers) {
-        let {
+        const {
             vertices, hiddenVertices, fillIndices, hiddenfillIndices,
             isFilled, isLine, properties, layerId
         } = parsedFeature;
@@ -209,13 +199,7 @@ export class TileManager {
             return; // Skip empty geometry
         }
         
-        // Apply terrain height projection if terrain layer is available and enabled
-        if (this.terrainLayer && this.terrainLayer.enabled) {
-            vertices = this.terrainLayer.applyTerrainToVertices(vertices, 7);
-            if (hiddenVertices.length > 0) {
-                hiddenVertices = this.terrainLayer.applyTerrainToVertices(hiddenVertices, 7);
-            }
-        }
+        // Terrain projection is now done in GPU vertex shader
         
         // Determine if this is a 3D feature
         const use3DGeometry = layerId.includes('building') || layerId.includes('extrusion');

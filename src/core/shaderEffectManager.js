@@ -68,7 +68,7 @@ export class ShaderEffectManager {
         const fragmentModule = this.getShaderModule('water-fragment', waterFragmentShaderCode);
         
         // Create bind group layout with camera uniform and time
-        const bindGroupLayout = this.device.createBindGroupLayout({
+        const cameraBindGroupLayout = this.device.createBindGroupLayout({
             entries: [
                 {
                     binding: 0,
@@ -83,8 +83,29 @@ export class ShaderEffectManager {
             ]
         });
         
+        // Terrain bind group layout (same as main shaders)
+        const terrainBindGroupLayout = this.device.createBindGroupLayout({
+            entries: [
+                {
+                    binding: 0,
+                    visibility: GPUShaderStage.VERTEX,
+                    texture: { sampleType: 'float' }
+                },
+                {
+                    binding: 1,
+                    visibility: GPUShaderStage.VERTEX,
+                    sampler: { type: 'filtering' }
+                },
+                {
+                    binding: 2,
+                    visibility: GPUShaderStage.VERTEX,
+                    buffer: { type: "uniform" }
+                }
+            ]
+        });
+        
         const pipelineLayout = this.device.createPipelineLayout({ 
-            bindGroupLayouts: [bindGroupLayout] 
+            bindGroupLayouts: [cameraBindGroupLayout, terrainBindGroupLayout] 
         });
         
         return this.device.createRenderPipeline({
@@ -133,7 +154,8 @@ export class ShaderEffectManager {
         const vertexModule = this.getShaderModule('standard-vertex', vertexShaderCode);
         const fragmentModule = this.getShaderModule('glass-fragment', glassFragmentShaderCode);
         
-        const bindGroupLayout = this.device.createBindGroupLayout({
+        // Group 0: Camera uniform
+        const cameraBindGroupLayout = this.device.createBindGroupLayout({
             entries: [{
                 binding: 0,
                 visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
@@ -141,8 +163,29 @@ export class ShaderEffectManager {
             }]
         });
         
+        // Group 1: Terrain data (must match main shader bindings)
+        const terrainBindGroupLayout = this.device.createBindGroupLayout({
+            entries: [
+                {
+                    binding: 0,
+                    visibility: GPUShaderStage.VERTEX,
+                    texture: { sampleType: 'float' }
+                },
+                {
+                    binding: 1,
+                    visibility: GPUShaderStage.VERTEX,
+                    sampler: { type: 'filtering' }
+                },
+                {
+                    binding: 2,
+                    visibility: GPUShaderStage.VERTEX,
+                    buffer: { type: "uniform" }
+                }
+            ]
+        });
+        
         const pipelineLayout = this.device.createPipelineLayout({ 
-            bindGroupLayouts: [bindGroupLayout] 
+            bindGroupLayouts: [cameraBindGroupLayout, terrainBindGroupLayout] 
         });
         
         return this.device.createRenderPipeline({
@@ -190,7 +233,7 @@ export class ShaderEffectManager {
         const vertexModule = this.getShaderModule('grass-vertex', grassVertexShaderCode);
         const fragmentModule = this.getShaderModule('standard-fragment', standardFragmentShaderCode);
         
-        const bindGroupLayout = this.device.createBindGroupLayout({
+        const cameraBindGroupLayout = this.device.createBindGroupLayout({
             entries: [
                 {
                     binding: 0,
@@ -205,8 +248,29 @@ export class ShaderEffectManager {
             ]
         });
         
+        // Terrain bind group layout (same as main shaders)
+        const terrainBindGroupLayout = this.device.createBindGroupLayout({
+            entries: [
+                {
+                    binding: 0,
+                    visibility: GPUShaderStage.VERTEX,
+                    texture: { sampleType: 'float' }
+                },
+                {
+                    binding: 1,
+                    visibility: GPUShaderStage.VERTEX,
+                    sampler: { type: 'filtering' }
+                },
+                {
+                    binding: 2,
+                    visibility: GPUShaderStage.VERTEX,
+                    buffer: { type: "uniform" }
+                }
+            ]
+        });
+        
         const pipelineLayout = this.device.createPipelineLayout({ 
-            bindGroupLayouts: [bindGroupLayout] 
+            bindGroupLayouts: [cameraBindGroupLayout, terrainBindGroupLayout] 
         });
         
         return this.device.createRenderPipeline({

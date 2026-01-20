@@ -73,9 +73,8 @@ fn vs_main(@location(0) clipPos: vec2<f32>, @location(1) uv: vec2<f32>) -> Verte
     }
     
     // Create world position WITH height displacement for 3D terrain
-    // Use very small negative Z to be behind vector tiles at Z=0
-    let terrainZ = scaledHeight - 0.00001;
-    let worldPos = vec4<f32>(clipPos.x, clipPos.y, terrainZ, 1.0);
+    // Vectors are also projected to this same height via GPU sampling
+    let worldPos = vec4<f32>(clipPos.x, clipPos.y, scaledHeight, 1.0);
     output.position = cameraMatrix * worldPos;
     
     return output;
@@ -89,38 +88,33 @@ fn fs_main(
     @location(1) height: f32,
     @location(2) normal: vec3<f32>
 ) -> @location(0) vec4<f32> {
-    // Elevation-based coloring
-    var color: vec3<f32>;
+    // Hillshade-only mode: render shading as transparent overlay
+    // Dark shadows on slopes facing away from light
+    // Transparent on flat areas and lit slopes
     
-    let h = height * 10.0; // Scale for color mapping
+    // Light direction (from upper-left, like traditional cartographic hillshade)
+    let lightDir = normalize(vec3<f32>(0.5, 0.5, 1.0));
     
-    if (h < 0.0) {
-        // Water - blue
-        color = vec3<f32>(0.2, 0.4, 0.7);
-    } else if (h < 0.05) {
-        // Lowlands - green
-        color = vec3<f32>(0.3, 0.5, 0.2);
-    } else if (h < 0.15) {
-        // Hills - yellow-green
-        let t = (h - 0.05) / 0.1;
-        color = mix(vec3<f32>(0.3, 0.5, 0.2), vec3<f32>(0.5, 0.5, 0.3), t);
-    } else if (h < 0.35) {
-        // Mountains - brown
-        let t = (h - 0.15) / 0.2;
-        color = mix(vec3<f32>(0.5, 0.5, 0.3), vec3<f32>(0.5, 0.4, 0.3), t);
-    } else {
-        // High mountains/snow
-        let t = min((h - 0.35) / 0.15, 1.0);
-        color = mix(vec3<f32>(0.5, 0.4, 0.3), vec3<f32>(0.9, 0.9, 0.95), t);
+    // Calculate how much this surface faces the light
+    let ndotl = dot(normal, lightDir);
+    
+    // Shadows: slopes facing away from light get dark overlay
+    // Highlights: slopes facing toward light stay transparent
+    if (ndotl < 0.3) {
+        // Shadow - dark gray overlay with opacity based on how shadowed
+        let shadowStrength = (0.3 - ndotl) / 0.6; // 0 to ~0.5
+        let opacity = shadowStrength * 0.4; // Max 20% opacity for shadows
+        return vec4<f32>(0.0, 0.0, 0.0, opacity);
+    } else if (ndotl > 0.7) {
+        // Highlight - subtle white overlay for very lit slopes
+        let highlightStrength = (ndotl - 0.7) / 0.3;
+        let opacity = highlightStrength * 0.15; // Max 15% opacity for highlights
+        return vec4<f32>(1.0, 1.0, 1.0, opacity);
     }
     
-    // Simple lighting
-    let lightDir = normalize(vec3<f32>(0.5, 0.5, 1.0));
-    let diffuse = max(dot(normal, lightDir), 0.0);
-    let ambient = 0.4;
-    let lighting = ambient + diffuse * 0.6;
-    
-    return vec4<f32>(color * lighting, 1.0);
+    // Neutral lighting - fully transparent (discard for performance)
+    discard;
+    return vec4<f32>(0.0, 0.0, 0.0, 0.0); // Required by WGSL even after discard
 }
 `;
 

@@ -1,4 +1,4 @@
-// Fix the vertex shader to better handle high zoom values
+// Vector layer shaders with GPU terrain projection
 
 export const vertexShaderCode = `
 struct VertexOutput {
@@ -8,24 +8,72 @@ struct VertexOutput {
     @location(2) worldZ: f32
 };
 
+struct TerrainBounds {
+    minX: f32,
+    minY: f32,
+    maxX: f32,
+    maxY: f32,
+    exaggeration: f32,
+    enabled: f32,
+    _pad1: f32,
+    _pad2: f32
+};
+
 @group(0) @binding(0) var<uniform> uniforms: mat4x4<f32>;
+
+// Terrain data in bind group 1 (optional - for GPU terrain projection)
+@group(1) @binding(0) var terrainTexture: texture_2d<f32>;
+@group(1) @binding(1) var terrainSampler: sampler;
+@group(1) @binding(2) var<uniform> terrainBounds: TerrainBounds;
+
+fn sampleTerrainHeight(clipX: f32, clipY: f32) -> f32 {
+    if (terrainBounds.enabled < 0.5) {
+        return 0.0;
+    }
+    
+    // Check if position is within terrain bounds (with small margin)
+    let margin = 0.001;
+    if (clipX < terrainBounds.minX - margin || clipX > terrainBounds.maxX + margin ||
+        clipY < terrainBounds.minY - margin || clipY > terrainBounds.maxY + margin) {
+        return 0.0;
+    }
+    
+    // Convert clip coords to UV (0-1) and clamp to valid range
+    let u = clamp((clipX - terrainBounds.minX) / (terrainBounds.maxX - terrainBounds.minX), 0.001, 0.999);
+    let v = clamp(1.0 - (clipY - terrainBounds.minY) / (terrainBounds.maxY - terrainBounds.minY), 0.001, 0.999);
+    
+    // Sample terrain texture
+    let pixel = textureSampleLevel(terrainTexture, terrainSampler, vec2<f32>(u, v), 0.0);
+    
+    // Decode Terrarium height: height = (R * 256 + G + B / 256) - 32768
+    let r = pixel.r * 255.0;
+    let g = pixel.g * 255.0;
+    let b = pixel.b * 255.0;
+    let rawHeight = (r * 256.0 + g + b / 256.0) - 32768.0;
+    
+    // Clamp height to reasonable range (0 to 9000m - slightly above Everest)
+    let height = clamp(rawHeight, 0.0, 9000.0);
+    
+    // Scale height to clip space
+    return (height / 50000000.0) * terrainBounds.exaggeration;
+}
 
 @vertex
 fn main(@location(0) inPosition: vec3<f32>, @location(1) inColor: vec4<f32>) -> VertexOutput {
     var output: VertexOutput;
     
-    // Full 3D position including height
-    let pos = vec4<f32>(inPosition.x, inPosition.y, inPosition.z, 1.0);
-
-    // Apply camera transform - always perspective
-    output.position = uniforms * pos;
+    // Sample terrain height at this vertex position
+    let terrainHeight = sampleTerrainHeight(inPosition.x, inPosition.y);
     
-    // Perspective matrix handles depth correctly via Z/W
+    // Add terrain height to vertex Z
+    let pos = vec4<f32>(inPosition.x, inPosition.y, inPosition.z + terrainHeight, 1.0);
 
-    // Pass along coordinates for fragment shader
+    // Apply camera transform
+    output.position = uniforms * pos;
+
     output.fragCoord = output.position.xy;
     output.color = inColor;
-    output.worldZ = inPosition.z;
+    output.worldZ = inPosition.z + terrainHeight;
     
     return output;
 }
@@ -60,23 +108,64 @@ struct VertexOutput {
     @location(2) worldZ: f32
 };
 
+struct TerrainBounds {
+    minX: f32,
+    minY: f32,
+    maxX: f32,
+    maxY: f32,
+    exaggeration: f32,
+    enabled: f32,
+    _pad1: f32,
+    _pad2: f32
+};
+
 @group(0) @binding(0) var<uniform> uniforms: mat4x4<f32>;
+
+// Terrain data in bind group 1 (optional - for GPU terrain projection)
+@group(1) @binding(0) var terrainTexture: texture_2d<f32>;
+@group(1) @binding(1) var terrainSampler: sampler;
+@group(1) @binding(2) var<uniform> terrainBounds: TerrainBounds;
+
+fn sampleTerrainHeight(clipX: f32, clipY: f32) -> f32 {
+    if (terrainBounds.enabled < 0.5) {
+        return 0.0;
+    }
+    
+    // Check if position is within terrain bounds (with small margin)
+    let margin = 0.001;
+    if (clipX < terrainBounds.minX - margin || clipX > terrainBounds.maxX + margin ||
+        clipY < terrainBounds.minY - margin || clipY > terrainBounds.maxY + margin) {
+        return 0.0;
+    }
+    
+    // Convert clip coords to UV (0-1) and clamp to valid range
+    let u = clamp((clipX - terrainBounds.minX) / (terrainBounds.maxX - terrainBounds.minX), 0.001, 0.999);
+    let v = clamp(1.0 - (clipY - terrainBounds.minY) / (terrainBounds.maxY - terrainBounds.minY), 0.001, 0.999);
+    
+    let pixel = textureSampleLevel(terrainTexture, terrainSampler, vec2<f32>(u, v), 0.0);
+    
+    let r = pixel.r * 255.0;
+    let g = pixel.g * 255.0;
+    let b = pixel.b * 255.0;
+    let rawHeight = (r * 256.0 + g + b / 256.0) - 32768.0;
+    
+    // Clamp height to reasonable range (0 to 9000m - slightly above Everest)
+    let height = clamp(rawHeight, 0.0, 9000.0);
+    
+    return (height / 50000000.0) * terrainBounds.exaggeration;
+}
 
 @vertex
 fn main(@location(0) inPosition: vec3<f32>, @location(1) inColor: vec4<f32>) -> VertexOutput {
     var output: VertexOutput;
     
-    // Full 3D position including height
-    let pos = vec4<f32>(inPosition.x, inPosition.y, inPosition.z, 1.0);
+    let terrainHeight = sampleTerrainHeight(inPosition.x, inPosition.y);
+    let pos = vec4<f32>(inPosition.x, inPosition.y, inPosition.z + terrainHeight, 1.0);
 
-    // Apply camera transform - always perspective
     output.position = uniforms * pos;
-    
-    // Perspective matrix handles depth correctly
-
     output.fragCoord = output.position.xy;
     output.color = inColor;
-    output.worldZ = inPosition.z;
+    output.worldZ = inPosition.z + terrainHeight;
     
     return output;
 }
