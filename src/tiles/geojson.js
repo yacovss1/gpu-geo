@@ -54,7 +54,7 @@ function getSmartFeatureId(feature, sourceId) {
     
     // Fall back to sequential for now (should not happen with MapLibre demo tiles)
     const seqId = getNextFeatureId();
-    console.log(`⚠️ No valid feature.id for ${name || 'unknown'}, using sequential: ${seqId}`);
+    //console.log(`⚠️ No valid feature.id for ${name || 'unknown'}, using sequential: ${seqId}`);
     return seqId;
 }
 

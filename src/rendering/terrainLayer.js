@@ -219,6 +219,13 @@ export class TerrainLayer {
             const blob = await response.blob();
             const bitmap = await createImageBitmap(blob);
             
+            // Extract raw pixel data for CPU-side height sampling
+            // Create offscreen canvas to read pixels
+            const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(bitmap, 0, 0);
+            const imageData = ctx.getImageData(0, 0, bitmap.width, bitmap.height);
+            
             // Create GPU texture
             const texture = this.device.createTexture({
                 size: [bitmap.width, bitmap.height],
@@ -247,7 +254,10 @@ export class TerrainLayer {
                 vertexBuffer,
                 tileInfoBuffer,
                 bindGroup: null,
-                z, x, y
+                z, x, y,
+                imageData,  // Store for CPU height sampling
+                width: bitmap.width,
+                height: bitmap.height
             };
             
             // Create bind group if camera buffer is available
@@ -326,6 +336,13 @@ export class TerrainLayer {
         const visibleTiles = this.getVisibleTerrainTiles(camera, zoom);
         if (visibleTiles.length === 0) {
             return; // Silently return - no spam
+        }
+        
+        // Prune invisible tiles to prevent memory buildup
+        // Only do this occasionally to avoid performance hit
+        if (!this._lastPruneTime || (performance.now() - this._lastPruneTime) > 5000) {
+            this.pruneInvisibleTiles(visibleTiles);
+            this._lastPruneTime = performance.now();
         }
         
         // Log once when tiles are requested
@@ -408,6 +425,52 @@ export class TerrainLayer {
         this._loggedRendering = false;
         this._loggedDrawCalls = false;
         this._loggedBounds = false;
+        // Clear old tiles when toggling to free memory
+        if (!enabled) {
+            this.clearTileCache();
+        }
+    }
+    
+    /**
+     * Clear terrain tile cache and free GPU resources
+     */
+    clearTileCache() {
+        for (const [key, tile] of this.terrainTiles) {
+            if (tile.texture) tile.texture.destroy();
+            if (tile.vertexBuffer) tile.vertexBuffer.destroy();
+            if (tile.tileInfoBuffer) tile.tileInfoBuffer.destroy();
+        }
+        this.terrainTiles.clear();
+        this.loadingTiles.clear();
+        this.failedTiles.clear();
+        console.log('🏔️ Terrain tile cache cleared');
+    }
+    
+    /**
+     * Clear terrain tiles that are no longer visible
+     * Call this on zoom change to prevent memory buildup
+     */
+    pruneInvisibleTiles(visibleTiles) {
+        const visibleKeys = new Set(visibleTiles.map(t => `${t.z}/${t.x}/${t.y}`));
+        const keysToRemove = [];
+        
+        for (const [key, tile] of this.terrainTiles) {
+            if (!visibleKeys.has(key)) {
+                keysToRemove.push(key);
+            }
+        }
+        
+        for (const key of keysToRemove) {
+            const tile = this.terrainTiles.get(key);
+            if (tile.texture) tile.texture.destroy();
+            if (tile.vertexBuffer) tile.vertexBuffer.destroy();
+            if (tile.tileInfoBuffer) tile.tileInfoBuffer.destroy();
+            this.terrainTiles.delete(key);
+        }
+        
+        if (keysToRemove.length > 0) {
+            console.log(`🏔️ Pruned ${keysToRemove.length} terrain tiles, ${this.terrainTiles.size} remaining`);
+        }
     }
 
     setExaggeration(factor) {
@@ -455,5 +518,142 @@ export class TerrainLayer {
         if (this.gridIndices) {
             this.gridIndices.buffer.destroy();
         }
+    }
+
+    /**
+     * Get terrain height data for vector shader projection
+     * Returns the terrain texture and bounds info for a specific tile
+     * This allows vector layers to sample terrain height
+     */
+    getTerrainForTile(z, x, y) {
+        const key = `${z}/${x}/${y}`;
+        const tileData = this.terrainTiles.get(key);
+        if (!tileData) return null;
+        
+        return {
+            texture: tileData.texture,
+            sampler: this.sampler,
+            bounds: this.getTileBounds(z, x, y),
+            exaggeration: this.exaggeration
+        };
+    }
+
+    /**
+     * Get the height scaling factor used in terrain rendering
+     * This should match the shader's height calculation
+     */
+    getHeightScale() {
+        // Must match shader: (height / 50000000.0) * exaggeration
+        return this.exaggeration / 50000000.0;
+    }
+
+    /**
+     * Check if terrain is ready for a given viewport
+     */
+    hasTerrainForViewport(visibleTiles) {
+        for (const tile of visibleTiles) {
+            const key = `${tile.z}/${tile.x}/${tile.y}`;
+            if (this.terrainTiles.has(key)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Build a bounds cache for faster height sampling
+     * Call this before processing many vertices
+     */
+    _buildBoundsCache() {
+        this._boundsCache = [];
+        for (const [key, tileData] of this.terrainTiles) {
+            if (!tileData.imageData) continue;
+            const bounds = this.getTileBounds(tileData.z, tileData.x, tileData.y);
+            this._boundsCache.push({
+                tileData,
+                bounds,
+                key
+            });
+        }
+    }
+
+    /**
+     * Sample terrain height at a clip-space coordinate
+     * Returns the height in clip-space units (same scale as vertex Z)
+     * 
+     * @param {number} clipX - X coordinate in clip space (-1 to 1)
+     * @param {number} clipY - Y coordinate in clip space (-1 to 1)
+     * @returns {number} Height in clip-space units, or 0 if no terrain data
+     */
+    sampleHeightAtClipCoord(clipX, clipY) {
+        if (!this.enabled) return 0;
+        if (!this._boundsCache || this._boundsCache.length === 0) return 0;
+        
+        // Use cached bounds for faster lookup
+        for (const { tileData, bounds } of this._boundsCache) {
+            // Check if point is within tile bounds
+            if (clipX >= bounds.minX && clipX <= bounds.maxX &&
+                clipY >= bounds.minY && clipY <= bounds.maxY) {
+                
+                if (!tileData.imageData) continue;
+                
+                // Convert clip coords to UV (0-1) within tile
+                const u = (clipX - bounds.minX) / (bounds.maxX - bounds.minX);
+                const v = (clipY - bounds.minY) / (bounds.maxY - bounds.minY);
+                
+                // Convert UV to pixel coords
+                const px = Math.floor(u * (tileData.width - 1));
+                const py = Math.floor((1 - v) * (tileData.height - 1)); // Flip Y
+                
+                // Sample pixel from imageData
+                const idx = (py * tileData.width + px) * 4;
+                const r = tileData.imageData.data[idx];
+                const g = tileData.imageData.data[idx + 1];
+                const b = tileData.imageData.data[idx + 2];
+                
+                // Decode Terrarium height
+                const rawHeight = (r * 256 + g + b / 256) - 32768;
+                const height = Math.max(rawHeight, 0); // Clamp to 0 like shader
+                
+                // Scale height same as shader
+                return (height / 50000000.0) * this.exaggeration;
+            }
+        }
+        
+        return 0; // No terrain data for this location
+    }
+
+    /**
+     * Sample terrain height for an array of vertices
+     * More efficient than calling sampleHeightAtClipCoord for each vertex
+     * 
+     * @param {Float32Array} vertices - Vertex array with stride 7 (x,y,z,r,g,b,a)
+     * @param {number} stride - Vertex stride in floats (default 7)
+     * @returns {Float32Array} New vertex array with Z values adjusted for terrain
+     */
+    applyTerrainToVertices(vertices, stride = 7) {
+        if (!this.enabled) return vertices;
+        
+        const result = new Float32Array(vertices.length);
+        result.set(vertices);
+        
+        for (let i = 0; i < vertices.length; i += stride) {
+            const x = vertices[i];
+            const y = vertices[i + 1];
+            const z = vertices[i + 2];
+            
+            // Only apply terrain to vertices at z=0 (flat features)
+            // Don't modify extruded buildings
+            if (z === 0) {
+                const terrainHeight = this.sampleHeightAtClipCoord(x, y);
+                result[i + 2] = terrainHeight;
+            } else {
+                // For extruded features, add terrain height to base
+                const terrainHeight = this.sampleHeightAtClipCoord(x, y);
+                result[i + 2] = z + terrainHeight;
+            }
+        }
+        
+        return result;
     }
 }

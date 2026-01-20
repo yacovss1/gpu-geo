@@ -30,6 +30,16 @@ export class TileManager {
         this.maxTilesPerLayer = 100; // Configurable limit
         this.totalBuffersCreated = 0;
         this.totalBuffersDestroyed = 0;
+        
+        // Terrain layer for vertex projection (set via setTerrainLayer)
+        this.terrainLayer = null;
+    }
+    
+    /**
+     * Set the terrain layer for vertex height projection
+     */
+    setTerrainLayer(terrainLayer) {
+        this.terrainLayer = terrainLayer;
     }
     
     /**
@@ -190,13 +200,21 @@ export class TileManager {
      * Create GPU buffers for a single feature
      */
     createBuffersForFeature(parsedFeature, z, x, y, newTileBuffers, newHiddenTileBuffers) {
-        const {
+        let {
             vertices, hiddenVertices, fillIndices, hiddenfillIndices,
             isFilled, isLine, properties, layerId
         } = parsedFeature;
         
         if (vertices.length === 0 || fillIndices.length === 0) {
             return; // Skip empty geometry
+        }
+        
+        // Apply terrain height projection if terrain layer is available and enabled
+        if (this.terrainLayer && this.terrainLayer.enabled) {
+            vertices = this.terrainLayer.applyTerrainToVertices(vertices, 7);
+            if (hiddenVertices.length > 0) {
+                hiddenVertices = this.terrainLayer.applyTerrainToVertices(hiddenVertices, 7);
+            }
         }
         
         // Determine if this is a 3D feature

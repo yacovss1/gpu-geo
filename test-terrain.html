@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>WebGPU Terrain Test</title>
+    <style>
+        body { margin: 0; background: #1a1a2e; }
+        canvas { width: 100vw; height: 100vh; display: block; }
+        #info { 
+            position: absolute; 
+            top: 10px; 
+            left: 10px; 
+            color: white; 
+            font-family: monospace;
+            background: rgba(0,0,0,0.7);
+            padding: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div id="info">Loading terrain...</div>
+    <canvas id="canvas"></canvas>
+    <script type="module">
+        // AWS Terrarium terrain tiles (free, no API key)
+        // Encoding: height = (R * 256 + G + B / 256) - 32768
+        const TERRAIN_URL = 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium';
+        
+        async function loadTerrainTile(z, x, y) {
+            const url = `${TERRAIN_URL}/${z}/${x}/${y}.png`;
+            const response = await fetch(url);
+            const blob = await response.blob();
+            const bitmap = await createImageBitmap(blob);
+            return bitmap;
+        }
+        
+        // Decode Terrarium height from RGB
+        function decodeHeight(r, g, b) {
+            return (r * 256 + g + b / 256) - 32768;
+        }
+        
+        async function init() {
+            const info = document.getElementById('info');
+            const canvas = document.getElementById('canvas');
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            
+            // Check WebGPU
+            if (!navigator.gpu) {
+                info.textContent = 'WebGPU not supported';
+                return;
+            }
+            
+            const adapter = await navigator.gpu.requestAdapter();
+            const device = await adapter.requestDevice();
+            const context = canvas.getContext('webgpu');
+            const format = navigator.gpu.getPreferredCanvasFormat();
+            context.configure({ device, format, alphaMode: 'opaque' });
+            
+            info.textContent = 'Loading terrain tile...';
+            
+            // Load a terrain tile - Alps region (good elevation variation)
+            // z=8, x=134, y=89 is around the Alps
+            const terrainBitmap = await loadTerrainTile(8, 134, 89);
+            
+            info.textContent = `Terrain loaded: ${terrainBitmap.width}x${terrainBitmap.height}`;
+            
+            // Create texture from terrain tile
+            const terrainTexture = device.createTexture({
+                size: [terrainBitmap.width, terrainBitmap.height],
+                format: 'rgba8unorm',
+                usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT
+            });
+            
+            device.queue.copyExternalImageToTexture(
+                { source: terrainBitmap },
+                { texture: terrainTexture },
+                [terrainBitmap.width, terrainBitmap.height]
+            );
+            
+            // Create a grid mesh
+            const gridSize = 128;
+            const vertices = [];
+            const indices = [];
+            
+            for (let y = 0; y <= gridSize; y++) {
+                for (let x = 0; x <= gridSize; x++) {
+                    // Position in clip space [-1, 1]
+                    const px = (x / gridSize) * 2 - 1;
+                    const py = (y / gridSize) * 2 - 1;
+                    // UV for texture sampling [0, 1]
+                    const u = x / gridSize;
+                    const v = y / gridSize;
+                    vertices.push(px, py, u, v);
+                }
+            }
+            
+            for (let y = 0; y < gridSize; y++) {
+                for (let x = 0; x < gridSize; x++) {
+                    const i = y * (gridSize + 1) + x;
+                    indices.push(i, i + 1, i + gridSize + 1);
+                    indices.push(i + 1, i + gridSize + 2, i + gridSize + 1);
+                }
+            }
+            
+            const vertexBuffer = device.createBuffer({
+                size: vertices.length * 4,
+                usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST
+            });
+            device.queue.writeBuffer(vertexBuffer, 0, new Float32Array(vertices));
+            
+            const indexBuffer = device.createBuffer({
+                size: indices.length * 4,
+                usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST
+            });
+            device.queue.writeBuffer(indexBuffer, 0, new Uint32Array(indices));
+            
+            // Uniforms: camera matrix + time
+            const uniformBuffer = device.createBuffer({
+                size: 64 + 16, // mat4 + padding for time
+                usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+            });
+            
+            // Shader
+            const shaderCode = `
+                struct Uniforms {
+                    matrix: mat4x4<f32>,
+                    time: f32
+                };
+                
+                @group(0) @binding(0) var<uniform> uniforms: Uniforms;
+                @group(0) @binding(1) var terrainTexture: texture_2d<f32>;
+                @group(0) @binding(2) var terrainSampler: sampler;
+                
+                struct VertexOutput {
+                    @builtin(position) position: vec4<f32>,
+                    @location(0) uv: vec2<f32>,
+                    @location(1) height: f32
+                };
+                
+                @vertex
+                fn vs_main(@location(0) pos: vec2<f32>, @location(1) uv: vec2<f32>) -> VertexOutput {
+                    var output: VertexOutput;
+                    output.uv = uv;
+                    
+                    // Sample terrain texture
+                    let texSize = vec2<f32>(textureDimensions(terrainTexture));
+                    let texCoord = vec2<i32>(uv * texSize);
+                    let pixel = textureLoad(terrainTexture, texCoord, 0);
+                    
+                    // Decode Terrarium height: (R * 256 + G + B / 256) - 32768
+                    let r = pixel.r * 255.0;
+                    let g = pixel.g * 255.0;
+                    let b = pixel.b * 255.0;
+                    let height = (r * 256.0 + g + b / 256.0) - 32768.0;
+                    
+                    // Scale height to visible range (Alps go up to ~4000m)
+                    let scaledHeight = height / 8000.0;  // Map to [-0.5, 0.5] roughly
+                    output.height = scaledHeight;
+                    
+                    // Create 3D position
+                    let worldPos = vec4<f32>(pos.x, pos.y, scaledHeight, 1.0);
+                    output.position = uniforms.matrix * worldPos;
+                    
+                    return output;
+                }
+                
+                @fragment
+                fn fs_main(@location(0) uv: vec2<f32>, @location(1) height: f32) -> @location(0) vec4<f32> {
+                    // Color based on height
+                    // Water (below 0): blue
+                    // Low land: green
+                    // Mountains: brown/gray
+                    // Snow: white
+                    
+                    var color: vec3<f32>;
+                    
+                    if (height < 0.0) {
+                        // Water
+                        color = vec3<f32>(0.2, 0.4, 0.8);
+                    } else if (height < 0.1) {
+                        // Low land - green
+                        color = vec3<f32>(0.3, 0.6, 0.2);
+                    } else if (height < 0.3) {
+                        // Hills - brown/green mix
+                        let t = (height - 0.1) / 0.2;
+                        color = mix(vec3<f32>(0.3, 0.6, 0.2), vec3<f32>(0.5, 0.4, 0.3), t);
+                    } else if (height < 0.45) {
+                        // Mountains - brown/gray
+                        let t = (height - 0.3) / 0.15;
+                        color = mix(vec3<f32>(0.5, 0.4, 0.3), vec3<f32>(0.6, 0.6, 0.6), t);
+                    } else {
+                        // Snow
+                        color = vec3<f32>(0.95, 0.95, 1.0);
+                    }
+                    
+                    // Add shading based on height gradient (fake lighting)
+                    let shade = 0.8 + height * 0.4;
+                    
+                    return vec4<f32>(color * shade, 1.0);
+                }
+            `;
+            
+            const shaderModule = device.createShaderModule({ code: shaderCode });
+            
+            const sampler = device.createSampler({
+                magFilter: 'linear',
+                minFilter: 'linear'
+            });
+            
+            const bindGroupLayout = device.createBindGroupLayout({
+                entries: [
+                    { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+                    { binding: 1, visibility: GPUShaderStage.VERTEX, texture: { sampleType: 'float' } },
+                    { binding: 2, visibility: GPUShaderStage.VERTEX, sampler: { type: 'filtering' } }
+                ]
+            });
+            
+            const pipelineLayout = device.createPipelineLayout({
+                bindGroupLayouts: [bindGroupLayout]
+            });
+            
+            const pipeline = device.createRenderPipeline({
+                layout: pipelineLayout,
+                vertex: {
+                    module: shaderModule,
+                    entryPoint: 'vs_main',
+                    buffers: [{
+                        arrayStride: 16,
+                        attributes: [
+                            { shaderLocation: 0, offset: 0, format: 'float32x2' },
+                            { shaderLocation: 1, offset: 8, format: 'float32x2' }
+                        ]
+                    }]
+                },
+                fragment: {
+                    module: shaderModule,
+                    entryPoint: 'fs_main',
+                    targets: [{ format }]
+                },
+                primitive: {
+                    topology: 'triangle-list',
+                    cullMode: 'none'
+                },
+                depthStencil: {
+                    format: 'depth24plus',
+                    depthWriteEnabled: true,
+                    depthCompare: 'less'
+                }
+            });
+            
+            const depthTexture = device.createTexture({
+                size: [canvas.width, canvas.height],
+                format: 'depth24plus',
+                usage: GPUTextureUsage.RENDER_ATTACHMENT
+            });
+            
+            const bindGroup = device.createBindGroup({
+                layout: bindGroupLayout,
+                entries: [
+                    { binding: 0, resource: { buffer: uniformBuffer } },
+                    { binding: 1, resource: terrainTexture.createView() },
+                    { binding: 2, resource: sampler }
+                ]
+            });
+            
+            // Animation
+            let time = 0;
+            let pitch = 45;
+            let bearing = 0;
+            
+            // Mouse controls
+            let isDragging = false;
+            let lastX = 0, lastY = 0;
+            
+            canvas.addEventListener('mousedown', (e) => {
+                isDragging = true;
+                lastX = e.clientX;
+                lastY = e.clientY;
+            });
+            
+            canvas.addEventListener('mousemove', (e) => {
+                if (!isDragging) return;
+                const dx = e.clientX - lastX;
+                const dy = e.clientY - lastY;
+                bearing += dx * 0.5;
+                pitch = Math.max(10, Math.min(80, pitch + dy * 0.5));
+                lastX = e.clientX;
+                lastY = e.clientY;
+            });
+            
+            canvas.addEventListener('mouseup', () => isDragging = false);
+            canvas.addEventListener('mouseleave', () => isDragging = false);
+            
+            function render() {
+                time += 0.016;
+                
+                // Build camera matrix
+                const aspect = canvas.width / canvas.height;
+                const fov = Math.PI / 4;
+                const near = 0.01;
+                const far = 100;
+                
+                // Perspective projection
+                const f = 1 / Math.tan(fov / 2);
+                const proj = new Float32Array([
+                    f / aspect, 0, 0, 0,
+                    0, f, 0, 0,
+                    0, 0, (far + near) / (near - far), -1,
+                    0, 0, (2 * far * near) / (near - far), 0
+                ]);
+                
+                // View matrix - camera looking at terrain
+                const pitchRad = pitch * Math.PI / 180;
+                const bearingRad = bearing * Math.PI / 180;
+                const dist = 2.5;
+                
+                const camX = Math.sin(bearingRad) * Math.cos(pitchRad) * dist;
+                const camY = -Math.cos(bearingRad) * Math.cos(pitchRad) * dist;
+                const camZ = Math.sin(pitchRad) * dist;
+                
+                // Simple lookAt (camera at camX,camY,camZ looking at origin)
+                const view = lookAt(camX, camY, camZ, 0, 0, 0);
+                
+                // Combine proj * view
+                const matrix = multiplyMatrices(proj, view);
+                
+                device.queue.writeBuffer(uniformBuffer, 0, matrix);
+                device.queue.writeBuffer(uniformBuffer, 64, new Float32Array([time]));
+                
+                const commandEncoder = device.createCommandEncoder();
+                const pass = commandEncoder.beginRenderPass({
+                    colorAttachments: [{
+                        view: context.getCurrentTexture().createView(),
+                        clearValue: { r: 0.1, g: 0.1, b: 0.15, a: 1 },
+                        loadOp: 'clear',
+                        storeOp: 'store'
+                    }],
+                    depthStencilAttachment: {
+                        view: depthTexture.createView(),
+                        depthClearValue: 1.0,
+                        depthLoadOp: 'clear',
+                        depthStoreOp: 'store'
+                    }
+                });
+                
+                pass.setPipeline(pipeline);
+                pass.setBindGroup(0, bindGroup);
+                pass.setVertexBuffer(0, vertexBuffer);
+                pass.setIndexBuffer(indexBuffer, 'uint32');
+                pass.drawIndexed(indices.length);
+                pass.end();
+                
+                device.queue.submit([commandEncoder.finish()]);
+                
+                info.textContent = `Pitch: ${pitch.toFixed(0)}° | Bearing: ${bearing.toFixed(0)}° | Drag to rotate`;
+                
+                requestAnimationFrame(render);
+            }
+            
+            render();
+        }
+        
+        // Matrix helpers
+        function lookAt(eyeX, eyeY, eyeZ, targetX, targetY, targetZ) {
+            const zAxis = normalize([eyeX - targetX, eyeY - targetY, eyeZ - targetZ]);
+            const xAxis = normalize(cross([0, 0, 1], zAxis));
+            const yAxis = cross(zAxis, xAxis);
+            
+            return new Float32Array([
+                xAxis[0], yAxis[0], zAxis[0], 0,
+                xAxis[1], yAxis[1], zAxis[1], 0,
+                xAxis[2], yAxis[2], zAxis[2], 0,
+                -dot(xAxis, [eyeX, eyeY, eyeZ]),
+                -dot(yAxis, [eyeX, eyeY, eyeZ]),
+                -dot(zAxis, [eyeX, eyeY, eyeZ]),
+                1
+            ]);
+        }
+        
+        function normalize(v) {
+            const len = Math.sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]);
+            return [v[0]/len, v[1]/len, v[2]/len];
+        }
+        
+        function cross(a, b) {
+            return [
+                a[1]*b[2] - a[2]*b[1],
+                a[2]*b[0] - a[0]*b[2],
+                a[0]*b[1] - a[1]*b[0]
+            ];
+        }
+        
+        function dot(a, b) {
+            return a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
+        }
+        
+        function multiplyMatrices(a, b) {
+            const result = new Float32Array(16);
+            for (let i = 0; i < 4; i++) {
+                for (let j = 0; j < 4; j++) {
+                    result[j * 4 + i] = 
+                        a[i] * b[j * 4] +
+                        a[i + 4] * b[j * 4 + 1] +
+                        a[i + 8] * b[j * 4 + 2] +
+                        a[i + 12] * b[j * 4 + 3];
+                }
+            }
+            return result;
+        }
+        
+        init();
+    </script>
+</body>
+</html>

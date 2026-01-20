@@ -51,17 +51,26 @@ fn vs_main(@location(0) clipPos: vec2<f32>, @location(1) uv: vec2<f32>) -> Verte
     
     // Scale height to clip space and apply exaggeration
     // Height is in meters (0 to ~8848m for Everest)
-    // Use much smaller divisor so terrain is subtle compared to buildings
-    // Buildings use their own Z values, terrain should be very subtle
-    let scaledHeight = (height / 5000000.0) * tileInfo.exaggeration;
+    // Use VERY small divisor - terrain should be subtle relief, not taller than buildings
+    // 50,000,000 makes even 1000m hills barely visible bumps
+    let scaledHeight = (height / 50000000.0) * tileInfo.exaggeration;
     output.height = scaledHeight;
     
     // Calculate normal from neighboring heights (clamp to 0 like main height)
-    let hL = max(decodeHeight(textureLoad(terrainTexture, texCoord + vec2<i32>(-1, 0), 0)), 0.0);
-    let hR = max(decodeHeight(textureLoad(terrainTexture, texCoord + vec2<i32>(1, 0), 0)), 0.0);
-    let hD = max(decodeHeight(textureLoad(terrainTexture, texCoord + vec2<i32>(0, -1), 0)), 0.0);
-    let hU = max(decodeHeight(textureLoad(terrainTexture, texCoord + vec2<i32>(0, 1), 0)), 0.0);
-    output.normal = normalize(vec3<f32>(hL - hR, hD - hU, 2.0));
+    // At tile edges (UV near 0 or 1), use flat normal to avoid seams
+    let edgeMargin = 2.0 / texSize.x; // 2 pixels from edge
+    let isEdge = uv.x < edgeMargin || uv.x > (1.0 - edgeMargin) || 
+                 uv.y < edgeMargin || uv.y > (1.0 - edgeMargin);
+    
+    if (isEdge) {
+        output.normal = vec3<f32>(0.0, 0.0, 1.0); // Flat normal at edges
+    } else {
+        let hL = max(decodeHeight(textureLoad(terrainTexture, texCoord + vec2<i32>(-1, 0), 0)), 0.0);
+        let hR = max(decodeHeight(textureLoad(terrainTexture, texCoord + vec2<i32>(1, 0), 0)), 0.0);
+        let hD = max(decodeHeight(textureLoad(terrainTexture, texCoord + vec2<i32>(0, -1), 0)), 0.0);
+        let hU = max(decodeHeight(textureLoad(terrainTexture, texCoord + vec2<i32>(0, 1), 0)), 0.0);
+        output.normal = normalize(vec3<f32>(hL - hR, hD - hU, 2.0));
+    }
     
     // Create world position WITH height displacement for 3D terrain
     // Use very small negative Z to be behind vector tiles at Z=0

@@ -79,6 +79,8 @@ async function main() {
 
     // ===== Initialize TileManager =====
     const tileManager = new TileManager(device, performanceManager.stats);
+    // Connect terrain layer to tile manager for vertex height projection
+    tileManager.setTerrainLayer(terrainLayer);
     
     // ===== Initialize Marker Resources =====
     const markerResources = initMarkerResources(
@@ -250,23 +252,43 @@ function setupGlobalAPI(device, camera, tileManager, performanceManager, styleMa
     };
     
     // Terrain API
+    // Helper to reload tiles when terrain state changes
+    const reloadTilesForTerrain = async () => {
+        // Clear tile buffers and reload to apply/remove terrain height projection
+        await destroyAllBuffers(device, tileManager.visibleTileBuffers, tileManager.hiddenTileBuffers);
+        tileManager.visibleTileBuffers.clear();
+        tileManager.hiddenTileBuffers.clear();
+        // Trigger tile reload via camera event
+        camera.triggerEvent('zoomend');
+    };
+    
     window.mapTerrain = {
-        enable: () => {
+        enable: async () => {
             terrainLayer.setEnabled(true);
             console.log('🏔️ Terrain enabled (visible at zoom ' + terrainLayer.getMinDisplayZoom() + '+)');
+            console.log('🔄 Reloading tiles with terrain projection...');
+            await reloadTilesForTerrain();
         },
-        disable: () => {
+        disable: async () => {
             terrainLayer.setEnabled(false);
             console.log('🏔️ Terrain disabled');
+            console.log('🔄 Reloading tiles without terrain projection...');
+            await reloadTilesForTerrain();
         },
-        toggle: () => {
+        toggle: async () => {
             terrainLayer.setEnabled(!terrainLayer.enabled);
             console.log(`🏔️ Terrain ${terrainLayer.enabled ? 'enabled' : 'disabled'}`);
+            console.log('🔄 Reloading tiles...');
+            await reloadTilesForTerrain();
         },
         isEnabled: () => terrainLayer.enabled,
-        setExaggeration: (factor) => {
+        setExaggeration: async (factor) => {
             terrainLayer.setExaggeration(factor);
             console.log(`🏔️ Terrain exaggeration set to ${factor}`);
+            if (terrainLayer.enabled) {
+                console.log('🔄 Reloading tiles with new exaggeration...');
+                await reloadTilesForTerrain();
+            }
         },
         setMinZoom: (zoom) => {
             terrainLayer.setMinDisplayZoom(zoom);
