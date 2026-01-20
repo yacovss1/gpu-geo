@@ -23,6 +23,7 @@ import { GPUTextRenderer } from './src/text/gpuTextRenderer.js';
 import { PerformanceManager } from './src/core/performance.js';
 import { StyleManager } from './src/core/styleManager.js';
 import { LabelManager } from './src/rendering/labelManager.js';
+import { TerrainLayer } from './src/rendering/terrainLayer.js';
 import { 
     renderMap, 
     createComputeMarkerEncoder, 
@@ -70,6 +71,12 @@ async function main() {
     await textRenderer.initialize('Arial', 48);
     await renderer.createResources(canvas, camera);
 
+    // ===== Initialize Terrain Layer =====
+    const terrainLayer = new TerrainLayer(device);
+    await terrainLayer.initialize(format);
+    terrainLayer.setCameraBuffer(renderer.buffers.uniform);
+    // Terrain disabled by default - enable with window.mapTerrain.enable()
+
     // ===== Initialize TileManager =====
     const tileManager = new TileManager(device, performanceManager.stats);
     
@@ -88,7 +95,7 @@ async function main() {
     setupGlobalAPI(
         device, camera, tileManager, 
         performanceManager, styleManager,
-        renderer
+        renderer, terrainLayer
     );
 
     // ===== Load Initial Style =====
@@ -137,7 +144,8 @@ async function main() {
             tileManager.visibleTileBuffers, 
             tileManager.hiddenTileBuffers, 
             textureView, camera,
-            (layerId, zoom) => styleManager.shouldRenderLayer(layerId, zoom)
+            (layerId, zoom) => styleManager.shouldRenderLayer(layerId, zoom),
+            terrainLayer // Pass terrain layer for rendering
         );
         device.queue.submit([mapEncoder.finish()]);
         
@@ -224,7 +232,7 @@ async function main() {
 /**
  * Setup global API for console access
  */
-function setupGlobalAPI(device, camera, tileManager, performanceManager, styleManager, renderer) {
+function setupGlobalAPI(device, camera, tileManager, performanceManager, styleManager, renderer, terrainLayer) {
     // Expose core objects
     window.device = device;
     window.camera = camera;
@@ -239,6 +247,38 @@ function setupGlobalAPI(device, camera, tileManager, performanceManager, styleMa
         logStats: () => performanceManager.logStats(),
         enableLiveMonitoring: (interval) => performanceManager.enableLiveMonitoring(interval),
         disableLiveMonitoring: () => performanceManager.disableLiveMonitoring()
+    };
+    
+    // Terrain API
+    window.mapTerrain = {
+        enable: () => {
+            terrainLayer.setEnabled(true);
+            console.log('🏔️ Terrain enabled (visible at zoom ' + terrainLayer.getMinDisplayZoom() + '+)');
+        },
+        disable: () => {
+            terrainLayer.setEnabled(false);
+            console.log('🏔️ Terrain disabled');
+        },
+        toggle: () => {
+            terrainLayer.setEnabled(!terrainLayer.enabled);
+            console.log(`🏔️ Terrain ${terrainLayer.enabled ? 'enabled' : 'disabled'}`);
+        },
+        isEnabled: () => terrainLayer.enabled,
+        setExaggeration: (factor) => {
+            terrainLayer.setExaggeration(factor);
+            console.log(`🏔️ Terrain exaggeration set to ${factor}`);
+        },
+        setMinZoom: (zoom) => {
+            terrainLayer.setMinDisplayZoom(zoom);
+            console.log(`🏔️ Terrain now visible at zoom ${zoom}+`);
+        },
+        setSource: (source) => {
+            terrainLayer.setSource(source);
+            console.log(`🏔️ Terrain source set to ${source}`);
+        },
+        getSources: () => ['aws', 'mapbox'],
+        getExaggeration: () => terrainLayer.exaggeration,
+        getMinZoom: () => terrainLayer.getMinDisplayZoom()
     };
     
     // Style API

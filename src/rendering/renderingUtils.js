@@ -17,8 +17,16 @@ const MARKER_BUFFER_SIZE = MAX_FEATURES * 40;
 
 /**
  * Render the map with hidden texture and edge detection
+ * @param {GPUDevice} device 
+ * @param {MapRenderer} renderer 
+ * @param {Map} tileBuffers 
+ * @param {Map} hiddenTileBuffers 
+ * @param {GPUTextureView} textureView 
+ * @param {Camera} camera 
+ * @param {Function} shouldRenderLayer 
+ * @param {TerrainLayer} terrainLayer - Optional terrain layer to render first
  */
-export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, textureView, camera, shouldRenderLayer) {
+export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, textureView, camera, shouldRenderLayer, terrainLayer = null) {
     const mapCommandEncoder = device.createCommandEncoder();
     
     // Get style once for all render passes
@@ -119,6 +127,11 @@ export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, text
             depthStoreOp: 'store',
         }
     });
+    
+    // ===== RENDER TERRAIN FIRST (underneath vector data) =====
+    if (terrainLayer && terrainLayer.enabled) {
+        terrainLayer.render(colorPass, camera.getMatrix(), camera, renderZoom);
+    }
     
     // fillsWithExtrusions already computed above for hidden pass
     
