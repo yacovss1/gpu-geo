@@ -51,6 +51,7 @@ export class TerrainLayer {
         this.cameraBuffer = null; // Set from main renderer
         this.initialized = false;
         this.projectionTileKey = null; // Key of tile currently used for GPU projection (don't prune)
+        this.atlasTileKeys = new Set(); // All tiles used in current atlas (don't prune any)
         
         // Terrain atlas for GPU projection
         this.atlasTexture = null;
@@ -446,6 +447,7 @@ export class TerrainLayer {
         await this.device.queue.onSubmittedWorkDone();
         
         this.projectionTileKey = null; // Clear projection reference first
+        this.atlasTileKeys.clear(); // Clear atlas tile tracking
         
         for (const [key, tile] of this.terrainTiles) {
             if (tile.texture) tile.texture.destroy();
@@ -470,6 +472,9 @@ export class TerrainLayer {
         for (const [key, tile] of this.terrainTiles) {
             // Don't prune the tile currently used for GPU projection
             if (key === this.projectionTileKey) continue;
+            
+            // Don't prune any tiles used in the current atlas
+            if (this.atlasTileKeys.has(key)) continue;
             
             if (!visibleKeys.has(key)) {
                 keysToRemove.push(key);
@@ -586,12 +591,17 @@ export class TerrainLayer {
      * Returns { texture, bounds } or null if no tiles available
      */
     buildTerrainAtlas(visibleTiles) {
+        // Clear previous atlas tile tracking
+        this.atlasTileKeys.clear();
+        
         // Get all loaded terrain tiles
         const loadedTiles = [];
         for (const tile of visibleTiles) {
             const key = `${tile.z}/${tile.x}/${tile.y}`;
             const tileData = this.terrainTiles.get(key);
             if (tileData && tileData.texture) {
+                // Track this tile as being used in the atlas
+                this.atlasTileKeys.add(key);
                 loadedTiles.push({
                     ...tileData,
                     bounds: this.getTileBounds(tile.z, tile.x, tile.y)

@@ -104,7 +104,35 @@
 
 ---
 
-## PRIORITY 4: Code Cleanup (Future)
+## ✅ PRIORITY 4: GPU Terrain Projection (COMPLETED)
+**Problem:** Flat map rendering - no elevation-based terrain
+
+**Status:** COMPLETED - January 2026
+
+**Solution Implemented:**
+- AWS Terrain Tiles (Terrarium PNG encoding) loaded via terrainLayer.js
+- Terrain atlas combines all visible tiles into single GPU texture
+- All shaders sample terrain height in vertex shader for 3D projection
+- Effect shaders (water, grass, glass) updated with terrain bindings
+- Hillshade overlay renders AFTER vectors with transparency
+
+**Architecture:**
+- Bind Group 0: Camera uniform buffer
+- Bind Group 1: Terrain (texture + sampler + bounds/exaggeration)
+- Height encoding: Terrarium format `(R*256 + G + B/256) - 32768` meters
+- Height scale: `height / 50000000.0 * exaggeration` for subtle relief
+
+**Results:**
+- ✅ Terrain texture atlas for full viewport coverage
+- ✅ All layer types (fills, lines, buildings) project onto terrain
+- ✅ Water/grass/glass effects include terrain sampling
+- ✅ Hillshade overlay provides visual depth cues
+- ✅ UV clamping (0.001-0.999) prevents edge artifacts
+- ✅ Height clamping (0-9000m) prevents extreme spikes
+
+---
+
+## PRIORITY 5: Code Cleanup (Future)
 - Add unit tests for coordinate transforms
 - Simplify TileManager if needed
 

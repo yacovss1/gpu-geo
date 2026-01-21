@@ -4,7 +4,7 @@ import earcut from 'earcut';
 import { getColorOfCountries } from '../core/utils.js';
 import { TileCache } from './tileCache.js';
 import { parseVectorTile as parseVectorTileDirect } from './vectorTileParser.js';
-import { tessellateLine, screenWidthToWorld } from './line-tessellation-simple.js';
+import { tessellateLine, screenWidthToWorld, subdivideLine } from './line-tessellation-simple.js';
 import { 
     getStyle, 
     getFeatureId as getStyleFeatureId, 
@@ -608,7 +608,9 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
             }
             
             // Coordinates are already transformed - use directly
-            const transformedLineCoords = feature.geometry.coordinates;
+            // Subdivide long segments for proper terrain height sampling
+            const subdividedCoords = subdivideLine(feature.geometry.coordinates, 0.02);
+            const transformedLineCoords = subdividedCoords;
             
             // Check if this is a line-extrusion layer (needs 3D tube geometry)
             const isLineExtrusion = style && sourceId && getLayersBySource(sourceId).some(l =>
@@ -937,7 +939,8 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
             
             feature.geometry.coordinates.forEach(line => {
                 // Coordinates are already transformed
-                const transformedLine = line;
+                // Subdivide long segments for proper terrain height sampling
+                const transformedLine = subdivideLine(line, 0.02);
                 
                 // Tessellate each line
                 const lineTessellated = tessellateLine(transformedLine, multiWorldWidth, multiLineCap, multiLineJoin, multiMiterLimit);

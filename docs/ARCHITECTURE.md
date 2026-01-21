@@ -1,6 +1,6 @@
 # Architecture
 
-WebGPU-based vector map renderer with true 3D perspective projection.
+WebGPU-based vector map renderer with true 3D perspective projection and GPU terrain projection.
 
 ## File Structure
 
@@ -15,7 +15,7 @@ src/
 │   ├── bufferUtils.js     # GPU buffer creation helpers
 │   ├── utils.js           # General utilities
 │   ├── performance.js     # Timing & profiling
-│   └── shaderEffectManager.js  # Shader effect pipeline
+│   └── shaderEffectManager.js  # Shader effect pipeline (water, glass, grass)
 │
 ├── tiles/
 │   ├── TileManager.js     # Tile loading, caching, lifecycle
@@ -29,23 +29,25 @@ src/
 ├── rendering/
 │   ├── renderer.js        # Main render loop, pass orchestration
 │   ├── renderingUtils.js  # Draw call helpers
+│   ├── terrainLayer.js    # Terrain tile loading, atlas, hillshade
 │   ├── labelManager.js    # Text label placement
 │   ├── markerPipeline.js  # Point marker rendering
 │   ├── markerCompute.js   # Marker position compute shader
-│   └── tubePipeline.js    # 3D tube rendering (unused?)
+│   └── tubePipeline.js    # 3D tube rendering
 │
 ├── text/
 │   ├── gpuTextRenderer.js # GPU text atlas & rendering
 │   └── labelCollisionDetector.js  # Label overlap prevention
 │
 └── shaders/
-    ├── shaders.js         # Main geometry shaders
+    ├── shaders.js         # Main geometry shaders (with terrain sampling)
+    ├── terrainShaders.js  # Terrain mesh & hillshade shaders
     ├── textShaders.js     # Text rendering shaders
     ├── markerShader.js    # Point marker shaders
     ├── tubeShaders.js     # Tube shaders
     ├── computeShaders.js  # Compute shaders
     ├── effectShaders.js   # Post-processing effects
-    └── effects/           # Water, glass, grass effects
+    └── effects/           # Water, glass, grass effects (with terrain)
 ```
 
 ## Data Flow
@@ -183,3 +185,62 @@ Supports Mapbox Style Spec v8:
 2. **No layer ID encoding**: Blue channel reserved but unused
 3. **Water picking**: All water highlights together (shared class)
 4. **Style expressions**: Not all Mapbox expressions implemented
+
+## Terrain System
+
+GPU-based terrain projection using AWS Terrain Tiles (Terrarium encoding).
+
+### Architecture
+
+```
+Terrain Tiles (.png, Terrarium encoded)
+    ↓
+terrainLayer.js → Loads terrain tiles, builds texture atlas
+    ↓
+Terrain Atlas Texture (combined visible tiles)
+    ↓
+Bind Group 1 (shared by all shaders):
+├── @binding(0) terrainTexture
+├── @binding(1) terrainSampler  
+└── @binding(2) terrainBounds (minX, minY, maxX, maxY, exaggeration, enabled)
+    ↓
+Vertex Shaders → Sample terrain height at each vertex position
+    ↓
+Position.z += terrainHeight → 3D terrain projection
+```
+
+### Terrain Atlas
+
+Multiple terrain tiles are combined into a single atlas texture:
+
+1. **`buildTerrainAtlas()`** - Combines visible tiles via `copyTextureToTexture`
+2. **Combined bounds** - Atlas covers full viewport (minX/minY/maxX/maxY)
+3. **Single sample** - Vectors sample once from atlas, not per-tile
+
+### Height Encoding (Terrarium)
+
+```javascript
+height = (R * 256 + G + B / 256) - 32768  // meters
+```
+
+### Shader Integration
+
+All layer types sample terrain in vertex shader:
+
+```wgsl
+fn sampleTerrainHeight(clipX: f32, clipY: f32) -> f32 {
+    let u = (clipX - bounds.minX) / (bounds.maxX - bounds.minX);
+    let v = 1.0 - (clipY - bounds.minY) / (bounds.maxY - bounds.minY);
+    let pixel = textureSampleLevel(terrainTexture, terrainSampler, uv, 0.0);
+    let height = decodeTerrarium(pixel);
+    return (height / 50000000.0) * exaggeration;
+}
+```
+
+### Hillshade Overlay
+
+Terrain mesh renders AFTER vectors with transparent hillshade:
+- Dark shadows on slopes facing away from light
+- Light highlights on slopes facing toward light
+- Neutral areas fully transparent (discard)
+- `depthCompare: 'always'` - renders on top as overlay

@@ -2,6 +2,46 @@
  * Line tessellation with proper miter/bevel joins matching MapLibre approach
  */
 
+/**
+ * Subdivide line segments to ensure terrain height sampling at regular intervals
+ * This prevents roads from "tunneling" through terrain when segments are long
+ * @param {Array} coordinates - Array of [x, y] coordinate pairs
+ * @param {number} maxSegmentLength - Maximum length before subdivision (in clip space units)
+ * @returns {Array} - Subdivided coordinate array
+ */
+export function subdivideLine(coordinates, maxSegmentLength = 0.02) {
+    if (!coordinates || coordinates.length < 2) {
+        return coordinates;
+    }
+    
+    const result = [coordinates[0]];
+    
+    for (let i = 1; i < coordinates.length; i++) {
+        const prev = coordinates[i - 1];
+        const curr = coordinates[i];
+        
+        const dx = curr[0] - prev[0];
+        const dy = curr[1] - prev[1];
+        const segmentLength = Math.sqrt(dx * dx + dy * dy);
+        
+        if (segmentLength > maxSegmentLength) {
+            // Subdivide this segment
+            const numDivisions = Math.ceil(segmentLength / maxSegmentLength);
+            for (let j = 1; j < numDivisions; j++) {
+                const t = j / numDivisions;
+                result.push([
+                    prev[0] + dx * t,
+                    prev[1] + dy * t
+                ]);
+            }
+        }
+        
+        result.push(curr);
+    }
+    
+    return result;
+}
+
 export function tessellateLine(coordinates, width, cap = 'butt', join = 'bevel', miterLimit = 2) {
     if (!coordinates || coordinates.length < 2) {
         return { vertices: new Float32Array(0), indices: new Uint32Array(0) };
