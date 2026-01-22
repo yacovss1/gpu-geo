@@ -23,7 +23,7 @@ export class TileCoordinator {
         
         // Configuration
         this.terrainSource = 'aws';
-        this.exaggeration = 1.5;
+        this.exaggeration = 15;  // Match terrainLayer default
         this.terrainEnabled = true;
         
         // Pending requests waiting for terrain

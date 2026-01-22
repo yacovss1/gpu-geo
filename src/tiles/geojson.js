@@ -124,7 +124,7 @@ function sampleTerrainHeight(x, y, terrainData) {
     if (!terrainData || !terrainData.heights) return 0;
     
     const { heights, width, height, bounds } = terrainData;
-    const exaggeration = terrainData.exaggeration || 1.5;
+    const exaggeration = terrainData.exaggeration || 30;  // Match terrainLayer default
     
     // Check bounds with small margin (matches GPU shader)
     const margin = 0.001;
@@ -318,10 +318,25 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
     // Deduplicate by coordinates+layer (not by tileset ID which may span tiles)
     // Note: processedFeatures is local per parseGeoJSONFeature call, so no global dedup
     
+    // Helper to calculate terrain height at building centroid
+    // Returns 0 if no terrain data available
+    const getBuildingTerrainZ = (outerRing) => {
+        if (!terrainData || outerRing.length < 2) return 0;
+        let centroidX = 0, centroidY = 0;
+        const count = outerRing.length - 1; // Exclude closing point
+        for (let i = 0; i < count; i++) {
+            centroidX += outerRing[i][0];
+            centroidY += outerRing[i][1];
+        }
+        centroidX /= count;
+        centroidY /= count;
+        return sampleTerrainHeight(centroidX, centroidY, terrainData);
+    };
+    
     // Helper to generate extruded building geometry (walls + roof)
     // Vertex format: position(3) + normal(3) + color(4) = 10 floats = 40 bytes
-    // If terrainData is provided, buildings rise from terrain surface
-    const generateExtrusion = (allCoords, outerRing, height, base, fillColor, targetVertices, targetIndices, targetOutlineIndices) => {
+    // buildingTerrainZ: pre-computed terrain height at building centroid
+    const generateExtrusion = (allCoords, outerRing, height, base, fillColor, targetVertices, targetIndices, targetOutlineIndices, buildingTerrainZ = 0) => {
         const startIndex = targetVertices.length / VERTEX_STRIDE;
         
         // Use zoom-dependent scaling passed from parent scope
@@ -342,9 +357,8 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                 continue;
             }
             
-            // Sample terrain height at each corner (buildings follow terrain)
-            const terrainZ1 = terrainData ? sampleTerrainHeight(x1, y1, terrainData) : 0;
-            const terrainZ2 = terrainData ? sampleTerrainHeight(x2, y2, terrainData) : 0;
+            // Use building centroid terrain height for ALL vertices
+            // This keeps walls vertical instead of stretching on slopes
             
             // Calculate wall normal (perpendicular to wall, pointing outward)
             const dx = x2 - x1;
@@ -357,12 +371,12 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
             const vertexOffset = (targetVertices.length / VERTEX_STRIDE);
             
             // Bottom-left, bottom-right, top-right, top-left
-            // Add terrain height to base and roof heights
+            // All vertices use the SAME terrain height (from centroid)
             // All 4 vertices share the same wall normal
-            targetVertices.push(x1, y1, baseZ + terrainZ1, ...wallNormal, ...fillColor);
-            targetVertices.push(x2, y2, baseZ + terrainZ2, ...wallNormal, ...fillColor);
-            targetVertices.push(x2, y2, heightZ + terrainZ2, ...wallNormal, ...fillColor);
-            targetVertices.push(x1, y1, heightZ + terrainZ1, ...wallNormal, ...fillColor);
+            targetVertices.push(x1, y1, baseZ + buildingTerrainZ, ...wallNormal, ...fillColor);
+            targetVertices.push(x2, y2, baseZ + buildingTerrainZ, ...wallNormal, ...fillColor);
+            targetVertices.push(x2, y2, heightZ + buildingTerrainZ, ...wallNormal, ...fillColor);
+            targetVertices.push(x1, y1, heightZ + buildingTerrainZ, ...wallNormal, ...fillColor);
             
             // Two triangles for the wall quad
             targetIndices.push(
@@ -382,11 +396,10 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                 return;
             }
             
-            // Sample terrain height for roof (building sits on terrain)
-            const terrainZ = terrainData ? sampleTerrainHeight(x, y, terrainData) : 0;
+            // Use building centroid terrain height for roof (consistent with walls)
             
             // Roof: position(3) + normal(3) + color(4) - normal points up
-            targetVertices.push(x, y, heightZ + terrainZ, ...UP_NORMAL, ...fillColor);
+            targetVertices.push(x, y, heightZ + buildingTerrainZ, ...UP_NORMAL, ...fillColor);
         });
         
         return roofStartIndex;
@@ -414,8 +427,9 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
     // NOTE: Coordinates are PRE-TRANSFORMED - use directly!
     // Encode feature ID and layer ID into RGBA channels for hidden buffer
     // If terrainData is provided, bake terrain height into Z coordinate
+    // If baseTerrainZ is provided (for buildings), use that instead of per-vertex sampling
     // Vertex format: position(3) + normal(3) + color(4) = 10 floats
-    const coordsToIdVertices = (coords, featureId, targetArray, zHeight = 0.0, layerName = 'unknown') => {
+    const coordsToIdVertices = (coords, featureId, targetArray, zHeight = 0.0, layerName = 'unknown', baseTerrainZ = null) => {
         const vertexStartIndex = targetArray.length / VERTEX_STRIDE;
         
         // Encode feature ID as 16-bit across red and green channels
@@ -434,12 +448,16 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
         
         coords.forEach(coord => {
             const [x, y] = coord; // Coordinates already in Mercator clip space!
-            // For non-extruded features (zHeight=0), sample terrain if available
-            // For extruded features (buildings), add terrain base to extrusion height
+            // For buildings with pre-computed centroid terrain height, use that
+            // Otherwise sample terrain per-vertex (for non-building features)
             let z = zHeight;
-            if (terrainData) {
+            if (baseTerrainZ !== null) {
+                // Building: use pre-computed centroid terrain height
+                z = zHeight + baseTerrainZ;
+            } else if (terrainData) {
+                // Non-building: sample terrain at each vertex
                 const terrainZ = sampleTerrainHeight(x, y, terrainData);
-                z = zHeight + terrainZ; // Buildings rise from terrain surface
+                z = zHeight + terrainZ;
             }
             targetArray.push(
                 x, y, z,       // Position with terrain + extrusion height
@@ -515,6 +533,9 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                     return null;
                 }
                 
+                // Calculate terrain height at building centroid ONCE for both visible and hidden geometry
+                const buildingTerrainZ = getBuildingTerrainZ(outerRing);
+                
                 // Generate 3D building geometry (walls + roof)
                 const roofStartIndex = generateExtrusion(
                     allCoords,
@@ -524,7 +545,8 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                     _fillColor, 
                     fillVertices, 
                     fillIndices,
-                    [] // Don't generate outline indices for buildings
+                    [], // Don't generate outline indices for buildings
+                    buildingTerrainZ
                 );
                 
                 // Triangulate the roof
@@ -534,12 +556,14 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                 
                 // For hidden buffer: Use actual roof triangulation (includes holes/courtyards)
                 // Use same triangulated coordinates but elevated to roof height
+                // Pass buildingTerrainZ to ensure hidden geometry matches visible geometry
                 const hiddenStartIndex = coordsToIdVertices(
                     allCoords,
                     clampedFeatureId,
                     hiddenVertices,
                     extrusionHeight * zoomExtrusion,  // Z coordinate = roof height
-                    layerId
+                    layerId,
+                    buildingTerrainZ  // Use same terrain height as visible geometry
                 );
                 
                 // Add hidden triangle indices - same triangulation as visible roof
@@ -623,6 +647,9 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                 if (isExtruded && extrusionHeight > 0) {
                    // console.log(`🏢 MultiPolygon EXTRUSION: ${extrusionHeight}m for polygon ${polygonIndex}`);
                     
+                    // Calculate terrain height at building centroid ONCE for both visible and hidden geometry
+                    const buildingTerrainZ = getBuildingTerrainZ(outerRing);
+                    
                     // Generate 3D building geometry (walls + roof)
                     const roofStartIndex = generateExtrusion(
                         allCoords,
@@ -632,7 +659,8 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                         _fillColor, 
                         fillVertices, 
                         fillIndices,
-                        [] // Don't generate outline indices
+                        [], // Don't generate outline indices
+                        buildingTerrainZ
                     );
                     
                     // Triangulate the roof
@@ -641,12 +669,14 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                     });
                     
                     // For hidden buffer: base polygon at roof height
+                    // Use same terrain height as visible geometry
                     const hiddenStartIndex = coordsToIdVertices(
                         allCoords,
                         polygonPickingId,  // Use per-polygon ID, not shared feature ID
                         hiddenVertices,
                         extrusionHeight * zoomExtrusion,  // Z coordinate = roof height
-                        layerId
+                        layerId,
+                        buildingTerrainZ  // Use same terrain height as visible geometry
                     );
                     
                     // Add hidden triangle indices for flat base

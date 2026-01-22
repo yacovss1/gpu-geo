@@ -473,7 +473,7 @@ export class MapRenderer {
         this.device.queue.writeBuffer(this.buffers.terrainBounds, 0, new Float32Array([
             // Terrain bounds (8 floats)
             -1, -1, 1, 1,  // minX, minY, maxX, maxY
-            1.5,           // exaggeration
+            30,            // exaggeration - match terrainLayer default
             0,             // enabled (0 = disabled)
             0, 0,          // padding
             // Lighting data (8 floats)
@@ -560,7 +560,7 @@ export class MapRenderer {
             // Disable terrain in shader
             this.device.queue.writeBuffer(this.buffers.terrainBounds, 0, new Float32Array([
                 -1, -1, 1, 1,
-                1.5, 0, 0, 0  // enabled = 0
+                this.terrainLayer?.exaggeration || 30, 0, 0, 0  // enabled = 0, use terrain exaggeration
             ]));
             return;
         }
