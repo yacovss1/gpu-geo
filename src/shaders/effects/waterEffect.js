@@ -66,16 +66,20 @@ fn main(@location(0) inPosition: vec3<f32>, @location(1) inColor: vec4<f32>) -> 
     // Store world position for fragment shader
     output.worldPos = inPosition.xy;
     
-    // Sample terrain height to stay aligned with other features
-    let terrainHeight = sampleTerrainHeight(inPosition.x, inPosition.y);
+    // Only sample terrain if Z is not already baked in (Z == 0)
+    // This matches the logic in main shaders to avoid double-sampling
+    var finalZ = inPosition.z;
+    if (abs(inPosition.z) < 0.0000001) {
+        finalZ = sampleTerrainHeight(inPosition.x, inPosition.y);
+    }
     
     // Apply camera transform with terrain projection
-    let pos = vec4<f32>(inPosition.x, inPosition.y, inPosition.z + terrainHeight, 1.0);
+    let pos = vec4<f32>(inPosition.x, inPosition.y, finalZ, 1.0);
     output.position = uniforms * pos;
     
     output.fragCoord = output.position.xy;
     output.color = inColor;
-    output.worldZ = inPosition.z + terrainHeight;
+    output.worldZ = finalZ;
     
     return output;
 }

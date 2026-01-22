@@ -140,7 +140,7 @@ export class ShaderEffectManager {
             depthStencil: {
                 format: 'depth24plus',
                 depthWriteEnabled: false,  // Water doesn't write depth - rendered via painter's algorithm
-                depthCompare: 'less-equal',
+                depthCompare: 'always',    // Painter's algorithm - layer order determines visibility, not depth
             },
             multisample: { count: 4 }
         });
@@ -304,8 +304,8 @@ export class ShaderEffectManager {
             },
             depthStencil: {
                 format: 'depth24plus',
-                depthWriteEnabled: true,
-                depthCompare: 'less-equal',
+                depthWriteEnabled: false,  // Grass doesn't write depth - rendered via painter's algorithm
+                depthCompare: 'always',    // Painter's algorithm - layer order determines visibility
             },
             multisample: { count: 4 }
         });

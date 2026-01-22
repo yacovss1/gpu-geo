@@ -44,11 +44,12 @@ export function subdivideLine(coordinates, maxSegmentLength = 0.02) {
 
 export function tessellateLine(coordinates, width, cap = 'butt', join = 'bevel', miterLimit = 2) {
     if (!coordinates || coordinates.length < 2) {
-        return { vertices: new Float32Array(0), indices: new Uint32Array(0) };
+        return { vertices: new Float32Array(0), indices: new Uint32Array(0), centerlines: new Float32Array(0) };
     }
 
     const halfWidth = width / 2;
     const vertices = [];
+    const centerlines = []; // Centerline coordinates for each vertex (for terrain sampling)
     const indices = [];
     
     let e1 = -1; // Last left vertex index
@@ -148,11 +149,14 @@ export function tessellateLine(coordinates, width, cap = 'butt', join = 'bevel',
             }
         }
 
-        // Add vertices
+        // Add vertices - both left and right edges share the same centerline for terrain sampling
         const leftIdx = vertices.length / 2;
         vertices.push(leftX, leftY);
+        centerlines.push(curr[0], curr[1]); // Centerline for left vertex
+        
         const rightIdx = vertices.length / 2;
         vertices.push(rightX, rightY);
+        centerlines.push(curr[0], curr[1]); // Same centerline for right vertex
 
         // Create triangles
         if (e1 >= 0 && e2 >= 0) {
@@ -168,7 +172,8 @@ export function tessellateLine(coordinates, width, cap = 'butt', join = 'bevel',
 
     return {
         vertices: new Float32Array(vertices),
-        indices: new Uint32Array(indices)
+        indices: new Uint32Array(indices),
+        centerlines: new Float32Array(centerlines)
     };
 }
 

@@ -71,14 +71,18 @@ fn main(@location(0) inPosition: vec3<f32>, @location(1) inColor: vec4<f32>) -> 
     let windX = sin(inPosition.x * windFrequency + time * windSpeed) * windStrength;
     let windY = cos(inPosition.x * windFrequency * 0.5 + time * windSpeed * 0.8) * windStrength * 0.3;
     
-    // Sample terrain height
-    let terrainHeight = sampleTerrainHeight(inPosition.x, inPosition.y);
+    // Only sample terrain if Z is not already baked in (Z == 0)
+    // This matches the logic in main shaders to avoid double-sampling
+    var finalZ = inPosition.z;
+    if (abs(inPosition.z) < 0.0000001) {
+        finalZ = sampleTerrainHeight(inPosition.x, inPosition.y);
+    }
     
     // Apply wind displacement and terrain projection
     let pos = vec4<f32>(
         inPosition.x + windX, 
         inPosition.y + windY, 
-        inPosition.z + terrainHeight, 
+        finalZ, 
         1.0
     );
     
@@ -87,7 +91,7 @@ fn main(@location(0) inPosition: vec3<f32>, @location(1) inColor: vec4<f32>) -> 
     
     output.fragCoord = output.position.xy;
     output.color = inColor;
-    output.worldZ = inPosition.z + terrainHeight;
+    output.worldZ = finalZ;
     
     return output;
 }

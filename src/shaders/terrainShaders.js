@@ -98,23 +98,21 @@ fn fs_main(
     // Calculate how much this surface faces the light
     let ndotl = dot(normal, lightDir);
     
-    // Shadows: slopes facing away from light get dark overlay
-    // Highlights: slopes facing toward light stay transparent
-    if (ndotl < 0.3) {
-        // Shadow - dark gray overlay with opacity based on how shadowed
-        let shadowStrength = (0.3 - ndotl) / 0.6; // 0 to ~0.5
-        let opacity = shadowStrength * 0.4; // Max 20% opacity for shadows
+    // For alpha blend overlay mode:
+    // Output semi-transparent black for shadows, transparent for lit areas
+    // This darkens slopes facing away from light
+    
+    // Shadows: ndotl < 0.5 gets dark overlay
+    // Lit areas: ndotl >= 0.5 stays transparent
+    if (ndotl < 0.5) {
+        // Shadow strength: 0 at ndotl=0.5, max at ndotl=-1
+        let shadowStrength = (0.5 - ndotl) / 1.5; // Range 0 to 1
+        let opacity = shadowStrength * 0.35; // Max 35% opacity for deep shadows
         return vec4<f32>(0.0, 0.0, 0.0, opacity);
-    } else if (ndotl > 0.7) {
-        // Highlight - subtle white overlay for very lit slopes
-        let highlightStrength = (ndotl - 0.7) / 0.3;
-        let opacity = highlightStrength * 0.15; // Max 15% opacity for highlights
-        return vec4<f32>(1.0, 1.0, 1.0, opacity);
     }
     
-    // Neutral lighting - fully transparent (discard for performance)
-    discard;
-    return vec4<f32>(0.0, 0.0, 0.0, 0.0); // Required by WGSL even after discard
+    // Lit areas - fully transparent (no overlay)
+    return vec4<f32>(0.0, 0.0, 0.0, 0.0);
 }
 `;
 

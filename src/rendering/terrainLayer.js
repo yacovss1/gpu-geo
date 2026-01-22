@@ -40,11 +40,12 @@ export class TerrainLayer {
         this.loadingTiles = new Set(); // Track tiles currently loading
         this.failedTiles = new Set();  // Track tiles that failed to load (404s)
         this.pipeline = null;
+        this.overlayPipeline = null;  // Multiply blend for hillshade overlay on top of vectors
         this.bindGroupLayout = null;
         this.sampler = null;
         this.gridIndices = null; // Shared index buffer (same for all tiles)
         this.gridSize = 64; // Vertices per tile edge
-        this.enabled = false;  // Disabled by default until properly fixed
+        this.enabled = true;  // Re-enabled after centerline fix for Z-fighting
         this.source = 'aws';
         this.exaggeration = 1.5; // Height exaggeration factor (1.0 = realistic, higher = more dramatic)
         this.minDisplayZoom = 8; // Only show terrain at this zoom level or higher
@@ -118,6 +119,46 @@ export class TerrainLayer {
                 targets: [{
                     format: format,
                     blend: {
+                        color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+                        alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' }
+                    }
+                }]
+            },
+            primitive: {
+                topology: 'triangle-list',
+                cullMode: 'none'
+            },
+            depthStencil: {
+                format: 'depth24plus',
+                depthWriteEnabled: false,  // Don't write depth - overlay only
+                depthCompare: 'always'     // Always render on top as overlay
+            },
+            multisample: { count: 4 } // Match main renderer MSAA
+        });
+        
+        // Create overlay pipeline with MULTIPLY blend for hillshade on top of vectors
+        // This darkens slopes and preserves colors on flat/lit areas
+        this.overlayPipeline = this.device.createRenderPipeline({
+            layout: pipelineLayout,
+            vertex: {
+                module: shaderModule,
+                entryPoint: 'vs_main',
+                buffers: [{
+                    arrayStride: 16, // x, y, u, v
+                    attributes: [
+                        { shaderLocation: 0, offset: 0, format: 'float32x2' },
+                        { shaderLocation: 1, offset: 8, format: 'float32x2' }
+                    ]
+                }]
+            },
+            fragment: {
+                module: shaderModule,
+                entryPoint: 'fs_main',
+                targets: [{
+                    format: format,
+                    blend: {
+                        // Soft overlay blend: src-alpha blends the grayscale shading onto vectors
+                        // Shader outputs grayscale (white=no change, gray=darken)
                         color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
                         alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' }
                     }
@@ -422,6 +463,50 @@ export class TerrainLayer {
         if (!this._loggedDrawCalls && renderedCount > 0) {
             console.log(`🏔️ Drew ${renderedCount} terrain tiles with ${this.gridIndices.count} indices each`);
             this._loggedDrawCalls = true;
+        }
+    }
+
+    /**
+     * Render terrain as a multiply overlay on top of vector layers
+     * Uses multiply blend to apply hillshade (darken slopes, preserve lit areas)
+     */
+    renderOverlay(pass, cameraMatrix, camera, zoom) {
+        // Multiple safety checks
+        if (!this.enabled) return;
+        if (!this.initialized) return;
+        if (!this.overlayPipeline) return;
+        if (!this.cameraBuffer) return;
+        if (!this.gridIndices || !this.gridIndices.buffer) return;
+        
+        const visibleTiles = this.getVisibleTerrainTiles(camera, zoom);
+        if (visibleTiles.length === 0) return;
+        
+        pass.setPipeline(this.overlayPipeline);
+        pass.setIndexBuffer(this.gridIndices.buffer, 'uint32');
+        
+        for (const tile of visibleTiles) {
+            const tileData = this.terrainTiles.get(`${tile.z}/${tile.x}/${tile.y}`);
+            if (!tileData) {
+                // Queue tile for loading
+                this.loadTerrainTile(tile.z, tile.x, tile.y);
+                continue;
+            }
+            
+            if (!tileData.bindGroup) {
+                tileData.bindGroup = this.createTileBindGroup(tileData);
+            }
+            if (!tileData.bindGroup) continue;
+            if (!tileData.vertexBuffer) continue;
+            
+            // Update tile info buffer with exaggeration
+            const tileInfo = new Float32Array([
+                this.exaggeration, 0, 0, 0
+            ]);
+            this.device.queue.writeBuffer(tileData.tileInfoBuffer, 0, tileInfo);
+            
+            pass.setVertexBuffer(0, tileData.vertexBuffer);
+            pass.setBindGroup(0, tileData.bindGroup);
+            pass.drawIndexed(this.gridIndices.count);
         }
     }
 

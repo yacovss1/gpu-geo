@@ -25,8 +25,9 @@ const MARKER_BUFFER_SIZE = MAX_FEATURES * 40;
  * @param {Camera} camera 
  * @param {Function} shouldRenderLayer 
  * @param {TerrainLayer} terrainLayer - Optional terrain layer to render first
+ * @param {Object} terrainComputeOutput - Optional output from terrain compute pipeline
  */
-export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, textureView, camera, shouldRenderLayer, terrainLayer = null) {
+export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, textureView, camera, shouldRenderLayer, terrainLayer = null, terrainComputeOutput = null) {
     const mapCommandEncoder = device.createCommandEncoder();
     
     // Get style once for all render passes
@@ -76,8 +77,11 @@ export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, text
             if (!buffers) continue;
             
             // Determine if this layer needs depth bias (same logic as color pass)
+            // 2D layers use flat pipeline (painter's algorithm) to avoid z-fighting on terrain
             const useBias = layerType === 'fill' && fillsWithExtrusions.has(layerId);
-            const hiddenPipeline = useBias ? renderer.pipelines.hiddenWithBias : renderer.pipelines.hidden;
+            const is3DLayer = layerType === 'fill-extrusion' || layerType === 'line-extrusion';
+            const hiddenPipeline = useBias ? renderer.pipelines.hiddenWithBias : 
+                                   (is3DLayer ? renderer.pipelines.hidden : renderer.pipelines.hiddenFlat);
             
             buffers.forEach(({ vertexBuffer, hiddenFillIndexBuffer, hiddenfillIndexCount }) => {
                 if (hiddenfillIndexCount > 0) {
@@ -178,7 +182,8 @@ export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, text
                         bindGroup = renderer.getOrCreateEffectBindGroup(effectType);
                     } else {
                         const useBias = fillsWithExtrusions.has(layerId);
-                        pipeline = useBias ? renderer.pipelines.fillWithBias : renderer.pipelines.fill;
+                        // Use flat pipeline (no depth test) for 2D fills - painter's algorithm on terrain
+                        pipeline = useBias ? renderer.pipelines.fillWithBias : renderer.pipelines.flat;
                         bindGroup = renderer.bindGroups.main;
                     }
                     
@@ -197,7 +202,8 @@ export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, text
                     const isTubeLayer = layer?.metadata?.['render-as-tubes'] === true;
                     
                     if (!isTubeLayer) {
-                        colorPass.setPipeline(renderer.pipelines.fill);
+                        // Use flat pipeline (no depth test) for 2D lines - painter's algorithm on terrain
+                        colorPass.setPipeline(renderer.pipelines.flat);
                         colorPass.setVertexBuffer(0, vertexBuffer);
                         colorPass.setIndexBuffer(fillIndexBuffer, "uint32");
                         colorPass.setBindGroup(0, renderer.bindGroups.main);
@@ -222,10 +228,15 @@ export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, text
         }
     }
     
-    // Render terrain hillshade overlay AFTER vectors (on top)
-    // Terrain mesh at Z=0 with depthCompare:'always' renders as transparent overlay
+    // Render GPU compute-based terrain-draped geometry (roads, lines with adaptive tessellation)
+    if (terrainComputeOutput) {
+        renderer.renderComputeOutput(colorPass, terrainComputeOutput);
+    }
+    
+    // Render terrain hillshade AFTER vectors as a multiplicative overlay
+    // This applies shading (darken slopes, brighten ridges) on top of vector colors
     if (terrainLayer && terrainLayer.enabled) {
-        terrainLayer.render(colorPass, camera.getMatrix(), camera, renderZoom);
+        terrainLayer.renderOverlay(colorPass, camera.getMatrix(), camera, renderZoom);
     }
     
     colorPass.end();

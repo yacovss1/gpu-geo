@@ -38,9 +38,18 @@ fn sampleTerrainHeight(clipX: f32, clipY: f32) -> f32 {
         return 0.0;
     }
     
-    // Convert clip coords to UV (0-1) and clamp to valid range
-    let u = clamp((clipX - terrainBounds.minX) / (terrainBounds.maxX - terrainBounds.minX), 0.001, 0.999);
-    let v = clamp(1.0 - (clipY - terrainBounds.minY) / (terrainBounds.maxY - terrainBounds.minY), 0.001, 0.999);
+    // Quantize UV coordinates to reduce terrain micro-variations
+    // This helps prevent Z-fighting between adjacent vertices (e.g., road edges)
+    // by ensuring nearby positions sample similar terrain heights
+    let uvScale = 256.0; // Lower = more quantization = less z-fighting but coarser terrain
+    
+    // Convert clip coords to UV (0-1)
+    let rawU = (clipX - terrainBounds.minX) / (terrainBounds.maxX - terrainBounds.minX);
+    let rawV = 1.0 - (clipY - terrainBounds.minY) / (terrainBounds.maxY - terrainBounds.minY);
+    
+    // Quantize and clamp
+    let u = clamp(floor(rawU * uvScale) / uvScale, 0.001, 0.999);
+    let v = clamp(floor(rawV * uvScale) / uvScale, 0.001, 0.999);
     
     // Sample terrain texture
     let pixel = textureSampleLevel(terrainTexture, terrainSampler, vec2<f32>(u, v), 0.0);
@@ -62,10 +71,16 @@ fn sampleTerrainHeight(clipX: f32, clipY: f32) -> f32 {
 fn main(@location(0) inPosition: vec3<f32>, @location(1) inColor: vec4<f32>) -> VertexOutput {
     var output: VertexOutput;
     
-    // Sample terrain height at this vertex position
-    let terrainHeight = sampleTerrainHeight(inPosition.x, inPosition.y);
+    // Check if Z is already set (CPU-baked terrain from centerline)
+    // If so, skip GPU terrain sampling to avoid Z-fighting
+    // (Left/right road edges would sample different terrain heights)
+    var terrainHeight = 0.0;
+    if (abs(inPosition.z) < 0.0000001) {
+        // Z is zero - sample terrain at vertex position (polygons, non-line geometry)
+        terrainHeight = sampleTerrainHeight(inPosition.x, inPosition.y);
+    }
     
-    // Add terrain height to vertex Z
+    // Add terrain height to vertex Z (or use pre-baked Z)
     let pos = vec4<f32>(inPosition.x, inPosition.y, inPosition.z + terrainHeight, 1.0);
 
     // Apply camera transform
@@ -159,7 +174,13 @@ fn sampleTerrainHeight(clipX: f32, clipY: f32) -> f32 {
 fn main(@location(0) inPosition: vec3<f32>, @location(1) inColor: vec4<f32>) -> VertexOutput {
     var output: VertexOutput;
     
-    let terrainHeight = sampleTerrainHeight(inPosition.x, inPosition.y);
+    // Check if Z is already set (CPU-baked terrain from centerline)
+    // If so, skip GPU terrain sampling to avoid Z-fighting
+    var terrainHeight = 0.0;
+    if (abs(inPosition.z) < 0.0000001) {
+        terrainHeight = sampleTerrainHeight(inPosition.x, inPosition.y);
+    }
+    
     let pos = vec4<f32>(inPosition.x, inPosition.y, inPosition.z + terrainHeight, 1.0);
 
     output.position = uniforms * pos;

@@ -142,10 +142,11 @@ export class Camera extends EventTarget {
         const fov = 0.6435011087932844; // ~36.87 degrees
         const cameraDistance = 1.0 / Math.tan(fov / 2);
         
-        // Near/far planes - tighter ratio improves depth precision
-        // This reduces z-fighting artifacts on pitched views
-        const nearZ = cameraDistance * 0.1;
-        const farZ = cameraDistance * 5;
+        // Near/far planes - use very wide range to handle all zoom levels
+        // At zoom 22, effectiveZoom = 2^22 = 4,194,304
+        // Need far plane to exceed this significantly
+        const nearZ = 0.0001;
+        const farZ = 100000000.0;  // 100 million - handles up to zoom 26
         
         // === PROJECTION ===
         const proj = mat4.create();

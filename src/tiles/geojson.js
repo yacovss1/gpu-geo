@@ -108,13 +108,67 @@ function getDeterministicLayerBasedId(sourceLayer) {
     return ((Math.abs(hash) % 255) + 1);
 }
 
-export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], sourceId = null, zoom = 0) {
+/**
+ * Sample terrain height from CPU-side terrain data
+ * @param {number} x - X coordinate in clip space
+ * @param {number} y - Y coordinate in clip space
+ * @param {Object} terrainData - { heights, width, height, bounds, exaggeration }
+ * @returns {number} Height value in clip space units
+ */
+function sampleTerrainHeight(x, y, terrainData) {
+    if (!terrainData || !terrainData.heights) return 0;
+    
+    const { heights, width, height, bounds } = terrainData;
+    const exaggeration = terrainData.exaggeration || 1.5;
+    
+    // Check bounds with small margin (matches GPU shader)
+    const margin = 0.001;
+    if (x < bounds.minX - margin || x > bounds.maxX + margin || 
+        y < bounds.minY - margin || y > bounds.maxY + margin) {
+        return 0;
+    }
+    
+    // Quantize UV coordinates to match GPU shader
+    // This helps prevent Z-fighting between adjacent vertices
+    const uvScale = 256.0;
+    
+    // Convert to UV coordinates
+    const rawU = (x - bounds.minX) / (bounds.maxX - bounds.minX);
+    const rawV = 1 - (y - bounds.minY) / (bounds.maxY - bounds.minY);
+    
+    // Quantize and clamp (matches GPU shader)
+    const u = Math.max(0.001, Math.min(0.999, Math.floor(rawU * uvScale) / uvScale));
+    const v = Math.max(0.001, Math.min(0.999, Math.floor(rawV * uvScale) / uvScale));
+    
+    // Convert to pixel coordinates
+    const px = Math.floor(u * (width - 1));
+    const py = Math.floor(v * (height - 1));
+    
+    // Sample height
+    const idx = py * width + px;
+    const rawHeight = heights[idx] || 0;
+    
+    // Clamp to reasonable range and scale (same as GPU shader)
+    const clampedHeight = Math.max(0, Math.min(9000, rawHeight));
+    return (clampedHeight / 50000000.0) * exaggeration;
+}
+
+/**
+ * Parse a GeoJSON feature into renderable vertices
+ * @param {Object} feature - Feature with geometry
+ * @param {Array} fillColor - Default fill color
+ * @param {string} sourceId - Style source ID
+ * @param {number} zoom - Current zoom level
+ * @param {Object} terrainData - Optional terrain data for CPU height baking
+ */
+export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], sourceId = null, zoom = 0, terrainData = null) {
     const fillVertices = [];
     const hiddenVertices = [];
     const fillIndices = [];
     const outlineIndices = [];
     const hiddenfillIndices = [];
     const lineSegments = []; // For line-extrusion 3D tube rendering
+    const lineCenterlines = []; // For GPU compute terrain projection
     let isFilled = true;
     let isLine = true;
 
@@ -261,6 +315,7 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
     
     // Helper to generate extruded building geometry (walls + roof)
     // 28-byte format: position(12) + visual color(16)
+    // If terrainData is provided, buildings rise from terrain surface
     const generateExtrusion = (allCoords, outerRing, height, base, fillColor, targetVertices, targetIndices, targetOutlineIndices) => {
         const startIndex = targetVertices.length / 7; // 7 floats per vertex
         
@@ -283,6 +338,10 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                 console.warn(`⚠️ Skipping corrupted wall edge: (${x1},${y1}) to (${x2},${y2})`);
                 continue;
             }
+            
+            // Sample terrain height at each corner (buildings follow terrain)
+            const terrainZ1 = terrainData ? sampleTerrainHeight(x1, y1, terrainData) : 0;
+            const terrainZ2 = terrainData ? sampleTerrainHeight(x2, y2, terrainData) : 0;
             
             // Calculate wall direction for directional lighting
             const dx = x2 - x1;
@@ -309,10 +368,11 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
             const vertexOffset = (targetVertices.length / 7);
             
             // Bottom-left, bottom-right, top-right, top-left
-            targetVertices.push(x1, y1, baseZ, ...wallColor);
-            targetVertices.push(x2, y2, baseZ, ...wallColor);
-            targetVertices.push(x2, y2, heightZ, ...wallColor);
-            targetVertices.push(x1, y1, heightZ, ...wallColor);
+            // Add terrain height to base and roof heights
+            targetVertices.push(x1, y1, baseZ + terrainZ1, ...wallColor);
+            targetVertices.push(x2, y2, baseZ + terrainZ2, ...wallColor);
+            targetVertices.push(x2, y2, heightZ + terrainZ2, ...wallColor);
+            targetVertices.push(x1, y1, heightZ + terrainZ1, ...wallColor);
             
             // Two triangles for the wall quad
             targetIndices.push(
@@ -332,8 +392,11 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                 return;
             }
             
+            // Sample terrain height for roof (building sits on terrain)
+            const terrainZ = terrainData ? sampleTerrainHeight(x, y, terrainData) : 0;
+            
             // Roof uses normal fill color (not darkened)
-            targetVertices.push(x, y, heightZ, ...fillColor);
+            targetVertices.push(x, y, heightZ + terrainZ, ...fillColor);
         });
         
         return roofStartIndex;
@@ -341,12 +404,15 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
 
     // Create two separate vertex arrays for visible and hidden rendering
     // NOTE: Coordinates are PRE-TRANSFORMED by vectorTileParser - use directly!
+    // If terrainData is provided, bake terrain height into Z coordinate
     const coordsToVertices = (coords, color, targetArray) => {
         const vertexStartIndex = targetArray.length / 7;
         coords.forEach(coord => {
             const [x, y] = coord; // Coordinates already in Mercator clip space!
+            // Sample terrain height if available, otherwise 0
+            const z = terrainData ? sampleTerrainHeight(x, y, terrainData) : 0.0;
             targetArray.push(
-                x, y, 0.0, // Position (z=0 for flat map)
+                x, y, z, // Position with terrain height baked in
                 ...color   // Color
             );
         });
@@ -355,6 +421,7 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
 
     // NOTE: Coordinates are PRE-TRANSFORMED - use directly!
     // Encode feature ID and layer ID into RGBA channels for hidden buffer
+    // If terrainData is provided, bake terrain height into Z coordinate
     const coordsToIdVertices = (coords, featureId, targetArray, zHeight = 0.0, layerName = 'unknown') => {
         const vertexStartIndex = targetArray.length / 7;
         
@@ -375,20 +442,53 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
         
         coords.forEach(coord => {
             const [x, y] = coord; // Coordinates already in Mercator clip space!
+            // For non-extruded features (zHeight=0), sample terrain if available
+            // For extruded features (buildings), add terrain base to extrusion height
+            let z = zHeight;
+            if (terrainData) {
+                const terrainZ = sampleTerrainHeight(x, y, terrainData);
+                z = zHeight + terrainZ; // Buildings rise from terrain surface
+            }
             targetArray.push(
-                x, y, zHeight,    // Position with Z height (for roof elevation)
+                x, y, z,    // Position with terrain + extrusion height
                 normalizedR, normalizedG, normalizedB, normalizedA  // R+G=ID, B=layerID, A=unused
             );
         });
         return vertexStartIndex;
+    };
+    
+    // Helper to subdivide a ring/line for terrain conformance
+    const subdivideRing = (coords, maxLength = 0.02) => {
+        if (!terrainData || coords.length < 2) return coords;
+        
+        const result = [coords[0]];
+        for (let i = 1; i < coords.length; i++) {
+            const prev = coords[i - 1];
+            const curr = coords[i];
+            const dx = curr[0] - prev[0];
+            const dy = curr[1] - prev[1];
+            const len = Math.sqrt(dx * dx + dy * dy);
+            
+            if (len > maxLength) {
+                const numDivisions = Math.ceil(len / maxLength);
+                for (let j = 1; j < numDivisions; j++) {
+                    const t = j / numDivisions;
+                    result.push([prev[0] + dx * t, prev[1] + dy * t]);
+                }
+            }
+            result.push(curr);
+        }
+        return result;
     };
 
     switch (feature.geometry.type) {
         case 'Polygon':
             // Combine all rings into a single array with holes
             const coordinates = feature.geometry.coordinates;
-            const outerRing = coordinates[0];
-            const holes = coordinates.slice(1);
+            
+            // Subdivide rings for terrain conformance (when terrain data available)
+            const outerRing = subdivideRing(coordinates[0]);
+            const holes = coordinates.slice(1).map(hole => subdivideRing(hole));
             
             // Flatten coordinates for triangulation
             const flatCoords = [];
@@ -411,7 +511,8 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
             const triangles = earcut(flatCoords, holeIndices);
 
             // Get all coordinates for both fill and hidden buffers
-            const allCoords = coordinates.flat(1);
+            // Use subdivided coordinates for proper terrain sampling
+            const allCoords = [outerRing, ...holes].flat(1);
 
             // Check if this is an extruded building
             if (isExtruded && extrusionHeight > 0) {
@@ -494,8 +595,9 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
             // All polygons in a MultiPolygon belong to the SAME feature (e.g., Tunisia includes islands)
             // so they all share the same feature ID for picking/labeling
             feature.geometry.coordinates.forEach((polygon, polygonIndex) => {
-                const outerRing = polygon[0];
-                const holes = polygon.slice(1);
+                // Subdivide rings for terrain conformance
+                const outerRing = subdivideRing(polygon[0]);
+                const holes = polygon.slice(1).map(hole => subdivideRing(hole));
                 
                 // Use the shared feature ID - all parts of Tunisia should have the same ID
                 const polygonPickingId = clampedFeatureId;
@@ -521,7 +623,8 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                 const triangles = earcut(flatCoords, holeIndices);
 
                 // Get all coordinates for both fill and hidden buffers
-                const allCoords = polygon.flat(1);
+                // Use subdivided coordinates for proper terrain sampling
+                const allCoords = [outerRing, ...holes].flat(1);
                 
                 // Check if this is an extruded building (same logic as Polygon)
                 if (isExtruded && extrusionHeight > 0) {
@@ -609,7 +712,8 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
             
             // Coordinates are already transformed - use directly
             // Subdivide long segments for proper terrain height sampling
-            const subdividedCoords = subdivideLine(feature.geometry.coordinates, 0.02);
+            // Use 0.05 clip space units for moderate subdivision (larger = fewer vertices)
+            const subdividedCoords = subdivideLine(feature.geometry.coordinates, 0.05);
             const transformedLineCoords = subdividedCoords;
             
             // Check if this is a line-extrusion layer (needs 3D tube geometry)
@@ -620,6 +724,16 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
             
             // Convert line width from pixels to world space
             const worldWidth = screenWidthToWorld(lineWidth, zoom, 512);
+            
+            // Store centerline for GPU compute terrain projection
+            // This allows the GPU to do adaptive subdivision based on actual terrain
+            lineCenterlines.push({
+                coordinates: feature.geometry.coordinates, // Raw coordinates (not subdivided)
+                width: worldWidth,
+                color: _borderColor,
+                featureId: clampedFeatureId,
+                layerId: layerId
+            });
             
             // Tessellate line into triangles
             const tessellated = tessellateLine(transformedLineCoords, worldWidth, lineCap, lineJoin, miterLimit);
@@ -681,13 +795,16 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                             perpY /= perpLen;
                         }
                         
-                        circles.push({ cx, cy, perpX, perpY });
+                        // Sample terrain height at this point
+                        const terrainZ = terrainData ? sampleTerrainHeight(cx, cy, terrainData) : 0;
+                        
+                        circles.push({ cx, cy, perpX, perpY, terrainZ });
                     }
                     
                     // Step 2: Generate vertices for all circles
                     const circleStartIdx = fillVertices.length / 7;
                     for (let i = 0; i < circles.length; i++) {
-                        const { cx, cy, perpX, perpY } = circles[i];
+                        const { cx, cy, perpX, perpY, terrainZ } = circles[i];
                         
                         // Create ring of vertices around circle
                         for (let s = 0; s < segments; s++) {
@@ -700,7 +817,8 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                             // Apply horizontal offset perpendicular to path
                             const vx = cx + perpX * horizontalOffset;
                             const vy = cy + perpY * horizontalOffset;
-                            const vz = (baseZ + heightZ) / 2 + verticalOffset;
+                            // Add terrain height to tube position
+                            const vz = (baseZ + heightZ) / 2 + verticalOffset + terrainZ;
                             
                             // Calculate lighting based on surface normal
                             const normalX = perpX * Math.cos(angle);
@@ -782,8 +900,11 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                             perpY /= perpLen;
                         }
                         
-                        leftEdge.push([x + perpX * radius, y + perpY * radius]);
-                        rightEdge.push([x - perpX * radius, y - perpY * radius]);
+                        // Sample terrain height at this point
+                        const terrainZ = terrainData ? sampleTerrainHeight(x, y, terrainData) : 0;
+                        
+                        leftEdge.push([x + perpX * radius, y + perpY * radius, terrainZ]);
+                        rightEdge.push([x - perpX * radius, y - perpY * radius, terrainZ]);
                     }
                     
                     // Now create the tube geometry using the left/right edges as a closed polygon
@@ -792,30 +913,30 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                     
                     // Bottom face vertices (left edge + right edge reversed)
                     const bottomVerts = [];
-                    leftEdge.forEach(([x, y]) => {
-                        fillVertices.push(x, y, baseZ, ..._borderColor);
+                    leftEdge.forEach(([x, y, tz]) => {
+                        fillVertices.push(x, y, baseZ + tz, ..._borderColor);
                         bottomVerts.push(fillVertices.length / 7 - 1);
                     });
-                    rightEdge.slice().reverse().forEach(([x, y]) => {
-                        fillVertices.push(x, y, baseZ, ..._borderColor);
+                    rightEdge.slice().reverse().forEach(([x, y, tz]) => {
+                        fillVertices.push(x, y, baseZ + tz, ..._borderColor);
                         bottomVerts.push(fillVertices.length / 7 - 1);
                     });
                     
-                    // Top face vertices (same outline at heightZ)
+                    // Top face vertices (same outline at heightZ + terrain)
                     const topVerts = [];
-                    leftEdge.forEach(([x, y]) => {
-                        fillVertices.push(x, y, heightZ, ..._borderColor);
+                    leftEdge.forEach(([x, y, tz]) => {
+                        fillVertices.push(x, y, heightZ + tz, ..._borderColor);
                         topVerts.push(fillVertices.length / 7 - 1);
                     });
-                    rightEdge.slice().reverse().forEach(([x, y]) => {
-                        fillVertices.push(x, y, heightZ, ..._borderColor);
+                    rightEdge.slice().reverse().forEach(([x, y, tz]) => {
+                        fillVertices.push(x, y, heightZ + tz, ..._borderColor);
                         topVerts.push(fillVertices.length / 7 - 1);
                     });
                     
                     // Triangulate bottom and top faces using earcut
                     const bottomCoords = [];
-                    leftEdge.forEach(([x, y]) => bottomCoords.push(x, y));
-                    rightEdge.slice().reverse().forEach(([x, y]) => bottomCoords.push(x, y));
+                    leftEdge.forEach(([x, y, tz]) => bottomCoords.push(x, y));
+                    rightEdge.slice().reverse().forEach(([x, y, tz]) => bottomCoords.push(x, y));
                     const bottomIndices = earcut(bottomCoords, null, 2);
                     bottomIndices.forEach(idx => fillIndices.push(bottomVerts[idx]));
                     bottomIndices.forEach(idx => fillIndices.push(topVerts[idx]));  // Same triangulation for top
@@ -823,8 +944,8 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                     // Create walls around the perimeter with lighting
                     const createWall = (edge, isLeftSide) => {
                         for (let i = 0; i < edge.length - 1; i++) {
-                            const [x1, y1] = edge[i];
-                            const [x2, y2] = edge[i + 1];
+                            const [x1, y1, tz1] = edge[i];
+                            const [x2, y2, tz2] = edge[i + 1];
                             
                             // Calculate lighting
                             const dx = x2 - x1, dy = y2 - y1;
@@ -841,10 +962,11 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                             ];
                             
                             const vOff = fillVertices.length / 7;
-                            fillVertices.push(x1, y1, baseZ, ...wallColor);
-                            fillVertices.push(x2, y2, baseZ, ...wallColor);
-                            fillVertices.push(x2, y2, heightZ, ...wallColor);
-                            fillVertices.push(x1, y1, heightZ, ...wallColor);
+                            // Add terrain height to wall vertices
+                            fillVertices.push(x1, y1, baseZ + tz1, ...wallColor);
+                            fillVertices.push(x2, y2, baseZ + tz2, ...wallColor);
+                            fillVertices.push(x2, y2, heightZ + tz2, ...wallColor);
+                            fillVertices.push(x1, y1, heightZ + tz1, ...wallColor);
                             
                             fillIndices.push(vOff, vOff + 1, vOff + 2, vOff, vOff + 2, vOff + 3);
                         }
@@ -855,13 +977,20 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                 }
                 
             } else {
-                // Regular flat 2D line rendering
+                // Regular flat 2D line rendering - sample terrain at CENTERLINE for each vertex
+                // This prevents Z-fighting: left and right edges share the same terrain height
                 const lineStartIndex = fillVertices.length / 7;
                 for (let i = 0; i < tessellated.vertices.length; i += 2) {
+                    const x = tessellated.vertices[i];
+                    const y = tessellated.vertices[i + 1];
+                    // Sample terrain at centerline position, not at vertex edge position
+                    const centerlineX = tessellated.centerlines[i];
+                    const centerlineY = tessellated.centerlines[i + 1];
+                    const z = terrainData ? sampleTerrainHeight(centerlineX, centerlineY, terrainData) : 0.0;
                     fillVertices.push(
-                        tessellated.vertices[i],     // x
-                        tessellated.vertices[i + 1], // y
-                        0.0,                          // z
+                        x,     // x (edge position)
+                        y,     // y (edge position)
+                        z,     // z sampled at centerline (terrain only)
                         ..._borderColor               // color
                     );
                 }
@@ -882,10 +1011,14 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                 const normalizedB = layerIdx / 255.0;
                 
                 for (let i = 0; i < tessellated.vertices.length; i += 2) {
+                    // Sample terrain at centerline for hidden buffer too
+                    const centerlineX = tessellated.centerlines[i];
+                    const centerlineY = tessellated.centerlines[i + 1];
+                    const z = terrainData ? sampleTerrainHeight(centerlineX, centerlineY, terrainData) : 0.0;
                     hiddenVertices.push(
                         tessellated.vertices[i],     // x
                         tessellated.vertices[i + 1], // y
-                        0.0,                          // z
+                        z,                           // z from centerline terrain
                         normalizedR, normalizedG, normalizedB, 1.0  // R+G=ID, B=layerID
                     );
                 }
@@ -928,6 +1061,17 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
             // Convert line width from pixels to world space
             const multiWorldWidth = screenWidthToWorld(multiLineWidth, zoom, 512);
             
+            // Store centerlines for GPU compute terrain projection
+            feature.geometry.coordinates.forEach(line => {
+                lineCenterlines.push({
+                    coordinates: line, // Raw coordinates (not subdivided)
+                    width: multiWorldWidth,
+                    color: _borderColor,
+                    featureId: clampedFeatureId,
+                    layerId: layerId
+                });
+            });
+            
             // Pre-compute ID encoding for hidden buffer (same for all lines in this feature)
             const multiSafeId = Math.max(1, Math.min(65534, clampedFeatureId || 1));
             const multiHighByte = Math.floor(multiSafeId / 256);
@@ -945,15 +1089,16 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                 // Tessellate each line
                 const lineTessellated = tessellateLine(transformedLine, multiWorldWidth, multiLineCap, multiLineJoin, multiMiterLimit);
                 
-                // Add tessellated vertices
+                // Add tessellated vertices with terrain height sampled at CENTERLINE
                 const multiLineStartIndex = fillVertices.length / 7;
                 for (let i = 0; i < lineTessellated.vertices.length; i += 2) {
-                    fillVertices.push(
-                        lineTessellated.vertices[i],
-                        lineTessellated.vertices[i + 1],
-                        0.0,
-                        ..._borderColor
-                    );
+                    const x = lineTessellated.vertices[i];
+                    const y = lineTessellated.vertices[i + 1];
+                    // Sample terrain at centerline position, not at vertex edge position
+                    const centerlineX = lineTessellated.centerlines[i];
+                    const centerlineY = lineTessellated.centerlines[i + 1];
+                    const z = terrainData ? sampleTerrainHeight(centerlineX, centerlineY, terrainData) : 0.0;
+                    fillVertices.push(x, y, z, ..._borderColor);
                 }
                 
                 // Add triangle indices
@@ -961,15 +1106,15 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                     fillIndices.push(multiLineStartIndex + idx);
                 });
                 
-                // Generate hidden buffer for line picking (CRITICAL - was missing!)
+                // Generate hidden buffer for line picking with terrain height at centerline
                 const hiddenMultiLineStartIndex = hiddenVertices.length / 7;
                 for (let i = 0; i < lineTessellated.vertices.length; i += 2) {
-                    hiddenVertices.push(
-                        lineTessellated.vertices[i],
-                        lineTessellated.vertices[i + 1],
-                        0.0,
-                        multiNormalizedR, multiNormalizedG, multiNormalizedB, 1.0
-                    );
+                    const x = lineTessellated.vertices[i];
+                    const y = lineTessellated.vertices[i + 1];
+                    const centerlineX = lineTessellated.centerlines[i];
+                    const centerlineY = lineTessellated.centerlines[i + 1];
+                    const z = terrainData ? sampleTerrainHeight(centerlineX, centerlineY, terrainData) : 0.0;
+                    hiddenVertices.push(x, y, z, multiNormalizedR, multiNormalizedG, multiNormalizedB, 1.0);
                 }
                 
                 // Add hidden indices for line picking
@@ -980,7 +1125,8 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
             break;
         case 'Point':
             const point = feature.geometry.coordinates; // Already transformed!
-            fillVertices.push(point[0], point[1], 0.0, ..._fillColor);
+            const pointZ = terrainData ? sampleTerrainHeight(point[0], point[1], terrainData) : 0.0;
+            fillVertices.push(point[0], point[1], pointZ, ..._fillColor);
             break;
         default:
             // Unsupported geometry type - skip silently
@@ -994,6 +1140,7 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
         outlineIndices: new Uint32Array(outlineIndices),
         hiddenfillIndices: new Uint32Array(hiddenfillIndices),
         lineSegments: lineSegments.length > 0 ? lineSegments : null, // For 3D tube rendering
+        lineCenterlines: lineCenterlines.length > 0 ? lineCenterlines : null, // For GPU compute terrain projection
         isFilled,
         isLine,
         layerId,  // Add layerId to return object

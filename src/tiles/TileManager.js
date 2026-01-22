@@ -7,19 +7,27 @@
  * - Create and destroy GPU buffers for tiles
  * - Track tile memory usage
  * - Handle zoom level changes
+ * - Coordinate terrain loading for CPU-side height baking
  */
 
 import { fetchVectorTile, clearTileCache, resetNotFoundTiles, parseGeoJSONFeature } from './geojson.js';
 import { getVisibleTiles } from './tile-utils.js';
+import { getTileCoordinator } from './TileCoordinator.js';
 
 export class TileManager {
     constructor(device, performanceStats) {
         this.device = device;
         this.performanceStats = performanceStats;
         
+        // Tile coordinator for terrain sync
+        this.tileCoordinator = getTileCoordinator();
+        
         // Tile storage: Map<layerId, Array<tileBuffer>>
         this.visibleTileBuffers = new Map();
         this.hiddenTileBuffers = new Map();
+        
+        // Centerline storage for GPU terrain compute: Map<tileKey, Array<centerline>>
+        this.tileCenterlines = new Map();
         
         // Tracking
         this.lastFetchZoom = -1;
@@ -124,20 +132,33 @@ export class TileManager {
     
     /**
      * Load a batch of tiles
+     * Pre-loads terrain for the batch before processing vectors
      */
     async loadTileBatch(tiles, newTileBuffers, newHiddenTileBuffers, abortSignal) {
+        // Pre-load terrain for all tiles in this batch first
+        // This ensures terrain height data is available for CPU-side baking
+        await this.tileCoordinator.preloadTerrain(tiles);
+        
         const tilePromises = tiles.map(async ({ x, y, z }) => {
             try {
                 if (abortSignal?.aborted) return;
+                
+                // Get terrain data for this tile (should be cached from preload)
+                const terrainData = this.tileCoordinator.getTerrainData(z, x, y);
                 
                 const vectorTile = await fetchVectorTile(x, y, z, abortSignal);
                 
                 if (abortSignal?.aborted || !vectorTile?.layers) return;
                 
                 // Parse features with pre-transformed coordinates from vectorTileParser
-                const parsedFeatures = await this.parseVectorTile(vectorTile, x, y, z);
+                // Pass terrain data for CPU-side height baking
+                const parsedFeatures = await this.parseVectorTile(vectorTile, x, y, z, terrainData);
                 
                 if (abortSignal?.aborted) return;
+                
+                // Collect centerlines for GPU terrain compute
+                const tileKey = `${z}/${x}/${y}`;
+                const tileCenterlines = [];
                 
                 // Create GPU buffers for each feature
                 parsedFeatures.forEach(feature => {
@@ -147,7 +168,17 @@ export class TileManager {
                         newTileBuffers,
                         newHiddenTileBuffers
                     );
+                    
+                    // Collect centerlines from line features
+                    if (feature.lineCenterlines && feature.lineCenterlines.length > 0) {
+                        tileCenterlines.push(...feature.lineCenterlines);
+                    }
                 });
+                
+                // Store centerlines for this tile (for GPU compute pipeline)
+                if (tileCenterlines.length > 0) {
+                    this.tileCenterlines.set(tileKey, tileCenterlines);
+                }
                 
             } catch (err) {
                 if (!abortSignal?.aborted) {
@@ -162,8 +193,9 @@ export class TileManager {
     /**
      * Parse vector tile into features using DIRECT coordinate transform
      * No toGeoJSON(), no GPU roundtrip - just pure CPU tile→Mercator transform
+     * @param {Object} terrainData - Optional terrain data for height baking
      */
-    async parseVectorTile(vectorTile, x, y, z) {
+    async parseVectorTile(vectorTile, x, y, z, terrainData = null) {
         const parsedFeatures = [];
         
         // Get current style for sourceId
@@ -173,10 +205,11 @@ export class TileManager {
         
         // Parse all features with pre-transformed coordinates from vectorTileParser
         // Coordinates are already in Mercator clip space - no GPU roundtrip needed
+        // If terrainData available, heights are baked into vertices
         for (const layerName in vectorTile.layers) {
             const layer = vectorTile.layers[layerName];
             for (const feature of layer.features) {
-                const parsed = parseGeoJSONFeature(feature, [0.0, 0.0, 0.0, 1.0], sourceId, z);
+                const parsed = parseGeoJSONFeature(feature, [0.0, 0.0, 0.0, 1.0], sourceId, z, terrainData);
                 if (parsed) {
                     parsedFeatures.push(parsed);
                 }
@@ -461,6 +494,79 @@ export class TileManager {
         const padded = new Uint8Array(alignedSize);
         padded.set(new Uint8Array(typedArray.buffer));
         return padded;
+    }
+    
+    /**
+     * Get all centerlines from currently visible tiles
+     * @param {Array} visibleTiles - Array of { x, y, z } for visible tiles
+     * @returns {Array} - Flat array of all centerline objects
+     */
+    getVisibleCenterlines(visibleTiles) {
+        const centerlines = [];
+        const visibleKeys = new Set(visibleTiles.map(t => `${t.z}/${t.x}/${t.y}`));
+        
+        for (const [tileKey, tileCenterlines] of this.tileCenterlines) {
+            if (visibleKeys.has(tileKey)) {
+                centerlines.push(...tileCenterlines);
+            }
+        }
+        
+        return centerlines;
+    }
+    
+    /**
+     * Get the set of tile keys that have centerlines
+     * @returns {Set<string>}
+     */
+    getCenterlineTileKeys() {
+        return new Set(this.tileCenterlines.keys());
+    }
+    
+    /**
+     * Get the set of all visible tile keys (z/x/y format)
+     * @returns {Set<string>}
+     */
+    getVisibleTileKeys() {
+        return this.getExistingTileKeys();
+    }
+    
+    /**
+     * Get all centerlines from all visible tiles (no parameter needed)
+     * Uses internally tracked visible tiles
+     * @returns {Array} - Flat array of all centerline objects
+     */
+    getAllVisibleCenterlines() {
+        const visibleKeys = this.getVisibleTileKeys();
+        const centerlines = [];
+        
+        for (const [tileKey, tileCenterlines] of this.tileCenterlines) {
+            if (visibleKeys.has(tileKey)) {
+                centerlines.push(...tileCenterlines);
+            }
+        }
+        
+        return centerlines;
+    }
+
+    /**
+     * Clean up centerlines for tiles that are no longer visible
+     * @param {Array} visibleTiles - Array of { x, y, z } for visible tiles
+     */
+    cleanupOldCenterlines(visibleTiles) {
+        const visibleKeys = new Set(visibleTiles.map(t => `${t.z}/${t.x}/${t.y}`));
+        
+        for (const tileKey of this.tileCenterlines.keys()) {
+            if (!visibleKeys.has(tileKey)) {
+                this.tileCenterlines.delete(tileKey);
+            }
+        }
+    }
+    
+    /**
+     * Clear all cached centerlines
+     */
+    clearCenterlines() {
+        this.tileCenterlines.clear();
     }
     
     /**
