@@ -47,7 +47,7 @@ export class TerrainLayer {
         this.gridSize = 64; // Vertices per tile edge
         this.enabled = true;  // Re-enabled after centerline fix for Z-fighting
         this.source = 'aws';
-        this.exaggeration = 15; // Height exaggeration factor - 15x balances visibility with realism
+        this.exaggeration = 5; // Height exaggeration factor - 5x for subtle realistic terrain
         this.minDisplayZoom = 8; // Only show terrain at this zoom level or higher
         this.cameraBuffer = null; // Set from main renderer
         this.initialized = false;

@@ -124,7 +124,7 @@ function sampleTerrainHeight(x, y, terrainData) {
     if (!terrainData || !terrainData.heights) return 0;
     
     const { heights, width, height, bounds } = terrainData;
-    const exaggeration = terrainData.exaggeration || 30;  // Match terrainLayer default
+    const exaggeration = terrainData.exaggeration || 5;  // Match terrainLayer default
     
     // Check bounds with small margin (matches GPU shader)
     const margin = 0.001;

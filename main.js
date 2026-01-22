@@ -273,6 +273,12 @@ function setupGlobalAPI(device, camera, tileManager, performanceManager, styleMa
         isEnabled: () => terrainLayer.enabled,
         setExaggeration: (factor) => {
             terrainLayer.setExaggeration(factor);
+            // Also update TileCoordinator so CPU-baked terrain heights match
+            if (window.tileCoordinator) {
+                window.tileCoordinator.setExaggeration(factor);
+                // Trigger tile reload to rebake building terrain heights
+                window.tileCoordinator.reloadVisibleTiles();
+            }
             console.log(`🏔️ Terrain exaggeration set to ${factor}`);
         },
         setMinZoom: (zoom) => {

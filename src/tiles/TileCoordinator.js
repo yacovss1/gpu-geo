@@ -23,7 +23,7 @@ export class TileCoordinator {
         
         // Configuration
         this.terrainSource = 'aws';
-        this.exaggeration = 15;  // Match terrainLayer default
+        this.exaggeration = 5;  // Match terrainLayer default
         this.terrainEnabled = true;
         
         // Pending requests waiting for terrain
@@ -237,6 +237,16 @@ export class TileCoordinator {
      */
     setExaggeration(value) {
         this.exaggeration = value;
+    }
+    
+    /**
+     * Reload visible tiles to rebake terrain heights with new exaggeration
+     */
+    reloadVisibleTiles() {
+        // Clear cached tile data to force regeneration with new exaggeration
+        this.clearCache();
+        // The next frame will trigger tile loading with updated exaggeration
+        console.log('🔄 Tiles will reload with new terrain exaggeration');
     }
     
     /**
