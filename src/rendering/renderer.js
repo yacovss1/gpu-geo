@@ -6,6 +6,7 @@ import {
 import { GPUTextRenderer } from '../text/gpuTextRenderer.js';
 import { ShaderEffectManager } from '../core/shaderEffectManager.js';
 import { TubePipeline } from './tubePipeline.js';
+import { ShadowMapRenderer } from './shadowMap.js';
 
 // Cache shaders and layouts to avoid recreation
 let cachedShaders = { 
@@ -87,9 +88,33 @@ export function createRenderPipeline(device, format, topology, isHidden = false,
         });
     }
     
-    const pipelineLayout = device.createPipelineLayout({ 
-        bindGroupLayouts: [cachedLayouts.render, cachedLayouts.terrain] 
-    });
+    // Group 2: Shadow map data (for shadow mapping)
+    if (!cachedLayouts.shadow) {
+        cachedLayouts.shadow = device.createBindGroupLayout({
+            entries: [
+                {
+                    binding: 0,
+                    visibility: GPUShaderStage.VERTEX,
+                    buffer: { type: "uniform" }  // Light space matrix
+                },
+                {
+                    binding: 1,
+                    visibility: GPUShaderStage.FRAGMENT,
+                    texture: { sampleType: 'depth' }  // Shadow depth texture
+                },
+                {
+                    binding: 2,
+                    visibility: GPUShaderStage.FRAGMENT,
+                    sampler: { type: 'comparison' }  // Comparison sampler for shadow testing
+                }
+            ]
+        });
+    }
+    
+    // Choose layout based on whether this is hidden pass (no shadows) or visible pass (with shadows)
+    const pipelineLayout = isHidden 
+        ? device.createPipelineLayout({ bindGroupLayouts: [cachedLayouts.render, cachedLayouts.terrain] })
+        : device.createPipelineLayout({ bindGroupLayouts: [cachedLayouts.render, cachedLayouts.terrain, cachedLayouts.shadow] });
     
     return device.createRenderPipeline({
         layout: pipelineLayout,
@@ -275,7 +300,9 @@ export class MapRenderer {
             // Time of day (0-24, for presets)
             timeOfDay: 12,
             // Is nighttime
-            isNight: false
+            isNight: false,
+            // Shadows enabled
+            shadowsEnabled: true
         };
         
         // Initialize shader effect manager
@@ -285,12 +312,49 @@ export class MapRenderer {
         // Initialize tube/pipe renderer
         this.tubePipeline = new TubePipeline(device, format);
         
+        // Initialize shadow map renderer
+        this.shadowRenderer = new ShadowMapRenderer(device);
+        
         // Initialize pipelines
         this.initializePipelines();
     }
     
     setTerrainLayer(terrainLayer) {
         this.terrainLayer = terrainLayer;
+    }
+    
+    /**
+     * Update shadow map for current frame
+     * Call this before rendering the main pass
+     */
+    updateShadows(encoder, tileBuffers, shouldRenderLayer, cameraCenter, viewRadius) {
+        if (!this.lighting.shadowsEnabled || this.lighting.isNight) {
+            return; // No shadows at night or when disabled
+        }
+        
+        // Update light space matrix based on sun direction
+        this.shadowRenderer.updateLightMatrix(
+            this.lighting.sunDirection,
+            cameraCenter,
+            viewRadius
+        );
+        
+        // Render shadow pass
+        this.shadowRenderer.renderShadowPass(encoder, tileBuffers, shouldRenderLayer);
+    }
+    
+    /**
+     * Get shadow map resources for main render pass
+     */
+    getShadowResources() {
+        if (!this.shadowRenderer.initialized) {
+            this.shadowRenderer.initialize();
+        }
+        return {
+            shadowMapView: this.shadowRenderer.getShadowMapView(),
+            shadowMapSampler: this.shadowRenderer.getShadowMapSampler(),
+            lightMatrixBuffer: this.shadowRenderer.getLightMatrixBuffer()
+        };
     }
     
     initializePipelines() {
@@ -431,6 +495,17 @@ export class MapRenderer {
                 { binding: 0, resource: this.dummyTerrainTexture.createView() },
                 { binding: 1, resource: this.terrainSampler },
                 { binding: 2, resource: { buffer: this.buffers.terrainBounds } }
+            ],
+        });
+        
+        // Initialize shadow renderer and create shadow bind group
+        this.shadowRenderer.initialize();
+        this.bindGroups.shadow = this.device.createBindGroup({
+            layout: this.pipelines.fill.getBindGroupLayout(2),
+            entries: [
+                { binding: 0, resource: { buffer: this.shadowRenderer.getLightMatrixBuffer() } },
+                { binding: 1, resource: this.shadowRenderer.getShadowMapView() },
+                { binding: 2, resource: this.shadowRenderer.getShadowMapSampler() }
             ],
         });
         

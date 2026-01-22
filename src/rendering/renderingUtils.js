@@ -119,6 +119,16 @@ export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, text
     }
     
     // Third render pass: color texture with map features (MSAA enabled)
+    
+    // Shadow pass: render depth from sun's perspective (before color pass)
+    if (renderer.lighting?.shadowsEnabled && !renderer.lighting?.isNight) {
+        // Calculate view radius from camera for shadow frustum
+        const viewRadius = 0.5; // Approximate clip space radius to cover
+        const cameraCenter = [0, 0, 0]; // Center of view in clip space
+        
+        renderer.updateShadows(mapCommandEncoder, tileBuffers, shouldRenderLayer, cameraCenter, viewRadius);
+    }
+    
     const colorPass = mapCommandEncoder.beginRenderPass({
         colorAttachments: [{
             view: renderer.textures.colorMSAA.createView(),
@@ -172,6 +182,10 @@ export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, text
                     if (renderer.bindGroups.terrain) {
                         colorPass.setBindGroup(1, renderer.bindGroups.terrain);
                     }
+                    // Set shadow bind group for shadow mapping (extrusions cast/receive shadows)
+                    if (renderer.bindGroups.shadow) {
+                        colorPass.setBindGroup(2, renderer.bindGroups.shadow);
+                    }
                     colorPass.drawIndexed(fillIndexCount);
                 } else if (layerType === 'fill' && fillIndexCount > 0) {
                     // Check for water or grass effects
@@ -194,6 +208,10 @@ export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, text
                     if (renderer.bindGroups.terrain) {
                         colorPass.setBindGroup(1, renderer.bindGroups.terrain);
                     }
+                    // Set shadow bind group for shadow mapping (flat fills receive shadows)
+                    if (renderer.bindGroups.shadow && effectType !== 'animated-water' && effectType !== 'grass') {
+                        colorPass.setBindGroup(2, renderer.bindGroups.shadow);
+                    }
                     colorPass.drawIndexed(fillIndexCount);
                 } else if (layerType === 'line' && isLine && fillIndexCount > 0) {
                     // Skip if this is a tube layer (will be rendered by tubePipeline)
@@ -209,6 +227,10 @@ export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, text
                         // Set terrain bind group for GPU terrain projection
                         if (renderer.bindGroups.terrain) {
                             colorPass.setBindGroup(1, renderer.bindGroups.terrain);
+                        }
+                        // Set shadow bind group for shadow mapping (lines receive shadows)
+                        if (renderer.bindGroups.shadow) {
+                            colorPass.setBindGroup(2, renderer.bindGroups.shadow);
                         }
                         colorPass.drawIndexed(fillIndexCount);
                     }

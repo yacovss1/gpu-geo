@@ -4,7 +4,7 @@
 /**
  * Glass Effect - Fragment shader for reflective tall buildings
  * Mixes building color with sky reflection based on height
- * Now includes proper lighting based on surface normals
+ * Now includes proper lighting based on surface normals and shadow mapping
  */
 export const glassFragmentShaderCode = `
 struct TerrainAndLighting {
@@ -16,11 +16,16 @@ struct TerrainAndLighting {
 
 @group(1) @binding(2) var<uniform> terrainData: TerrainAndLighting;
 
+// Shadow map bindings (group 2)
+@group(2) @binding(1) var shadowMap: texture_depth_2d;
+@group(2) @binding(2) var shadowSampler: sampler_comparison;
+
 @fragment
 fn main(@location(0) fragCoord: vec2<f32>, 
         @location(1) color: vec4<f32>, 
         @location(2) worldZ: f32,
-        @location(3) normal: vec3<f32>) -> @location(0) vec4<f32> {
+        @location(3) normal: vec3<f32>,
+        @location(4) shadowCoord: vec3<f32>) -> @location(0) vec4<f32> {
     
     // Normalize the interpolated normal
     let n = normalize(normal);
@@ -32,6 +37,18 @@ fn main(@location(0) fragCoord: vec2<f32>,
     // Diffuse lighting: how much surface faces the sun
     let ndotl = max(dot(n, sunDir), 0.0);
     
+    // Shadow calculation
+    // Clamp shadow coords to valid range and sample shadow map
+    let shadowUV = clamp(shadowCoord.xy, vec2<f32>(0.001), vec2<f32>(0.999));
+    let shadowDepth = shadowCoord.z - 0.005;  // Bias to prevent shadow acne
+    let shadowSample = textureSampleCompare(shadowMap, shadowSampler, shadowUV, shadowDepth);
+    
+    // Check if within shadow map bounds
+    let inBounds = shadowCoord.x >= 0.0 && shadowCoord.x <= 1.0 && 
+                   shadowCoord.y >= 0.0 && shadowCoord.y <= 1.0 &&
+                   shadowCoord.z >= 0.0 && shadowCoord.z <= 1.0;
+    let shadow = select(1.0, shadowSample, inBounds);
+    
     // Sky color for reflection (bright blue)
     let skyColor = vec3<f32>(0.5, 0.75, 1.0);
     
@@ -42,7 +59,7 @@ fn main(@location(0) fragCoord: vec2<f32>,
     // Mix building color with sky reflection
     let glassColor = mix(color.rgb, skyColor, reflectionAmount);
     
-    // Apply lighting
+    // Apply lighting with shadows
     var litColor: vec3<f32>;
     if (terrainData.isNight > 0.5) {
         // Night: use ambient as base, reduce saturation
@@ -50,8 +67,8 @@ fn main(@location(0) fragCoord: vec2<f32>,
         let desaturated = mix(glassColor, vec3<f32>(gray), 0.5);
         litColor = desaturated * (ambient + ndotl * 0.1);
     } else {
-        // Day: ambient + diffuse lighting
-        let diffuse = ndotl * (1.0 - ambient) * terrainData.intensity;
+        // Day: ambient + diffuse lighting modulated by shadow
+        let diffuse = ndotl * (1.0 - ambient) * terrainData.intensity * shadow;
         litColor = glassColor * (ambient + diffuse);
     }
     

@@ -186,8 +186,29 @@ export class ShaderEffectManager {
             ]
         });
         
+        // Group 2: Shadow map data (must match main vertex shader bindings)
+        const shadowBindGroupLayout = this.device.createBindGroupLayout({
+            entries: [
+                {
+                    binding: 0,
+                    visibility: GPUShaderStage.VERTEX,
+                    buffer: { type: "uniform" }  // Light space matrix
+                },
+                {
+                    binding: 1,
+                    visibility: GPUShaderStage.FRAGMENT,
+                    texture: { sampleType: 'depth' }  // Shadow depth texture
+                },
+                {
+                    binding: 2,
+                    visibility: GPUShaderStage.FRAGMENT,
+                    sampler: { type: 'comparison' }  // Comparison sampler for shadow testing
+                }
+            ]
+        });
+        
         const pipelineLayout = this.device.createPipelineLayout({ 
-            bindGroupLayouts: [cameraBindGroupLayout, terrainBindGroupLayout] 
+            bindGroupLayouts: [cameraBindGroupLayout, terrainBindGroupLayout, shadowBindGroupLayout] 
         });
         
         return this.device.createRenderPipeline({

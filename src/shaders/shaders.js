@@ -1,4 +1,4 @@
-// Vector layer shaders with GPU terrain projection and global lighting
+// Vector layer shaders with GPU terrain projection, global lighting, and shadows
 // Vertex format: position(3) + normal(3) + color(4) = 10 floats = 40 bytes
 
 export const vertexShaderCode = `
@@ -7,7 +7,8 @@ struct VertexOutput {
     @location(0) fragCoord: vec2<f32>,
     @location(1) color: vec4<f32>,
     @location(2) worldZ: f32,
-    @location(3) normal: vec3<f32>
+    @location(3) normal: vec3<f32>,
+    @location(4) shadowCoord: vec3<f32>  // Position in light space for shadow lookup
 };
 
 struct TerrainAndLighting {
@@ -37,6 +38,9 @@ struct TerrainAndLighting {
 @group(1) @binding(0) var terrainTexture: texture_2d<f32>;
 @group(1) @binding(1) var terrainSampler: sampler;
 @group(1) @binding(2) var<uniform> terrainData: TerrainAndLighting;
+
+// Shadow map data in bind group 2
+@group(2) @binding(0) var<uniform> lightSpaceMatrix: mat4x4<f32>;
 
 fn sampleTerrainHeight(clipX: f32, clipY: f32) -> f32 {
     if (terrainData.enabled < 0.5) {
@@ -117,6 +121,15 @@ fn main(@location(0) inPosition: vec3<f32>, @location(1) inNormal: vec3<f32>, @l
     // Pass normal to fragment shader for lighting calculation
     output.normal = inNormal;
     
+    // Calculate shadow map coordinates (position in light space)
+    let lightSpacePos = lightSpaceMatrix * pos;
+    // Convert from clip space [-1,1] to texture coords [0,1]
+    output.shadowCoord = vec3<f32>(
+        lightSpacePos.x * 0.5 + 0.5,
+        lightSpacePos.y * -0.5 + 0.5,  // Flip Y for texture coords
+        lightSpacePos.z  // Depth in light space
+    );
+    
     return output;
 }
 `;
@@ -131,13 +144,43 @@ struct TerrainAndLighting {
 
 @group(1) @binding(2) var<uniform> terrainData: TerrainAndLighting;
 
-// Debug flag: set to true to visualize normals as colors
-const DEBUG_NORMALS: bool = false;
+// Shadow map in bind group 2
+@group(2) @binding(1) var shadowMap: texture_depth_2d;
+@group(2) @binding(2) var shadowSampler: sampler_comparison;
+
+// Debug flag: set to true to visualize shadows
+const DEBUG_SHADOWS: bool = false;
 
 @fragment
-fn main(@location(0) fragCoord: vec2<f32>, @location(1) color: vec4<f32>, @location(2) worldZ: f32, @location(3) normal: vec3<f32>) -> @location(0) vec4<f32> {
+fn main(@location(0) fragCoord: vec2<f32>, @location(1) color: vec4<f32>, @location(2) worldZ: f32, @location(3) normal: vec3<f32>, @location(4) shadowCoord: vec3<f32>) -> @location(0) vec4<f32> {
     // Normalize the interpolated normal
     let n = normalize(normal);
+    
+    // Calculate shadow factor (1.0 = lit, 0.0 = in shadow)
+    var shadow = 1.0;
+    if (terrainData.isNight < 0.5) {
+        // Shadow bias to reduce shadow acne
+        let bias = 0.005;
+        let compareDepth = shadowCoord.z - bias;
+        
+        // Clamp shadow coords to valid range for sampling
+        let clampedCoord = clamp(shadowCoord.xy, vec2<f32>(0.001), vec2<f32>(0.999));
+        
+        // Single shadow sample (no PCF for now to avoid uniform control flow issues)
+        shadow = textureSampleCompare(shadowMap, shadowSampler, clampedCoord, compareDepth);
+        
+        // If outside shadow map bounds, no shadow
+        if (shadowCoord.x < 0.0 || shadowCoord.x > 1.0 ||
+            shadowCoord.y < 0.0 || shadowCoord.y > 1.0 ||
+            shadowCoord.z < 0.0 || shadowCoord.z > 1.0) {
+            shadow = 1.0;
+        }
+    }
+    
+    // Debug: visualize shadow map coverage
+    if (DEBUG_SHADOWS) {
+        return vec4<f32>(shadow, shadow, shadow, 1.0);
+    }
     
     // Calculate lighting based on surface normal
     let sunDir = normalize(vec3<f32>(terrainData.sunDirX, terrainData.sunDirY, terrainData.sunDirZ));
@@ -153,8 +196,8 @@ fn main(@location(0) fragCoord: vec2<f32>, @location(1) color: vec4<f32>, @locat
         let desaturated = mix(color.rgb, vec3<f32>(gray), 0.5);
         litColor = desaturated * (ambient + ndotl * 0.1);
     } else {
-        // Day: ambient + diffuse lighting
-        let diffuse = ndotl * (1.0 - ambient) * terrainData.intensity;
+        // Day: ambient + diffuse lighting, modulated by shadow
+        let diffuse = ndotl * (1.0 - ambient) * terrainData.intensity * shadow;
         litColor = color.rgb * (ambient + diffuse);
     }
     
