@@ -25,9 +25,8 @@ const MARKER_BUFFER_SIZE = MAX_FEATURES * 40;
  * @param {Camera} camera 
  * @param {Function} shouldRenderLayer 
  * @param {TerrainLayer} terrainLayer - Optional terrain layer to render first
- * @param {Object} terrainComputeOutput - Optional output from terrain compute pipeline
  */
-export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, textureView, camera, shouldRenderLayer, terrainLayer = null, terrainComputeOutput = null) {
+export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, textureView, camera, shouldRenderLayer, terrainLayer = null) {
     const mapCommandEncoder = device.createCommandEncoder();
     
     // Get style once for all render passes
@@ -226,11 +225,6 @@ export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, text
                 renderer.tubePipeline.render(colorPass, tileBuffers, layer, renderZoom);
             }
         }
-    }
-    
-    // Render GPU compute-based terrain-draped geometry (roads, lines with adaptive tessellation)
-    if (terrainComputeOutput) {
-        renderer.renderComputeOutput(colorPass, terrainComputeOutput);
     }
     
     // Render terrain hillshade AFTER vectors as a multiplicative overlay

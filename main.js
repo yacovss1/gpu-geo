@@ -25,7 +25,6 @@ import { PerformanceManager } from './src/core/performance.js';
 import { StyleManager } from './src/core/styleManager.js';
 import { LabelManager } from './src/rendering/labelManager.js';
 import { TerrainLayer } from './src/rendering/terrainLayer.js';
-import { createTerrainComputeManager } from './src/terrain/index.js';
 import { 
     renderMap, 
     createComputeMarkerEncoder, 
@@ -80,12 +79,6 @@ async function main() {
     // Connect terrain layer to renderer for GPU-based projection
     renderer.setTerrainLayer(terrainLayer);
 
-    // ===== Initialize Terrain Compute Manager =====
-    // GPU-based adaptive tessellation and terrain draping for lines
-    const terrainComputeManager = await createTerrainComputeManager(device);
-    // Disabled by default - enable via console: window.mapTerrain.enableCompute()
-    terrainComputeManager.setEnabled(false);
-
     // ===== Initialize TileManager =====
     // Initialize TileCoordinator for terrain-synced vector loading
     await initializeTileCoordinator();
@@ -106,7 +99,7 @@ async function main() {
     setupGlobalAPI(
         device, camera, tileManager, 
         performanceManager, styleManager,
-        renderer, terrainLayer, terrainComputeManager
+        renderer, terrainLayer
     );
 
     // ===== Load Initial Style =====
@@ -152,38 +145,6 @@ async function main() {
         // Update terrain for GPU-based vector projection
         renderer.updateTerrainForProjection(camera, camera.zoom);
 
-        // Update terrain compute resources (when terrain atlas changes)
-        if (terrainComputeManager.enabled && terrainLayer.atlasTexture) {
-            await terrainComputeManager.updateTerrainResources(
-                terrainLayer.atlasTexture,
-                renderer.terrainSampler,
-                renderer.buffers.terrainBounds
-            );
-        }
-        
-        // Execute terrain compute pipeline for line geometry
-        let terrainComputeOutput = null;
-        if (terrainComputeManager.isReady()) {
-            const centerlines = tileManager.getAllVisibleCenterlines();
-            
-            if (centerlines.length > 0) {
-                // Upload centerlines to compute pipeline
-                const formattedLines = centerlines.map(c => ({
-                    coordinates: c.coordinates,
-                    width: c.width,
-                    color: c.color,
-                    depthOffset: 0.00001
-                }));
-                terrainComputeManager.pipeline.uploadLines(formattedLines);
-                
-                // Execute compute passes
-                const computeEncoder = device.createCommandEncoder();
-                const visibleTileKeys = tileManager.getVisibleTileKeys();
-                terrainComputeOutput = terrainComputeManager.execute(computeEncoder, visibleTileKeys);
-                device.queue.submit([computeEncoder.finish()]);
-            }
-        }
-
         // Render map geometry
         const mapEncoder = renderMap(
             device, renderer, 
@@ -191,8 +152,7 @@ async function main() {
             tileManager.hiddenTileBuffers, 
             textureView, camera,
             (layerId, zoom) => styleManager.shouldRenderLayer(layerId, zoom),
-            terrainLayer, // Pass terrain layer for rendering
-            terrainComputeOutput // Pass compute output for terrain-draped roads
+            terrainLayer // Pass terrain layer for rendering
         );
         device.queue.submit([mapEncoder.finish()]);
         
@@ -279,7 +239,7 @@ async function main() {
 /**
  * Setup global API for console access
  */
-function setupGlobalAPI(device, camera, tileManager, performanceManager, styleManager, renderer, terrainLayer, terrainComputeManager) {
+function setupGlobalAPI(device, camera, tileManager, performanceManager, styleManager, renderer, terrainLayer) {
     // Expose core objects
     window.device = device;
     window.camera = camera;
@@ -325,22 +285,7 @@ function setupGlobalAPI(device, camera, tileManager, performanceManager, styleMa
         },
         getSources: () => ['aws', 'mapbox'],
         getExaggeration: () => terrainLayer.exaggeration,
-        getMinZoom: () => terrainLayer.getMinDisplayZoom(),
-        // GPU Compute terrain projection controls
-        enableCompute: () => {
-            terrainComputeManager.setEnabled(true);
-            console.log('🏔️ GPU terrain compute ENABLED - roads will use adaptive tessellation');
-        },
-        disableCompute: () => {
-            terrainComputeManager.setEnabled(false);
-            console.log('🏔️ GPU terrain compute DISABLED - using CPU tessellation');
-        },
-        isComputeEnabled: () => terrainComputeManager.enabled,
-        getComputeStats: () => ({
-            enabled: terrainComputeManager.enabled,
-            initialized: terrainComputeManager.pipeline?.initialized || false,
-            tilesWithCenterlines: terrainComputeManager.processedCenterlines.size
-        })
+        getMinZoom: () => terrainLayer.getMinDisplayZoom()
     };
     
     // Style API

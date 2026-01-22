@@ -3,7 +3,6 @@ import {
     edgeDetectionVertexShaderCode, edgeDetectionFragmentShaderCode,
     debugVertexShaderCode, debugFragmentShaderCode 
 } from '../shaders/shaders.js';
-import { computeOutputVertexShader, computeOutputFragmentShader } from '../shaders/computeOutputShaders.js';
 import { GPUTextRenderer } from '../text/gpuTextRenderer.js';
 import { ShaderEffectManager } from '../core/shaderEffectManager.js';
 import { TubePipeline } from './tubePipeline.js';
@@ -18,8 +17,6 @@ let cachedShaders = {
     edgeDetectionFragment: null,
     debugVertex: null,
     debugFragment: null,
-    computeOutputVertex: null,
-    computeOutputFragment: null,
     initialized: false
 };
 
@@ -36,8 +33,6 @@ function initCachedShaders(device) {
         cachedShaders.edgeDetectionFragment = device.createShaderModule({ code: edgeDetectionFragmentShaderCode });
         cachedShaders.debugVertex = device.createShaderModule({ code: debugVertexShaderCode });
         cachedShaders.debugFragment = device.createShaderModule({ code: debugFragmentShaderCode });
-        cachedShaders.computeOutputVertex = device.createShaderModule({ code: computeOutputVertexShader });
-        cachedShaders.computeOutputFragment = device.createShaderModule({ code: computeOutputFragmentShader });
         cachedShaders.initialized = true;
     }
 }
@@ -205,58 +200,6 @@ export function createDebugTexturePipeline(device, format) {
     });
 }
 
-// Create pipeline for rendering compute output (terrain-draped geometry)
-export function createComputeOutputPipeline(device, format) {
-    initCachedShaders(device);
-    
-    // Cache bind group layout for compute output (just camera matrix)
-    if (!cachedLayouts.computeOutput) {
-        cachedLayouts.computeOutput = device.createBindGroupLayout({
-            entries: [{
-                binding: 0,
-                visibility: GPUShaderStage.VERTEX,
-                buffer: { type: 'uniform' }
-            }]
-        });
-    }
-    
-    const pipelineLayout = device.createPipelineLayout({ 
-        bindGroupLayouts: [cachedLayouts.computeOutput] 
-    });
-    
-    return device.createRenderPipeline({
-        layout: pipelineLayout,
-        vertex: {
-            module: cachedShaders.computeOutputVertex,
-            entryPoint: 'main',
-            buffers: [{
-                // Vertex layout: position(3) + normal(3) + color(4) = 10 floats = 40 bytes
-                arrayStride: 40,
-                stepMode: 'vertex',
-                attributes: [
-                    { shaderLocation: 0, offset: 0, format: 'float32x3' },  // position
-                    { shaderLocation: 1, offset: 12, format: 'float32x3' }, // normal
-                    { shaderLocation: 2, offset: 24, format: 'float32x4' }  // color
-                ]
-            }]
-        },
-        fragment: {
-            module: cachedShaders.computeOutputFragment,
-            entryPoint: 'main',
-            targets: [{ format }]
-        },
-        primitive: { 
-            topology: 'triangle-list',
-            cullMode: 'back'
-        },
-        depthStencil: {
-            format: 'depth24plus',
-            depthWriteEnabled: true,
-            depthCompare: 'less'
-        }
-    });
-}
-
 // Create edge detection bind group
 export function createEdgeDetectionBindGroup(device, pipeline, colorTexture, hiddenTexture, sampler, canvasSizeBuffer, pickedIdBuffer, zoomInfoBuffer) {
     return device.createBindGroup({
@@ -341,8 +284,6 @@ export class MapRenderer {
         this.pipelines.hiddenWithBias = createRenderPipeline(this.device, this.format, "triangle-list", true, 100);
         this.pipelines.edgeDetection = createEdgeDetectionPipeline(this.device, this.format);
         this.pipelines.debug = createDebugTexturePipeline(this.device, this.format);
-        // Compute output pipeline for terrain-draped geometry
-        this.pipelines.computeOutput = createComputeOutputPipeline(this.device, this.format);
     }
     
     async createResources(canvas, camera) {
@@ -887,33 +828,5 @@ export class MapRenderer {
         this.updateCameraTransform(camera.getMatrix());
         
         // Regular rendering code continues...
-    }
-    
-    /**
-     * Render geometry from terrain compute pipeline
-     * @param {GPURenderPassEncoder} renderPass - Active render pass
-     * @param {Object} computeOutput - Output from terrain compute pipeline
-     */
-    renderComputeOutput(renderPass, computeOutput) {
-        if (!computeOutput || !computeOutput.vertexBuffer || computeOutput.vertexCount === 0) {
-            return;
-        }
-        
-        // Create bind group for compute output if not cached
-        if (!this.bindGroups.computeOutput) {
-            this.bindGroups.computeOutput = this.device.createBindGroup({
-                layout: this.pipelines.computeOutput.getBindGroupLayout(0),
-                entries: [
-                    { binding: 0, resource: { buffer: this.buffers.uniform } }
-                ]
-            });
-        }
-        
-        renderPass.setPipeline(this.pipelines.computeOutput);
-        renderPass.setVertexBuffer(0, computeOutput.vertexBuffer);
-        renderPass.setBindGroup(0, this.bindGroups.computeOutput);
-        renderPass.draw(computeOutput.vertexCount);
-        
-        console.log(`🏔️ Rendered ${computeOutput.vertexCount} compute output vertices`);
     }
 }

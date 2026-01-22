@@ -21,10 +21,6 @@ export class TileCoordinator {
         this.terrainLoading = new Map(); // Map<key, Promise>
         this.terrainFailed = new Set();
         
-        // Workers
-        this.terrainWorker = null;
-        this.workerReady = false;
-        
         // Configuration
         this.terrainSource = 'aws';
         this.exaggeration = 1.5;
@@ -36,13 +32,9 @@ export class TileCoordinator {
     
     /**
      * Initialize the tile coordinator
-     * Note: Web Worker disabled for now due to Vite MIME type issues
-     * Using main thread fallback which works reliably
      */
     async initialize() {
-        // For now, use main thread loading (worker can be added later as optimization)
-        this.workerReady = false;
-        console.log('🏔️ TileCoordinator initialized (main thread mode)');
+        console.log('🏔️ TileCoordinator initialized');
     }
     
     /**
@@ -101,23 +93,14 @@ export class TileCoordinator {
         
         this.terrainLoading.set(key, { promise, resolve, reject });
         
-        if (this.workerReady && this.terrainWorker) {
-            // Load via worker
-            this.terrainWorker.postMessage({
-                type: 'loadTerrain',
-                z, x, y,
-                source: this.terrainSource
-            });
-        } else {
-            // Fallback: load on main thread
-            this.loadTerrainMainThread(z, x, y).then(resolve).catch(reject);
-        }
+        // Load terrain on main thread
+        this.loadTerrainMainThread(z, x, y).then(resolve).catch(reject);
         
         return promise;
     }
     
     /**
-     * Fallback terrain loading on main thread
+     * Load terrain on main thread
      */
     async loadTerrainMainThread(z, x, y) {
         const key = `${z}/${x}/${y}`;
@@ -264,13 +247,9 @@ export class TileCoordinator {
     }
     
     /**
-     * Terminate workers
+     * Cleanup resources
      */
     dispose() {
-        if (this.terrainWorker) {
-            this.terrainWorker.terminate();
-            this.terrainWorker = null;
-        }
         this.clearCache();
     }
 }
