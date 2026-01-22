@@ -17,6 +17,11 @@ import {
     getSourcePromoteId
 } from '../core/style.js';
 
+// Vertex format: position(3) + normal(3) + color(4) = 10 floats = 40 bytes
+const VERTEX_STRIDE = 10;
+// Default normal for flat surfaces (pointing up)
+const UP_NORMAL = [0, 0, 1];
+
 // Simple murmur3-like hash for strings (consistent with MapLibre's approach)
 function murmur3Hash(str) {
     let h = 0;
@@ -314,16 +319,14 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
     // Note: processedFeatures is local per parseGeoJSONFeature call, so no global dedup
     
     // Helper to generate extruded building geometry (walls + roof)
-    // 28-byte format: position(12) + visual color(16)
+    // Vertex format: position(3) + normal(3) + color(4) = 10 floats = 40 bytes
     // If terrainData is provided, buildings rise from terrain surface
     const generateExtrusion = (allCoords, outerRing, height, base, fillColor, targetVertices, targetIndices, targetOutlineIndices) => {
-        const startIndex = targetVertices.length / 7; // 7 floats per vertex
+        const startIndex = targetVertices.length / VERTEX_STRIDE;
         
         // Use zoom-dependent scaling passed from parent scope
         const heightZ = height * zoomExtrusion;
         const baseZ = base * zoomExtrusion;
-        
-        //console.log(`Building extrusion at zoom ${zoom}: ${height}m -> Z=${heightZ.toFixed(8)}`);
         
         // Generate wall quads for each edge of outer ring only
         for (let i = 0; i < outerRing.length - 1; i++) {
@@ -343,36 +346,23 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
             const terrainZ1 = terrainData ? sampleTerrainHeight(x1, y1, terrainData) : 0;
             const terrainZ2 = terrainData ? sampleTerrainHeight(x2, y2, terrainData) : 0;
             
-            // Calculate wall direction for directional lighting
+            // Calculate wall normal (perpendicular to wall, pointing outward)
             const dx = x2 - x1;
             const dy = y2 - y1;
-            const angle = Math.atan2(dy, dx);
+            const len = Math.sqrt(dx * dx + dy * dy);
+            // Normal is perpendicular to the wall edge, pointing outward (right-hand rule)
+            const wallNormal = len > 0 ? [-dy / len, dx / len, 0] : [1, 0, 0];
             
-            // Simulate sun from north-west
-            const sunAngle = Math.PI * 0.75;
-            const lightDot = Math.cos(angle - sunAngle);
-            
-            // Moderate lighting contrast (range 0.0 to 0.8)
-            const lightFactor = 0.4 + lightDot * 0.4;
-            
-            // Wall color with directional lighting
-            const wallColor = [
-                fillColor[0] * lightFactor,
-                fillColor[1] * lightFactor,
-                fillColor[2] * lightFactor,
-                fillColor[3]
-            ];
-            
-            // Wall quad vertices: 7 floats per vertex
-            // position(3) + visual color(4)
-            const vertexOffset = (targetVertices.length / 7);
+            // Wall quad vertices: position(3) + normal(3) + color(4) = 10 floats
+            const vertexOffset = (targetVertices.length / VERTEX_STRIDE);
             
             // Bottom-left, bottom-right, top-right, top-left
             // Add terrain height to base and roof heights
-            targetVertices.push(x1, y1, baseZ + terrainZ1, ...wallColor);
-            targetVertices.push(x2, y2, baseZ + terrainZ2, ...wallColor);
-            targetVertices.push(x2, y2, heightZ + terrainZ2, ...wallColor);
-            targetVertices.push(x1, y1, heightZ + terrainZ1, ...wallColor);
+            // All 4 vertices share the same wall normal
+            targetVertices.push(x1, y1, baseZ + terrainZ1, ...wallNormal, ...fillColor);
+            targetVertices.push(x2, y2, baseZ + terrainZ2, ...wallNormal, ...fillColor);
+            targetVertices.push(x2, y2, heightZ + terrainZ2, ...wallNormal, ...fillColor);
+            targetVertices.push(x1, y1, heightZ + terrainZ1, ...wallNormal, ...fillColor);
             
             // Two triangles for the wall quad
             targetIndices.push(
@@ -382,7 +372,7 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
         }
         
         // Generate roof (top polygon at height) - use ALL coords including holes
-        const roofStartIndex = targetVertices.length / 7;
+        const roofStartIndex = targetVertices.length / VERTEX_STRIDE;
         allCoords.forEach(coord => {
             const [x, y] = coord; // Coordinates already transformed!
             
@@ -395,8 +385,8 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
             // Sample terrain height for roof (building sits on terrain)
             const terrainZ = terrainData ? sampleTerrainHeight(x, y, terrainData) : 0;
             
-            // Roof uses normal fill color (not darkened)
-            targetVertices.push(x, y, heightZ + terrainZ, ...fillColor);
+            // Roof: position(3) + normal(3) + color(4) - normal points up
+            targetVertices.push(x, y, heightZ + terrainZ, ...UP_NORMAL, ...fillColor);
         });
         
         return roofStartIndex;
@@ -405,15 +395,17 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
     // Create two separate vertex arrays for visible and hidden rendering
     // NOTE: Coordinates are PRE-TRANSFORMED by vectorTileParser - use directly!
     // If terrainData is provided, bake terrain height into Z coordinate
+    // Vertex format: position(3) + normal(3) + color(4) = 10 floats
     const coordsToVertices = (coords, color, targetArray) => {
-        const vertexStartIndex = targetArray.length / 7;
+        const vertexStartIndex = targetArray.length / VERTEX_STRIDE;
         coords.forEach(coord => {
             const [x, y] = coord; // Coordinates already in Mercator clip space!
             // Sample terrain height if available, otherwise 0
             const z = terrainData ? sampleTerrainHeight(x, y, terrainData) : 0.0;
             targetArray.push(
-                x, y, z, // Position with terrain height baked in
-                ...color   // Color
+                x, y, z,       // Position with terrain height baked in
+                ...UP_NORMAL,  // Normal (pointing up for flat surfaces)
+                ...color       // Color
             );
         });
         return vertexStartIndex;
@@ -422,8 +414,9 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
     // NOTE: Coordinates are PRE-TRANSFORMED - use directly!
     // Encode feature ID and layer ID into RGBA channels for hidden buffer
     // If terrainData is provided, bake terrain height into Z coordinate
+    // Vertex format: position(3) + normal(3) + color(4) = 10 floats
     const coordsToIdVertices = (coords, featureId, targetArray, zHeight = 0.0, layerName = 'unknown') => {
-        const vertexStartIndex = targetArray.length / 7;
+        const vertexStartIndex = targetArray.length / VERTEX_STRIDE;
         
         // Encode feature ID as 16-bit across red and green channels
         // R = high byte (bits 8-15), G = low byte (bits 0-7)
@@ -432,7 +425,6 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
         const lowByte = safeId % 256;              // Green channel
         const normalizedR = highByte / 255.0;
         const normalizedG = lowByte / 255.0;
-        
         // Get proper layer ID index (0-255) using getLayerIndex
         const layerIdx = getLayerIndex(layerName);
         const normalizedB = layerIdx / 255.0;
@@ -450,7 +442,8 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                 z = zHeight + terrainZ; // Buildings rise from terrain surface
             }
             targetArray.push(
-                x, y, z,    // Position with terrain + extrusion height
+                x, y, z,       // Position with terrain + extrusion height
+                ...UP_NORMAL,  // Normal (pointing up for flat/hidden surfaces)
                 normalizedR, normalizedG, normalizedB, normalizedA  // R+G=ID, B=layerID, A=unused
             );
         });
@@ -802,7 +795,7 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                     }
                     
                     // Step 2: Generate vertices for all circles
-                    const circleStartIdx = fillVertices.length / 7;
+                    const circleStartIdx = fillVertices.length / VERTEX_STRIDE;
                     for (let i = 0; i < circles.length; i++) {
                         const { cx, cy, perpX, perpY, terrainZ } = circles[i];
                         
@@ -820,24 +813,14 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                             // Add terrain height to tube position
                             const vz = (baseZ + heightZ) / 2 + verticalOffset + terrainZ;
                             
-                            // Calculate lighting based on surface normal
+                            // Calculate surface normal for lighting
                             const normalX = perpX * Math.cos(angle);
                             const normalY = perpY * Math.cos(angle);
                             const normalZ = Math.sin(angle);
+                            const tubeNormal = [normalX, normalY, normalZ];
                             
-                            const normalAngle = Math.atan2(normalY, normalX);
-                            const sunAngle = Math.PI * 0.75;
-                            const lightDot = Math.cos(normalAngle - sunAngle) * 0.7 + normalZ * 0.3;
-                            const lightFactor = 0.5 + lightDot * 0.3;
-                            
-                            const color = [
-                                _borderColor[0] * lightFactor,
-                                _borderColor[1] * lightFactor,
-                                _borderColor[2] * lightFactor,
-                                _borderColor[3]
-                            ];
-                            
-                            fillVertices.push(vx, vy, vz, ...color);
+                            // Push vertex: position(3) + normal(3) + color(4)
+                            fillVertices.push(vx, vy, vz, ...tubeNormal, ..._borderColor);
                         }
                     }
                     
@@ -909,28 +892,31 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                     
                     // Now create the tube geometry using the left/right edges as a closed polygon
                     // Bottom face, top face, and walls around perimeter
-                    const tubeStartIndex = fillVertices.length / 7;
+                    const tubeStartIndex = fillVertices.length / VERTEX_STRIDE;
                     
                     // Bottom face vertices (left edge + right edge reversed)
+                    // Bottom faces point down: normal = [0, 0, -1]
+                    const DOWN_NORMAL = [0, 0, -1];
                     const bottomVerts = [];
                     leftEdge.forEach(([x, y, tz]) => {
-                        fillVertices.push(x, y, baseZ + tz, ..._borderColor);
-                        bottomVerts.push(fillVertices.length / 7 - 1);
+                        fillVertices.push(x, y, baseZ + tz, ...DOWN_NORMAL, ..._borderColor);
+                        bottomVerts.push(fillVertices.length / VERTEX_STRIDE - 1);
                     });
                     rightEdge.slice().reverse().forEach(([x, y, tz]) => {
-                        fillVertices.push(x, y, baseZ + tz, ..._borderColor);
-                        bottomVerts.push(fillVertices.length / 7 - 1);
+                        fillVertices.push(x, y, baseZ + tz, ...DOWN_NORMAL, ..._borderColor);
+                        bottomVerts.push(fillVertices.length / VERTEX_STRIDE - 1);
                     });
                     
                     // Top face vertices (same outline at heightZ + terrain)
+                    // Top faces point up: normal = [0, 0, 1]
                     const topVerts = [];
                     leftEdge.forEach(([x, y, tz]) => {
-                        fillVertices.push(x, y, heightZ + tz, ..._borderColor);
-                        topVerts.push(fillVertices.length / 7 - 1);
+                        fillVertices.push(x, y, heightZ + tz, ...UP_NORMAL, ..._borderColor);
+                        topVerts.push(fillVertices.length / VERTEX_STRIDE - 1);
                     });
                     rightEdge.slice().reverse().forEach(([x, y, tz]) => {
-                        fillVertices.push(x, y, heightZ + tz, ..._borderColor);
-                        topVerts.push(fillVertices.length / 7 - 1);
+                        fillVertices.push(x, y, heightZ + tz, ...UP_NORMAL, ..._borderColor);
+                        topVerts.push(fillVertices.length / VERTEX_STRIDE - 1);
                     });
                     
                     // Triangulate bottom and top faces using earcut
@@ -941,32 +927,25 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                     bottomIndices.forEach(idx => fillIndices.push(bottomVerts[idx]));
                     bottomIndices.forEach(idx => fillIndices.push(topVerts[idx]));  // Same triangulation for top
                     
-                    // Create walls around the perimeter with lighting
+                    // Create walls around the perimeter with proper normals
                     const createWall = (edge, isLeftSide) => {
                         for (let i = 0; i < edge.length - 1; i++) {
                             const [x1, y1, tz1] = edge[i];
                             const [x2, y2, tz2] = edge[i + 1];
                             
-                            // Calculate lighting
+                            // Calculate wall normal (perpendicular to wall edge, pointing outward)
                             const dx = x2 - x1, dy = y2 - y1;
-                            const angle = Math.atan2(dy, dx);
-                            const sunAngle = Math.PI * 0.75;
-                            const lightDot = Math.cos(angle - sunAngle) * (isLeftSide ? 1 : -1);
-                            const lightFactor = 0.4 + lightDot * 0.4;
+                            const len = Math.sqrt(dx * dx + dy * dy);
+                            // Left wall normals point left, right wall normals point right
+                            const sign = isLeftSide ? 1 : -1;
+                            const wallNormal = len > 0 ? [-dy / len * sign, dx / len * sign, 0] : [1, 0, 0];
                             
-                            const wallColor = [
-                                _borderColor[0] * lightFactor,
-                                _borderColor[1] * lightFactor,
-                                _borderColor[2] * lightFactor,
-                                _borderColor[3]
-                            ];
-                            
-                            const vOff = fillVertices.length / 7;
+                            const vOff = fillVertices.length / VERTEX_STRIDE;
                             // Add terrain height to wall vertices
-                            fillVertices.push(x1, y1, baseZ + tz1, ...wallColor);
-                            fillVertices.push(x2, y2, baseZ + tz2, ...wallColor);
-                            fillVertices.push(x2, y2, heightZ + tz2, ...wallColor);
-                            fillVertices.push(x1, y1, heightZ + tz1, ...wallColor);
+                            fillVertices.push(x1, y1, baseZ + tz1, ...wallNormal, ..._borderColor);
+                            fillVertices.push(x2, y2, baseZ + tz2, ...wallNormal, ..._borderColor);
+                            fillVertices.push(x2, y2, heightZ + tz2, ...wallNormal, ..._borderColor);
+                            fillVertices.push(x1, y1, heightZ + tz1, ...wallNormal, ..._borderColor);
                             
                             fillIndices.push(vOff, vOff + 1, vOff + 2, vOff, vOff + 2, vOff + 3);
                         }
@@ -979,7 +958,7 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
             } else {
                 // Regular flat 2D line rendering - sample terrain at CENTERLINE for each vertex
                 // This prevents Z-fighting: left and right edges share the same terrain height
-                const lineStartIndex = fillVertices.length / 7;
+                const lineStartIndex = fillVertices.length / VERTEX_STRIDE;
                 for (let i = 0; i < tessellated.vertices.length; i += 2) {
                     const x = tessellated.vertices[i];
                     const y = tessellated.vertices[i + 1];
@@ -988,9 +967,10 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                     const centerlineY = tessellated.centerlines[i + 1];
                     const z = terrainData ? sampleTerrainHeight(centerlineX, centerlineY, terrainData) : 0.0;
                     fillVertices.push(
-                        x,     // x (edge position)
-                        y,     // y (edge position)
-                        z,     // z sampled at centerline (terrain only)
+                        x,             // x (edge position)
+                        y,             // y (edge position)
+                        z,             // z sampled at centerline (terrain only)
+                        ...UP_NORMAL,  // Normal (flat lines point up)
                         ..._borderColor               // color
                     );
                 }
@@ -1001,7 +981,7 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                 }
                 
                 // Generate hidden buffer for line picking (CRITICAL - was missing!)
-                const hiddenLineStartIndex = hiddenVertices.length / 7;
+                const hiddenLineStartIndex = hiddenVertices.length / VERTEX_STRIDE;
                 const safeId = Math.max(1, Math.min(65534, clampedFeatureId || 1));
                 const highByte = Math.floor(safeId / 256);
                 const lowByte = safeId % 256;
@@ -1019,6 +999,7 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                         tessellated.vertices[i],     // x
                         tessellated.vertices[i + 1], // y
                         z,                           // z from centerline terrain
+                        ...UP_NORMAL,                // Normal
                         normalizedR, normalizedG, normalizedB, 1.0  // R+G=ID, B=layerID
                     );
                 }
@@ -1090,7 +1071,7 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                 const lineTessellated = tessellateLine(transformedLine, multiWorldWidth, multiLineCap, multiLineJoin, multiMiterLimit);
                 
                 // Add tessellated vertices with terrain height sampled at CENTERLINE
-                const multiLineStartIndex = fillVertices.length / 7;
+                const multiLineStartIndex = fillVertices.length / VERTEX_STRIDE;
                 for (let i = 0; i < lineTessellated.vertices.length; i += 2) {
                     const x = lineTessellated.vertices[i];
                     const y = lineTessellated.vertices[i + 1];
@@ -1098,7 +1079,7 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                     const centerlineX = lineTessellated.centerlines[i];
                     const centerlineY = lineTessellated.centerlines[i + 1];
                     const z = terrainData ? sampleTerrainHeight(centerlineX, centerlineY, terrainData) : 0.0;
-                    fillVertices.push(x, y, z, ..._borderColor);
+                    fillVertices.push(x, y, z, ...UP_NORMAL, ..._borderColor);
                 }
                 
                 // Add triangle indices
@@ -1107,14 +1088,14 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                 });
                 
                 // Generate hidden buffer for line picking with terrain height at centerline
-                const hiddenMultiLineStartIndex = hiddenVertices.length / 7;
+                const hiddenMultiLineStartIndex = hiddenVertices.length / VERTEX_STRIDE;
                 for (let i = 0; i < lineTessellated.vertices.length; i += 2) {
                     const x = lineTessellated.vertices[i];
                     const y = lineTessellated.vertices[i + 1];
                     const centerlineX = lineTessellated.centerlines[i];
                     const centerlineY = lineTessellated.centerlines[i + 1];
                     const z = terrainData ? sampleTerrainHeight(centerlineX, centerlineY, terrainData) : 0.0;
-                    hiddenVertices.push(x, y, z, multiNormalizedR, multiNormalizedG, multiNormalizedB, 1.0);
+                    hiddenVertices.push(x, y, z, ...UP_NORMAL, multiNormalizedR, multiNormalizedG, multiNormalizedB, 1.0);
                 }
                 
                 // Add hidden indices for line picking
@@ -1126,7 +1107,7 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
         case 'Point':
             const point = feature.geometry.coordinates; // Already transformed!
             const pointZ = terrainData ? sampleTerrainHeight(point[0], point[1], terrainData) : 0.0;
-            fillVertices.push(point[0], point[1], pointZ, ..._fillColor);
+            fillVertices.push(point[0], point[1], pointZ, ...UP_NORMAL, ..._fillColor);
             break;
         default:
             // Unsupported geometry type - skip silently

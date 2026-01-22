@@ -98,7 +98,7 @@ export class ShaderEffectManager {
                 },
                 {
                     binding: 2,
-                    visibility: GPUShaderStage.VERTEX,
+                    visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
                     buffer: { type: "uniform" }
                 }
             ]
@@ -114,10 +114,12 @@ export class ShaderEffectManager {
                 module: vertexModule,
                 entryPoint: "main",
                 buffers: [{
-                    arrayStride: 28, // 3 floats (position) + 4 floats (color)
+                    // Vertex format: position(3) + normal(3) + color(4) = 10 floats = 40 bytes
+                    arrayStride: 40,
                     attributes: [
-                        { shaderLocation: 0, offset: 0, format: 'float32x3' },  // position
-                        { shaderLocation: 1, offset: 12, format: 'float32x4' }  // color
+                        { shaderLocation: 0, offset: 0, format: 'float32x3' },   // position
+                        { shaderLocation: 1, offset: 12, format: 'float32x3' },  // normal
+                        { shaderLocation: 2, offset: 24, format: 'float32x4' }   // color
                     ]
                 }],
             },
@@ -178,7 +180,7 @@ export class ShaderEffectManager {
                 },
                 {
                     binding: 2,
-                    visibility: GPUShaderStage.VERTEX,
+                    visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
                     buffer: { type: "uniform" }
                 }
             ]
@@ -194,10 +196,12 @@ export class ShaderEffectManager {
                 module: vertexModule,
                 entryPoint: "main",
                 buffers: [{
-                    arrayStride: 28,
+                    // Vertex format: position(3) + normal(3) + color(4) = 10 floats = 40 bytes
+                    arrayStride: 40,
                     attributes: [
-                        { shaderLocation: 0, offset: 0, format: 'float32x3' },
-                        { shaderLocation: 1, offset: 12, format: 'float32x4' }
+                        { shaderLocation: 0, offset: 0, format: 'float32x3' },   // position
+                        { shaderLocation: 1, offset: 12, format: 'float32x3' },  // normal
+                        { shaderLocation: 2, offset: 24, format: 'float32x4' }   // color
                     ]
                 }],
             },
@@ -263,7 +267,7 @@ export class ShaderEffectManager {
                 },
                 {
                     binding: 2,
-                    visibility: GPUShaderStage.VERTEX,
+                    visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
                     buffer: { type: "uniform" }
                 }
             ]
@@ -279,10 +283,12 @@ export class ShaderEffectManager {
                 module: vertexModule,
                 entryPoint: "main",
                 buffers: [{
-                    arrayStride: 28,
+                    // Vertex format: position(3) + normal(3) + color(4) = 10 floats = 40 bytes
+                    arrayStride: 40,
                     attributes: [
-                        { shaderLocation: 0, offset: 0, format: 'float32x3' },
-                        { shaderLocation: 1, offset: 12, format: 'float32x4' }
+                        { shaderLocation: 0, offset: 0, format: 'float32x3' },   // position
+                        { shaderLocation: 1, offset: 12, format: 'float32x3' },  // normal
+                        { shaderLocation: 2, offset: 24, format: 'float32x4' }   // color
                     ]
                 }],
             },

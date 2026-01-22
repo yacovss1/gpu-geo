@@ -60,7 +60,7 @@ fn sampleTerrainHeight(clipX: f32, clipY: f32) -> f32 {
 }
 
 @vertex
-fn main(@location(0) inPosition: vec3<f32>, @location(1) inColor: vec4<f32>) -> VertexOutput {
+fn main(@location(0) inPosition: vec3<f32>, @location(1) inNormal: vec3<f32>, @location(2) inColor: vec4<f32>) -> VertexOutput {
     var output: VertexOutput;
     
     // Store world position for fragment shader

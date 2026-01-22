@@ -1,14 +1,17 @@
-// Vector layer shaders with GPU terrain projection
+// Vector layer shaders with GPU terrain projection and global lighting
+// Vertex format: position(3) + normal(3) + color(4) = 10 floats = 40 bytes
 
 export const vertexShaderCode = `
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) fragCoord: vec2<f32>,
     @location(1) color: vec4<f32>,
-    @location(2) worldZ: f32
+    @location(2) worldZ: f32,
+    @location(3) normal: vec3<f32>
 };
 
-struct TerrainBounds {
+struct TerrainAndLighting {
+    // Terrain bounds (8 floats)
     minX: f32,
     minY: f32,
     maxX: f32,
@@ -16,25 +19,34 @@ struct TerrainBounds {
     exaggeration: f32,
     enabled: f32,
     _pad1: f32,
-    _pad2: f32
+    _pad2: f32,
+    // Lighting data (8 floats)
+    sunDirX: f32,
+    sunDirY: f32,
+    sunDirZ: f32,
+    intensity: f32,
+    ambientR: f32,
+    ambientG: f32,
+    ambientB: f32,
+    isNight: f32
 };
 
 @group(0) @binding(0) var<uniform> uniforms: mat4x4<f32>;
 
-// Terrain data in bind group 1 (optional - for GPU terrain projection)
+// Terrain and lighting data in bind group 1
 @group(1) @binding(0) var terrainTexture: texture_2d<f32>;
 @group(1) @binding(1) var terrainSampler: sampler;
-@group(1) @binding(2) var<uniform> terrainBounds: TerrainBounds;
+@group(1) @binding(2) var<uniform> terrainData: TerrainAndLighting;
 
 fn sampleTerrainHeight(clipX: f32, clipY: f32) -> f32 {
-    if (terrainBounds.enabled < 0.5) {
+    if (terrainData.enabled < 0.5) {
         return 0.0;
     }
     
     // Check if position is within terrain bounds (with small margin)
     let margin = 0.001;
-    if (clipX < terrainBounds.minX - margin || clipX > terrainBounds.maxX + margin ||
-        clipY < terrainBounds.minY - margin || clipY > terrainBounds.maxY + margin) {
+    if (clipX < terrainData.minX - margin || clipX > terrainData.maxX + margin ||
+        clipY < terrainData.minY - margin || clipY > terrainData.maxY + margin) {
         return 0.0;
     }
     
@@ -44,8 +56,8 @@ fn sampleTerrainHeight(clipX: f32, clipY: f32) -> f32 {
     let uvScale = 256.0; // Lower = more quantization = less z-fighting but coarser terrain
     
     // Convert clip coords to UV (0-1)
-    let rawU = (clipX - terrainBounds.minX) / (terrainBounds.maxX - terrainBounds.minX);
-    let rawV = 1.0 - (clipY - terrainBounds.minY) / (terrainBounds.maxY - terrainBounds.minY);
+    let rawU = (clipX - terrainData.minX) / (terrainData.maxX - terrainData.minX);
+    let rawV = 1.0 - (clipY - terrainData.minY) / (terrainData.maxY - terrainData.minY);
     
     // Quantize and clamp
     let u = clamp(floor(rawU * uvScale) / uvScale, 0.001, 0.999);
@@ -64,11 +76,23 @@ fn sampleTerrainHeight(clipX: f32, clipY: f32) -> f32 {
     let height = clamp(rawHeight, 0.0, 9000.0);
     
     // Scale height to clip space
-    return (height / 50000000.0) * terrainBounds.exaggeration;
+    return (height / 50000000.0) * terrainData.exaggeration;
+}
+
+// Calculate lighting factor for a surface
+fn calculateLighting(normal: vec3<f32>) -> f32 {
+    let sunDir = normalize(vec3<f32>(terrainData.sunDirX, terrainData.sunDirY, terrainData.sunDirZ));
+    let ambient = (terrainData.ambientR + terrainData.ambientG + terrainData.ambientB) / 3.0;
+    
+    // Diffuse lighting (how much surface faces the sun)
+    let ndotl = max(dot(normal, sunDir), 0.0);
+    
+    // Combine ambient + diffuse, scaled by intensity
+    return (ambient + ndotl * (1.0 - ambient)) * terrainData.intensity;
 }
 
 @vertex
-fn main(@location(0) inPosition: vec3<f32>, @location(1) inColor: vec4<f32>) -> VertexOutput {
+fn main(@location(0) inPosition: vec3<f32>, @location(1) inNormal: vec3<f32>, @location(2) inColor: vec4<f32>) -> VertexOutput {
     var output: VertexOutput;
     
     // Check if Z is already set (CPU-baked terrain from centerline)
@@ -90,72 +114,105 @@ fn main(@location(0) inPosition: vec3<f32>, @location(1) inColor: vec4<f32>) -> 
     output.color = inColor;
     output.worldZ = inPosition.z + terrainHeight;
     
+    // Pass normal to fragment shader for lighting calculation
+    output.normal = inNormal;
+    
     return output;
 }
 `;
 
 export const fragmentShaderCode = `
+struct TerrainAndLighting {
+    minX: f32, minY: f32, maxX: f32, maxY: f32,
+    exaggeration: f32, enabled: f32, _pad1: f32, _pad2: f32,
+    sunDirX: f32, sunDirY: f32, sunDirZ: f32, intensity: f32,
+    ambientR: f32, ambientG: f32, ambientB: f32, isNight: f32
+};
+
+@group(1) @binding(2) var<uniform> terrainData: TerrainAndLighting;
+
+// Debug flag: set to true to visualize normals as colors
+const DEBUG_NORMALS: bool = false;
+
 @fragment
-fn main(@location(0) fragCoord: vec2<f32>, @location(1) color: vec4<f32>, @location(2) worldZ: f32) -> @location(0) vec4<f32> {
-    // Just use the color as-is - walls are already darkened in the geometry
-    return color;
+fn main(@location(0) fragCoord: vec2<f32>, @location(1) color: vec4<f32>, @location(2) worldZ: f32, @location(3) normal: vec3<f32>) -> @location(0) vec4<f32> {
+    // Normalize the interpolated normal
+    let n = normalize(normal);
+    
+    // Calculate lighting based on surface normal
+    let sunDir = normalize(vec3<f32>(terrainData.sunDirX, terrainData.sunDirY, terrainData.sunDirZ));
+    let ambient = vec3<f32>(terrainData.ambientR, terrainData.ambientG, terrainData.ambientB);
+    
+    // Diffuse lighting: how much surface faces the sun
+    let ndotl = max(dot(n, sunDir), 0.0);
+    
+    var litColor: vec3<f32>;
+    if (terrainData.isNight > 0.5) {
+        // Night: use ambient as base, reduce saturation, dim diffuse
+        let gray = dot(color.rgb, vec3<f32>(0.299, 0.587, 0.114));
+        let desaturated = mix(color.rgb, vec3<f32>(gray), 0.5);
+        litColor = desaturated * (ambient + ndotl * 0.1);
+    } else {
+        // Day: ambient + diffuse lighting
+        let diffuse = ndotl * (1.0 - ambient) * terrainData.intensity;
+        litColor = color.rgb * (ambient + diffuse);
+    }
+    
+    return vec4<f32>(litColor, color.a);
 }
 `;
 
 export const hiddenFragmentShaderCode = `
 @fragment
-fn main(@location(0) fragCoord: vec2<f32>, @location(1) color: vec4<f32>, @location(2) worldZ: f32) -> @location(0) vec4<f32> {
+fn main(@location(0) fragCoord: vec2<f32>, @location(1) color: vec4<f32>, @location(2) worldZ: f32, @location(3) normal: vec3<f32>) -> @location(0) vec4<f32> {
     // color.r = Feature ID high byte
     // color.g = Feature ID low byte
     // color.b = Layer ID
     // color.a = Pickable flag
+    // (normal is ignored for picking - just pass through encoded ID)
     return color;
 }
 `;
 
 // Hidden buffer vertex shader - MUST apply SAME transforms as visible rendering
 // This ensures the 2D screen position matches exactly between visible and hidden
+// Vertex format: position(3) + normal(3) + color(4) = 10 floats = 40 bytes
 export const hiddenVertexShaderCode = `
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) fragCoord: vec2<f32>,
     @location(1) color: vec4<f32>,
-    @location(2) worldZ: f32
+    @location(2) worldZ: f32,
+    @location(3) normal: vec3<f32>
 };
 
-struct TerrainBounds {
-    minX: f32,
-    minY: f32,
-    maxX: f32,
-    maxY: f32,
-    exaggeration: f32,
-    enabled: f32,
-    _pad1: f32,
-    _pad2: f32
+struct TerrainAndLighting {
+    minX: f32, minY: f32, maxX: f32, maxY: f32,
+    exaggeration: f32, enabled: f32, _pad1: f32, _pad2: f32,
+    sunDirX: f32, sunDirY: f32, sunDirZ: f32, intensity: f32,
+    ambientR: f32, ambientG: f32, ambientB: f32, isNight: f32
 };
 
 @group(0) @binding(0) var<uniform> uniforms: mat4x4<f32>;
 
-// Terrain data in bind group 1 (optional - for GPU terrain projection)
+// Terrain data in bind group 1
 @group(1) @binding(0) var terrainTexture: texture_2d<f32>;
 @group(1) @binding(1) var terrainSampler: sampler;
-@group(1) @binding(2) var<uniform> terrainBounds: TerrainBounds;
+@group(1) @binding(2) var<uniform> terrainData: TerrainAndLighting;
 
 fn sampleTerrainHeight(clipX: f32, clipY: f32) -> f32 {
-    if (terrainBounds.enabled < 0.5) {
+    if (terrainData.enabled < 0.5) {
         return 0.0;
     }
     
-    // Check if position is within terrain bounds (with small margin)
     let margin = 0.001;
-    if (clipX < terrainBounds.minX - margin || clipX > terrainBounds.maxX + margin ||
-        clipY < terrainBounds.minY - margin || clipY > terrainBounds.maxY + margin) {
+    if (clipX < terrainData.minX - margin || clipX > terrainData.maxX + margin ||
+        clipY < terrainData.minY - margin || clipY > terrainData.maxY + margin) {
         return 0.0;
     }
     
-    // Convert clip coords to UV (0-1) and clamp to valid range
-    let u = clamp((clipX - terrainBounds.minX) / (terrainBounds.maxX - terrainBounds.minX), 0.001, 0.999);
-    let v = clamp(1.0 - (clipY - terrainBounds.minY) / (terrainBounds.maxY - terrainBounds.minY), 0.001, 0.999);
+    let u = clamp((clipX - terrainData.minX) / (terrainData.maxX - terrainData.minX), 0.001, 0.999);
+    let v = clamp(1.0 - (clipY - terrainData.minY) / (terrainData.maxY - terrainData.minY), 0.001, 0.999);
     
     let pixel = textureSampleLevel(terrainTexture, terrainSampler, vec2<f32>(u, v), 0.0);
     
@@ -163,19 +220,15 @@ fn sampleTerrainHeight(clipX: f32, clipY: f32) -> f32 {
     let g = pixel.g * 255.0;
     let b = pixel.b * 255.0;
     let rawHeight = (r * 256.0 + g + b / 256.0) - 32768.0;
-    
-    // Clamp height to reasonable range (0 to 9000m - slightly above Everest)
     let height = clamp(rawHeight, 0.0, 9000.0);
     
-    return (height / 50000000.0) * terrainBounds.exaggeration;
+    return (height / 50000000.0) * terrainData.exaggeration;
 }
 
 @vertex
-fn main(@location(0) inPosition: vec3<f32>, @location(1) inColor: vec4<f32>) -> VertexOutput {
+fn main(@location(0) inPosition: vec3<f32>, @location(1) inNormal: vec3<f32>, @location(2) inColor: vec4<f32>) -> VertexOutput {
     var output: VertexOutput;
     
-    // Check if Z is already set (CPU-baked terrain from centerline)
-    // If so, skip GPU terrain sampling to avoid Z-fighting
     var terrainHeight = 0.0;
     if (abs(inPosition.z) < 0.0000001) {
         terrainHeight = sampleTerrainHeight(inPosition.x, inPosition.y);
@@ -187,6 +240,7 @@ fn main(@location(0) inPosition: vec3<f32>, @location(1) inColor: vec4<f32>) -> 
     output.fragCoord = output.position.xy;
     output.color = inColor;
     output.worldZ = inPosition.z + terrainHeight;
+    output.normal = inNormal; // Pass through (not used for picking)
     
     return output;
 }

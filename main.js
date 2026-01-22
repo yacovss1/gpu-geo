@@ -288,6 +288,55 @@ function setupGlobalAPI(device, camera, tileManager, performanceManager, styleMa
         getMinZoom: () => terrainLayer.getMinDisplayZoom()
     };
     
+    // Lighting API (global illumination for day/night)
+    window.mapLighting = {
+        // Set time of day (0-24 hours)
+        setTime: (hour) => {
+            renderer.setTimeOfDay(hour);
+            console.log(`☀️ Time set to ${hour}:00`);
+        },
+        // Quick presets
+        dawn: () => {
+            renderer.setTimeOfDay(6);
+            console.log('🌅 Dawn lighting');
+        },
+        morning: () => {
+            renderer.setTimeOfDay(9);
+            console.log('☀️ Morning lighting');
+        },
+        noon: () => {
+            renderer.setTimeOfDay(12);
+            console.log('☀️ Noon lighting');
+        },
+        afternoon: () => {
+            renderer.setTimeOfDay(15);
+            console.log('☀️ Afternoon lighting');
+        },
+        sunset: () => {
+            renderer.setTimeOfDay(18);
+            console.log('🌅 Sunset lighting');
+        },
+        night: () => {
+            renderer.setTimeOfDay(22);
+            console.log('🌙 Night lighting');
+        },
+        // Manual control
+        setSunDirection: (x, y, z) => {
+            renderer.setLighting({ sunDirection: [x, y, z] });
+            console.log(`☀️ Sun direction: (${x.toFixed(2)}, ${y.toFixed(2)}, ${z.toFixed(2)})`);
+        },
+        setAmbient: (r, g, b) => {
+            renderer.setLighting({ ambientColor: [r, g, b] });
+            console.log(`💡 Ambient: (${r.toFixed(2)}, ${g.toFixed(2)}, ${b.toFixed(2)})`);
+        },
+        setIntensity: (intensity) => {
+            renderer.setLighting({ intensity });
+            console.log(`💡 Intensity: ${intensity.toFixed(2)}`);
+        },
+        // Get current state
+        getState: () => renderer.getLighting()
+    };
+    
     // Style API
     window.mapStyle = {
         setStyle: async (style) => {

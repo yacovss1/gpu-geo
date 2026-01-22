@@ -22,9 +22,17 @@ let cachedShaders = {
 
 let cachedLayouts = {};
 
+// Force shader recompilation (call when shader code changes)
+export function clearShaderCache() {
+    cachedShaders.initialized = false;
+    cachedLayouts = {};
+    console.log('🔄 Shader cache cleared');
+}
+
 // Initialize all shader modules that will be used
 function initCachedShaders(device) {
     if (!cachedShaders.initialized) {
+        console.log('🔧 Compiling shaders with 40-byte vertex stride (pos3+normal3+color4)');
         cachedShaders.vertex = device.createShaderModule({ code: vertexShaderCode });
         cachedShaders.fragment = device.createShaderModule({ code: fragmentShaderCode });
         cachedShaders.hiddenVertex = device.createShaderModule({ code: hiddenVertexShaderCode });
@@ -72,7 +80,7 @@ export function createRenderPipeline(device, format, topology, isHidden = false,
                 },
                 {
                     binding: 2,
-                    visibility: GPUShaderStage.VERTEX,
+                    visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
                     buffer: { type: "uniform" }
                 }
             ]
@@ -89,10 +97,12 @@ export function createRenderPipeline(device, format, topology, isHidden = false,
             module: isHidden ? cachedShaders.hiddenVertex : cachedShaders.vertex,
             entryPoint: "main",
             buffers: [{
-                arrayStride: 28,
+                // Vertex format: position(3) + normal(3) + color(4) = 10 floats = 40 bytes
+                arrayStride: 40,
                 attributes: [
-                    { shaderLocation: 0, offset: 0, format: 'float32x3' },
-                    { shaderLocation: 1, offset: 12, format: 'float32x4' }
+                    { shaderLocation: 0, offset: 0, format: 'float32x3' },   // position
+                    { shaderLocation: 1, offset: 12, format: 'float32x3' },  // normal
+                    { shaderLocation: 2, offset: 24, format: 'float32x4' }   // color
                 ]
             }],
         },
@@ -251,6 +261,23 @@ export class MapRenderer {
         // Terrain layer reference (set via setTerrainLayer)
         this.terrainLayer = null;
         
+        // Global lighting state
+        this.lighting = {
+            // Sun direction (normalized, in world space: +X=east, +Y=north, +Z=up)
+            // Good horizontal component to light building walls
+            sunDirection: [0.6, 0.5, 0.5],  // Default: from southeast, 45 degree elevation
+            // Ambient light color (always present, shadows)
+            ambientColor: [0.3, 0.35, 0.45],  // Slightly blue for cool shadows
+            // Diffuse light color (direct sunlight)
+            diffuseColor: [1.0, 0.95, 0.85],  // Warm sunlight
+            // Overall light intensity (0-1)
+            intensity: 1.0,
+            // Time of day (0-24, for presets)
+            timeOfDay: 12,
+            // Is nighttime
+            isNight: false
+        };
+        
         // Initialize shader effect manager
         this.effectManager = new ShaderEffectManager(device);
         this.effectBindGroups = new Map(); // Cache bind groups for effects
@@ -267,6 +294,9 @@ export class MapRenderer {
     }
     
     initializePipelines() {
+        // Clear cached layouts to ensure fresh creation (important for hot reload)
+        cachedLayouts = {};
+        
         // Create main rendering pipelines
         // Regular fill pipeline - depth tested for 3D geometry
         this.pipelines.fill = createRenderPipeline(this.device, this.format, "triangle-list", false, 0);
@@ -369,17 +399,22 @@ export class MapRenderer {
             [1, 1]
         );
         
-        // Create terrain bounds uniform buffer (32 bytes = 8 floats)
+        // Create terrain bounds uniform buffer (64 bytes = 16 floats)
+        // Layout: terrainBounds (8 floats) + lighting (8 floats)
         this.buffers.terrainBounds = this.device.createBuffer({
-            size: 32,
+            size: 64,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
         });
-        // Initialize with disabled state
+        // Initialize with disabled terrain and default lighting
         this.device.queue.writeBuffer(this.buffers.terrainBounds, 0, new Float32Array([
+            // Terrain bounds (8 floats)
             -1, -1, 1, 1,  // minX, minY, maxX, maxY
             1.5,           // exaggeration
             0,             // enabled (0 = disabled)
-            0, 0           // padding
+            0, 0,          // padding
+            // Lighting data (8 floats)
+            0.5, 0.5, 0.7, 1.0,    // sunDirection.xyz, intensity
+            0.3, 0.35, 0.45, 0.0,  // ambientColor.rgb, isNight (0 = day)
         ]));
         
         // Create bind groups - separate camera (group 0) and terrain (group 1)
@@ -828,5 +863,116 @@ export class MapRenderer {
         this.updateCameraTransform(camera.getMatrix());
         
         // Regular rendering code continues...
+    }
+    
+    /**
+     * Set global lighting parameters
+     * @param {Object} options - Lighting options
+     */
+    setLighting(options) {
+        if (options.sunDirection) {
+            // Normalize sun direction
+            const [x, y, z] = options.sunDirection;
+            const len = Math.sqrt(x*x + y*y + z*z);
+            this.lighting.sunDirection = [x/len, y/len, z/len];
+        }
+        if (options.ambientColor) {
+            this.lighting.ambientColor = options.ambientColor;
+        }
+        if (options.diffuseColor) {
+            this.lighting.diffuseColor = options.diffuseColor;
+        }
+        if (options.intensity !== undefined) {
+            this.lighting.intensity = Math.max(0, Math.min(1, options.intensity));
+        }
+        if (options.timeOfDay !== undefined) {
+            this.lighting.timeOfDay = options.timeOfDay;
+        }
+        if (options.isNight !== undefined) {
+            this.lighting.isNight = options.isNight;
+        }
+        
+        // Update the lighting portion of the terrain bounds buffer
+        this.updateLightingBuffer();
+    }
+    
+    /**
+     * Update lighting data in GPU buffer
+     */
+    updateLightingBuffer() {
+        const lightData = new Float32Array([
+            this.lighting.sunDirection[0],
+            this.lighting.sunDirection[1],
+            this.lighting.sunDirection[2],
+            this.lighting.intensity,
+            this.lighting.ambientColor[0],
+            this.lighting.ambientColor[1],
+            this.lighting.ambientColor[2],
+            this.lighting.isNight ? 1.0 : 0.0
+        ]);
+        // Write to offset 32 (after terrain bounds data)
+        this.device.queue.writeBuffer(this.buffers.terrainBounds, 32, lightData);
+    }
+    
+    /**
+     * Set time of day with lighting presets
+     * @param {number} hour - Hour of day (0-24)
+     */
+    setTimeOfDay(hour) {
+        this.lighting.timeOfDay = hour;
+        
+        // Calculate sun position based on hour
+        // Simplified: sun rises in east, sets in west
+        // hour 6 = sunrise (east), hour 12 = noon (overhead-ish), hour 18 = sunset (west)
+        const sunAngle = ((hour - 6) / 12) * Math.PI; // 0 at sunrise, PI at sunset
+        
+        if (hour >= 6 && hour <= 18) {
+            // Daytime
+            this.lighting.isNight = false;
+            
+            // Sun direction: more horizontal to light building walls
+            // At noon, sun is at ~60 degrees elevation (not straight up)
+            const maxElevation = Math.PI / 3;  // 60 degrees max elevation at noon
+            const elevation = Math.sin(sunAngle) * maxElevation;  // 0 at sunrise/sunset, max at noon
+            
+            const sunX = -Math.cos(sunAngle) * Math.cos(elevation);  // East to West, reduced at noon
+            const sunY = 0.4 * Math.cos(elevation);                   // From south
+            const sunZ = Math.sin(elevation);                         // Up based on elevation
+            
+            // Normalize
+            const len = Math.sqrt(sunX*sunX + sunY*sunY + sunZ*sunZ);
+            this.lighting.sunDirection = [sunX/len, sunY/len, sunZ/len];
+            
+            // Color temperature based on sun height
+            if (hour < 8 || hour > 16) {
+                // Golden hour - warm light
+                this.lighting.diffuseColor = [1.0, 0.85, 0.6];
+                this.lighting.ambientColor = [0.35, 0.3, 0.35];
+                this.lighting.intensity = 0.85;
+            } else {
+                // Midday - neutral to slightly cool
+                this.lighting.diffuseColor = [1.0, 0.98, 0.92];
+                this.lighting.ambientColor = [0.35, 0.38, 0.45];
+                this.lighting.intensity = 1.0;
+            }
+        } else {
+            // Nighttime
+            this.lighting.isNight = true;
+            // Moon-like direction (low angle from upper right)
+            this.lighting.sunDirection = [0.5, 0.3, 0.4];
+            // Cool, blue-tinted night
+            this.lighting.diffuseColor = [0.2, 0.25, 0.4];
+            this.lighting.ambientColor = [0.08, 0.1, 0.18];
+            this.lighting.intensity = 0.3;
+        }
+        
+        this.updateLightingBuffer();
+    }
+    
+    /**
+     * Get current lighting state
+     */
+    getLighting() {
+        return { ...this.lighting };
     }
 }
