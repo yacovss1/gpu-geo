@@ -577,7 +577,7 @@ export class MapRenderer {
         const atlas = this.terrainLayer.buildTerrainAtlas(visibleTiles);
         
         if (!atlas) {
-            console.log(`🏔️ No atlas - terrain tiles not loaded. Exaggeration: ${this.terrainLayer.exaggeration}`);
+            //console.log(`🏔️ No atlas - terrain tiles not loaded. Exaggeration: ${this.terrainLayer.exaggeration}`);
             this.device.queue.writeBuffer(this.buffers.terrainBounds, 0, new Float32Array([
                 -1, -1, 1, 1,
                 this.terrainLayer.exaggeration, 0, 0, 0

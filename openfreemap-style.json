@@ -16,6 +16,17 @@
         "background-color": "#f2efe9"
       }
     },
+                {
+      "id": "landcover_grass",
+      "type": "fill",
+      "source": "openmaptiles",
+      "source-layer": "landcover",
+      "filter": ["==", ["get", "class"], "grass"],
+      "paint": {
+        "fill-color": "#B0D59A",
+        "fill-opacity": 1.0
+      }
+    },
     {
       "id": "water",
       "type": "fill",
@@ -50,6 +61,7 @@
         "text-halo-width": 2
       }
     },
+
     {
       "id": "landuse_park",
       "type": "fill",
@@ -101,19 +113,8 @@
       "source-layer": "landcover",
       "filter": ["==", ["get", "class"], "wood"],
       "paint": {
-        "fill-color": "#B0D5A0",
+        "fill-color": "#39FF1f",
         "fill-opacity": 1
-      }
-    },
-    {
-      "id": "landcover_grass",
-      "type": "fill",
-      "source": "openmaptiles",
-      "source-layer": "landcover",
-      "filter": ["==", ["get", "class"], "grass"],
-      "paint": {
-        "fill-color": "#B0D59A",
-        "fill-opacity": 0.4
       }
     },
     {

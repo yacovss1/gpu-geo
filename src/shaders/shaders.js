@@ -186,12 +186,7 @@ const DEBUG_SHADOWS: bool = false;
 
 @fragment
 fn main(@location(0) fragCoord: vec2<f32>, @location(1) color: vec4<f32>, @location(2) worldZ: f32, @location(3) normal: vec3<f32>, @location(4) shadowCoord: vec3<f32>, @location(5) terrainNormal: vec3<f32>) -> @location(0) vec4<f32> {
-    // Force alpha to 1.0 to prevent visible seams at tile boundaries.
-    // Vector tiles include overlapping geometry at tile edges (buffer zone).
-    // With standard alpha blending, overlapping semi-transparent fills cause seams.
-    // This is a known limitation - proper fix would require stencil-based rendering.
     var fixedColor = color;
-    fixedColor.a = 1.0;
     
     // Normalize the interpolated normals
     let geomNormal = normalize(normal);
@@ -251,7 +246,7 @@ fn main(@location(0) fragCoord: vec2<f32>, @location(1) color: vec4<f32>, @locat
         litColor = fixedColor.rgb * (ambient + diffuse);
     }
     
-    return vec4<f32>(litColor, 1.0);
+    return vec4<f32>(litColor, fixedColor.a);
 }
 `;
 
