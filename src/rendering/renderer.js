@@ -383,6 +383,7 @@ export class MapRenderer {
         this.pipelines.hidden = createRenderPipeline(this.device, this.format, "triangle-list", true, 0);
         this.pipelines.hiddenFlat = createRenderPipeline(this.device, this.format, "triangle-list", true, 0, false);
         this.pipelines.hiddenWithBias = createRenderPipeline(this.device, this.format, "triangle-list", true, 100);
+        this.pipelines.hiddenExtrusion = createRenderPipeline(this.device, this.format, "triangle-list", true, 2);  // Match extrusion bias
         this.pipelines.edgeDetection = createEdgeDetectionPipeline(this.device, this.format);
         this.pipelines.debug = createDebugTexturePipeline(this.device, this.format);
     }

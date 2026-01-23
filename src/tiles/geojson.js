@@ -344,6 +344,10 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
         const heightZ = height * zoomExtrusion;
         const baseZ = base * zoomExtrusion;
         
+        // Layer Z offset for proper stacking (must match hidden buffer)
+        const layerIdx = getLayerIndex(layerId);
+        const layerZOffset = layerIdx * 0.00000005;
+        
         // Generate wall quads for each edge of outer ring only
         for (let i = 0; i < outerRing.length - 1; i++) {
             const curr = outerRing[i];
@@ -372,12 +376,12 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
             const vertexOffset = (targetVertices.length / VERTEX_STRIDE);
             
             // Bottom-left, bottom-right, top-right, top-left
-            // All vertices use the SAME terrain height (from centroid)
+            // All vertices use the SAME terrain height (from centroid) + layer offset
             // All 4 vertices share the same wall normal
-            targetVertices.push(x1, y1, baseZ + buildingTerrainZ, ...wallNormal, ...fillColor);
-            targetVertices.push(x2, y2, baseZ + buildingTerrainZ, ...wallNormal, ...fillColor);
-            targetVertices.push(x2, y2, heightZ + buildingTerrainZ, ...wallNormal, ...fillColor);
-            targetVertices.push(x1, y1, heightZ + buildingTerrainZ, ...wallNormal, ...fillColor);
+            targetVertices.push(x1, y1, baseZ + buildingTerrainZ + layerZOffset, ...wallNormal, ...fillColor);
+            targetVertices.push(x2, y2, baseZ + buildingTerrainZ + layerZOffset, ...wallNormal, ...fillColor);
+            targetVertices.push(x2, y2, heightZ + buildingTerrainZ + layerZOffset, ...wallNormal, ...fillColor);
+            targetVertices.push(x1, y1, heightZ + buildingTerrainZ + layerZOffset, ...wallNormal, ...fillColor);
             
             // Two triangles for the wall quad
             targetIndices.push(
@@ -397,10 +401,10 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                 return;
             }
             
-            // Use building centroid terrain height for roof (consistent with walls)
+            // Use building centroid terrain height for roof (consistent with walls) + layer offset
             
             // Roof: position(3) + normal(3) + color(4) - normal points up
-            targetVertices.push(x, y, heightZ + buildingTerrainZ, ...UP_NORMAL, ...fillColor);
+            targetVertices.push(x, y, heightZ + buildingTerrainZ + layerZOffset, ...UP_NORMAL, ...fillColor);
         });
         
         return roofStartIndex;

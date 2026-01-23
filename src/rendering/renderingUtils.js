@@ -79,8 +79,9 @@ export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, text
             // All layers use z-buffer - layer stacking via Z offsets baked into vertices
             const useBias = layerType === 'fill' && fillsWithExtrusions.has(layerId);
             const is3DLayer = layerType === 'fill-extrusion' || layerType === 'line-extrusion';
+            // Use matching depth bias: extrusions use bias=2, fills with extrusions use bias=100
             const hiddenPipeline = useBias ? renderer.pipelines.hiddenWithBias : 
-                                   (is3DLayer ? renderer.pipelines.hidden : renderer.pipelines.hiddenFlat);
+                                   (is3DLayer ? renderer.pipelines.hiddenExtrusion : renderer.pipelines.hiddenFlat);
             
             buffers.forEach(({ vertexBuffer, hiddenFillIndexBuffer, hiddenfillIndexCount }) => {
                 if (hiddenfillIndexCount > 0) {
