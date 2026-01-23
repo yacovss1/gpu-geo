@@ -113,7 +113,7 @@
       "source-layer": "landcover",
       "filter": ["==", ["get", "class"], "wood"],
       "paint": {
-        "fill-color": "#39FF1f",
+        "fill-color": "#C19A6B",
         "fill-opacity": 1
       }
     },

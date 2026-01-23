@@ -230,29 +230,29 @@ export function setupEventListeners(canvas, camera, device, renderer, tileBuffer
             case 'ArrowUp':
                 event.preventDefault();
                 camera.adjustPitch(step);
-                console.log(`⬆️ Pitch: ${camera.pitch.toFixed(1)}°`);
+                //console.log(`⬆️ Pitch: ${camera.pitch.toFixed(1)}°`);
                 break;
             case 'ArrowDown':
                 event.preventDefault();
                 camera.adjustPitch(-step);
-                console.log(`⬇️ Pitch: ${camera.pitch.toFixed(1)}°`);
+               // console.log(`⬇️ Pitch: ${camera.pitch.toFixed(1)}°`);
                 break;
             case 'ArrowLeft':
                 event.preventDefault();
                 camera.adjustBearing(-step);
-                console.log(`⬅️ Bearing: ${camera.bearing.toFixed(1)}°`);
+              //  console.log(`⬅️ Bearing: ${camera.bearing.toFixed(1)}°`);
                 break;
             case 'ArrowRight':
                 event.preventDefault();
                 camera.adjustBearing(step);
-                console.log(`➡️ Bearing: ${camera.bearing.toFixed(1)}°`);
+              //  console.log(`➡️ Bearing: ${camera.bearing.toFixed(1)}°`);
                 break;
             case 'r':
             case 'R':
                 // Reset pitch and bearing
                 camera.setPitch(0);
                 camera.setBearing(0);
-                console.log('🔄 Reset camera to top-down view');
+              //  console.log('🔄 Reset camera to top-down view');
                 break;
         }
     });
