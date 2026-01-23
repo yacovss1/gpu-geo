@@ -16,6 +16,7 @@ import {
     getLayerIndex,
     getSourcePromoteId
 } from '../core/style.js';
+import { TERRAIN_CONFIG } from '../core/terrainConfig.js';
 
 // Vertex format: position(3) + normal(3) + color(4) = 10 floats = 40 bytes
 const VERTEX_STRIDE = 10;
@@ -124,7 +125,7 @@ function sampleTerrainHeight(x, y, terrainData) {
     if (!terrainData || !terrainData.heights) return 0;
     
     const { heights, width, height, bounds } = terrainData;
-    const exaggeration = terrainData.exaggeration || 5;  // Match terrainLayer default
+    const exaggeration = terrainData.exaggeration || TERRAIN_CONFIG.DEFAULT_EXAGGERATION;
     
     // Check bounds with small margin (matches GPU shader)
     const margin = 0.001;

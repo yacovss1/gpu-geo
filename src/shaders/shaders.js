@@ -8,7 +8,8 @@ struct VertexOutput {
     @location(1) color: vec4<f32>,
     @location(2) worldZ: f32,
     @location(3) normal: vec3<f32>,
-    @location(4) shadowCoord: vec3<f32>  // Position in light space for shadow lookup
+    @location(4) shadowCoord: vec3<f32>,  // Position in light space for shadow lookup
+    @location(5) terrainNormal: vec3<f32> // Terrain surface normal for shading flat features
 };
 
 struct TerrainAndLighting {
@@ -19,8 +20,8 @@ struct TerrainAndLighting {
     maxY: f32,
     exaggeration: f32,
     enabled: f32,
-    _pad1: f32,
-    _pad2: f32,
+    tilesX: f32,     // Number of tiles in X direction in atlas
+    tilesY: f32,     // Number of tiles in Y direction in atlas
     // Lighting data (8 floats)
     sunDirX: f32,
     sunDirY: f32,
@@ -42,6 +43,13 @@ struct TerrainAndLighting {
 // Shadow map data in bind group 2
 @group(2) @binding(0) var<uniform> lightSpaceMatrix: mat4x4<f32>;
 
+fn decodeTerrainHeight(pixel: vec4<f32>) -> f32 {
+    let r = pixel.r * 255.0;
+    let g = pixel.g * 255.0;
+    let b = pixel.b * 255.0;
+    return (r * 256.0 + g + b / 256.0) - 32768.0;
+}
+
 fn sampleTerrainHeight(clipX: f32, clipY: f32) -> f32 {
     if (terrainData.enabled < 0.5) {
         return 0.0;
@@ -54,33 +62,54 @@ fn sampleTerrainHeight(clipX: f32, clipY: f32) -> f32 {
         return 0.0;
     }
     
-    // Quantize UV coordinates to reduce terrain micro-variations
-    // This helps prevent Z-fighting between adjacent vertices (e.g., road edges)
-    // by ensuring nearby positions sample similar terrain heights
-    let uvScale = 256.0; // Lower = more quantization = less z-fighting but coarser terrain
+    // Convert clip coords to UV (0-1) across the entire atlas
+    let u = (clipX - terrainData.minX) / (terrainData.maxX - terrainData.minX);
+    let v = 1.0 - (clipY - terrainData.minY) / (terrainData.maxY - terrainData.minY);
     
-    // Convert clip coords to UV (0-1)
-    let rawU = (clipX - terrainData.minX) / (terrainData.maxX - terrainData.minX);
-    let rawV = 1.0 - (clipY - terrainData.minY) / (terrainData.maxY - terrainData.minY);
+    // Clamp to valid UV range (let GPU bilinear filter handle edge interpolation)
+    let clampedU = clamp(u, 0.001, 0.999);
+    let clampedV = clamp(v, 0.001, 0.999);
     
-    // Quantize and clamp
-    let u = clamp(floor(rawU * uvScale) / uvScale, 0.001, 0.999);
-    let v = clamp(floor(rawV * uvScale) / uvScale, 0.001, 0.999);
+    // Sample terrain texture directly - atlas is pre-stitched
+    let pixel = textureSampleLevel(terrainTexture, terrainSampler, vec2<f32>(clampedU, clampedV), 0.0);
     
-    // Sample terrain texture
-    let pixel = textureSampleLevel(terrainTexture, terrainSampler, vec2<f32>(u, v), 0.0);
-    
-    // Decode Terrarium height: height = (R * 256 + G + B / 256) - 32768
-    let r = pixel.r * 255.0;
-    let g = pixel.g * 255.0;
-    let b = pixel.b * 255.0;
-    let rawHeight = (r * 256.0 + g + b / 256.0) - 32768.0;
+    // Decode Terrarium height
+    let rawHeight = decodeTerrainHeight(pixel);
     
     // Clamp height to reasonable range (0 to 9000m - slightly above Everest)
     let height = clamp(rawHeight, 0.0, 9000.0);
     
-    // Scale height to clip space
+    // Scale height to clip space - no edge fading
     return (height / 50000000.0) * terrainData.exaggeration;
+}
+
+// Sample terrain normal at a clip-space position
+fn sampleTerrainNormal(clipX: f32, clipY: f32) -> vec3<f32> {
+    if (terrainData.enabled < 0.5) {
+        return vec3<f32>(0.0, 0.0, 1.0); // Flat normal
+    }
+    
+    // Convert clip coords to UV (0-1) across the entire atlas
+    let u = (clipX - terrainData.minX) / (terrainData.maxX - terrainData.minX);
+    let v = 1.0 - (clipY - terrainData.minY) / (terrainData.maxY - terrainData.minY);
+    
+    // Clamp to valid UV range
+    let clampedU = clamp(u, 0.002, 0.998);
+    let clampedV = clamp(v, 0.002, 0.998);
+    let uv = vec2<f32>(clampedU, clampedV);
+    
+    // Sample neighboring heights to compute normal
+    // Use a larger offset for smoother normals
+    let texSize = vec2<f32>(textureDimensions(terrainTexture));
+    let pixelSize = 2.0 / texSize; // 2 pixels offset
+    
+    let hL = max(decodeTerrainHeight(textureSampleLevel(terrainTexture, terrainSampler, uv + vec2<f32>(-pixelSize.x, 0.0), 0.0)), 0.0);
+    let hR = max(decodeTerrainHeight(textureSampleLevel(terrainTexture, terrainSampler, uv + vec2<f32>(pixelSize.x, 0.0), 0.0)), 0.0);
+    let hD = max(decodeTerrainHeight(textureSampleLevel(terrainTexture, terrainSampler, uv + vec2<f32>(0.0, -pixelSize.y), 0.0)), 0.0);
+    let hU = max(decodeTerrainHeight(textureSampleLevel(terrainTexture, terrainSampler, uv + vec2<f32>(0.0, pixelSize.y), 0.0)), 0.0);
+    
+    // Compute normal from height differences
+    return normalize(vec3<f32>(hL - hR, hD - hU, 2.0));
 }
 
 // Calculate lighting factor for a surface
@@ -121,6 +150,10 @@ fn main(@location(0) inPosition: vec3<f32>, @location(1) inNormal: vec3<f32>, @l
     // Pass normal to fragment shader for lighting calculation
     output.normal = inNormal;
     
+    // Sample terrain normal for shading flat features (roads, polygons)
+    // This gives terrain-based lighting without needing visible terrain mesh
+    output.terrainNormal = sampleTerrainNormal(inPosition.x, inPosition.y);
+    
     // Calculate shadow map coordinates (position in light space)
     let lightSpacePos = lightSpaceMatrix * pos;
     // Convert from clip space [-1,1] to texture coords [0,1]
@@ -152,9 +185,26 @@ struct TerrainAndLighting {
 const DEBUG_SHADOWS: bool = false;
 
 @fragment
-fn main(@location(0) fragCoord: vec2<f32>, @location(1) color: vec4<f32>, @location(2) worldZ: f32, @location(3) normal: vec3<f32>, @location(4) shadowCoord: vec3<f32>) -> @location(0) vec4<f32> {
-    // Normalize the interpolated normal
-    let n = normalize(normal);
+fn main(@location(0) fragCoord: vec2<f32>, @location(1) color: vec4<f32>, @location(2) worldZ: f32, @location(3) normal: vec3<f32>, @location(4) shadowCoord: vec3<f32>, @location(5) terrainNormal: vec3<f32>) -> @location(0) vec4<f32> {
+    // Force alpha to 1.0 to prevent visible seams at tile boundaries.
+    // Vector tiles include overlapping geometry at tile edges (buffer zone).
+    // With standard alpha blending, overlapping semi-transparent fills cause seams.
+    // This is a known limitation - proper fix would require stencil-based rendering.
+    var fixedColor = color;
+    fixedColor.a = 1.0;
+    
+    // Normalize the interpolated normals
+    let geomNormal = normalize(normal);
+    let terrNormal = normalize(terrainNormal);
+    
+    // For flat features (normal pointing straight up), use terrain normal for shading
+    // This gives roads and polygons proper terrain-based lighting
+    var effectiveNormal = geomNormal;
+    let isFlatFeature = abs(geomNormal.z) > 0.99; // Nearly vertical normal = flat/horizontal surface
+    if (isFlatFeature) {
+        // Use terrain normal for terrain-based shading on flat surfaces
+        effectiveNormal = terrNormal;
+    }
     
     // Calculate shadow factor (1.0 = lit, 0.0 = in shadow)
     var shadow = 1.0;
@@ -182,26 +232,26 @@ fn main(@location(0) fragCoord: vec2<f32>, @location(1) color: vec4<f32>, @locat
         return vec4<f32>(shadow, shadow, shadow, 1.0);
     }
     
-    // Calculate lighting based on surface normal
+    // Calculate lighting based on effective normal (terrain or geometry)
     let sunDir = normalize(vec3<f32>(terrainData.sunDirX, terrainData.sunDirY, terrainData.sunDirZ));
     let ambient = vec3<f32>(terrainData.ambientR, terrainData.ambientG, terrainData.ambientB);
     
     // Diffuse lighting: how much surface faces the sun
-    let ndotl = max(dot(n, sunDir), 0.0);
+    let ndotl = max(dot(effectiveNormal, sunDir), 0.0);
     
     var litColor: vec3<f32>;
     if (terrainData.isNight > 0.5) {
         // Night: use ambient as base, reduce saturation, dim diffuse
-        let gray = dot(color.rgb, vec3<f32>(0.299, 0.587, 0.114));
-        let desaturated = mix(color.rgb, vec3<f32>(gray), 0.5);
+        let gray = dot(fixedColor.rgb, vec3<f32>(0.299, 0.587, 0.114));
+        let desaturated = mix(fixedColor.rgb, vec3<f32>(gray), 0.5);
         litColor = desaturated * (ambient + ndotl * 0.1);
     } else {
         // Day: ambient + diffuse lighting, modulated by shadow
         let diffuse = ndotl * (1.0 - ambient) * terrainData.intensity * shadow;
-        litColor = color.rgb * (ambient + diffuse);
+        litColor = fixedColor.rgb * (ambient + diffuse);
     }
     
-    return vec4<f32>(litColor, color.a);
+    return vec4<f32>(litColor, 1.0);
 }
 `;
 

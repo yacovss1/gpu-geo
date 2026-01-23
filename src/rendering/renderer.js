@@ -136,6 +136,9 @@ export function createRenderPipeline(device, format, topology, isHidden = false,
             entryPoint: "main",
             targets: [{
                 format: format,
+                // Standard alpha blending for proper layer compositing
+                // Tile boundary seams are now prevented by clipping polygons to tile bounds
+                // in vectorTileParser.js (Sutherland-Hodgman algorithm)
                 blend: isHidden ? {
                     color: { srcFactor: 'one', dstFactor: 'zero', operation: 'add' },
                     alpha: { srcFactor: 'one', dstFactor: 'zero', operation: 'add' }
@@ -554,22 +557,27 @@ export class MapRenderer {
     /**
      * Update terrain data for GPU-based vector projection
      * Call this each frame to update terrain texture and bounds
+     * Note: Always update terrain for vector Z heights, regardless of whether
+     * the terrain overlay layer is rendered. The 'enabled' flag on terrainLayer
+     * controls overlay rendering, not height projection.
      */
     updateTerrainForProjection(camera, zoom) {
-        if (!this.terrainLayer || !this.terrainLayer.enabled) {
-            // Disable terrain in shader
+        if (!this.terrainLayer) {
+            // No terrain layer at all - disable terrain in shader
             this.device.queue.writeBuffer(this.buffers.terrainBounds, 0, new Float32Array([
                 -1, -1, 1, 1,
-                this.terrainLayer?.exaggeration || 30, 0, 0, 0  // enabled = 0, use terrain exaggeration
+                30, 0, 0, 0  // enabled = 0, default exaggeration
             ]));
             return;
         }
         
         // Get visible terrain tiles and build atlas
+        // Always do this regardless of terrainLayer.enabled - vectors need heights
         const visibleTiles = this.terrainLayer.getVisibleTerrainTiles(camera, zoom);
         const atlas = this.terrainLayer.buildTerrainAtlas(visibleTiles);
         
         if (!atlas) {
+            console.log(`🏔️ No atlas - terrain tiles not loaded. Exaggeration: ${this.terrainLayer.exaggeration}`);
             this.device.queue.writeBuffer(this.buffers.terrainBounds, 0, new Float32Array([
                 -1, -1, 1, 1,
                 this.terrainLayer.exaggeration, 0, 0, 0
@@ -577,12 +585,15 @@ export class MapRenderer {
             return;
         }
         
-        // Update bounds uniform with atlas bounds
+        // Update bounds uniform with atlas bounds and tile count
+        const exagg = this.terrainLayer.exaggeration;
+        console.log(`🏔️ Writing exaggeration to GPU: ${exagg}`);
         this.device.queue.writeBuffer(this.buffers.terrainBounds, 0, new Float32Array([
             atlas.bounds.minX, atlas.bounds.minY, atlas.bounds.maxX, atlas.bounds.maxY,
-            this.terrainLayer.exaggeration,
+            exagg,
             1.0,  // enabled
-            0, 0  // padding
+            atlas.tilesX || 1,  // number of tiles in X
+            atlas.tilesY || 1   // number of tiles in Y
         ]));
         
         // Recreate terrain bind groups with atlas texture

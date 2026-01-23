@@ -12,6 +12,7 @@
 import { getVisibleTiles } from '../tiles/tile-utils.js';
 import { transformTileCoords } from '../tiles/vectorTileParser.js';
 import { terrainShaderCode } from '../shaders/terrainShaders.js';
+import { TERRAIN_CONFIG } from '../core/terrainConfig.js';
 
 // Terrain tile sources
 const TERRAIN_SOURCES = {
@@ -44,11 +45,11 @@ export class TerrainLayer {
         this.bindGroupLayout = null;
         this.sampler = null;
         this.gridIndices = null; // Shared index buffer (same for all tiles)
-        this.gridSize = 64; // Vertices per tile edge
+        this.gridSize = 128; // Higher resolution for better edge alignment
         this.enabled = true;  // Re-enabled after centerline fix for Z-fighting
-        this.source = 'aws';
-        this.exaggeration = 5; // Height exaggeration factor - 5x for subtle realistic terrain
-        this.minDisplayZoom = 8; // Only show terrain at this zoom level or higher
+        this.source = TERRAIN_CONFIG.DEFAULT_SOURCE;
+        this.exaggeration = TERRAIN_CONFIG.DEFAULT_EXAGGERATION;
+        this.minDisplayZoom = TERRAIN_CONFIG.DEFAULT_MIN_ZOOM;
         this.cameraBuffer = null; // Set from main renderer
         this.initialized = false;
         this.projectionTileKey = null; // Key of tile currently used for GPU projection (don't prune)
@@ -89,8 +90,8 @@ export class TerrainLayer {
         this.bindGroupLayout = this.device.createBindGroupLayout({
             entries: [
                 { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } },
-                { binding: 1, visibility: GPUShaderStage.VERTEX, texture: { sampleType: 'float' } },
-                { binding: 2, visibility: GPUShaderStage.VERTEX, sampler: { type: 'filtering' } },
+                { binding: 1, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+                { binding: 2, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
                 { binding: 3, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } } // Tile info
             ]
         });
@@ -106,10 +107,11 @@ export class TerrainLayer {
                 module: shaderModule,
                 entryPoint: 'vs_main',
                 buffers: [{
-                    arrayStride: 16, // x, y, u, v
+                    arrayStride: 20, // x, y, u, v, isSkirt (5 floats)
                     attributes: [
-                        { shaderLocation: 0, offset: 0, format: 'float32x2' },
-                        { shaderLocation: 1, offset: 8, format: 'float32x2' }
+                        { shaderLocation: 0, offset: 0, format: 'float32x2' },  // clipPos
+                        { shaderLocation: 1, offset: 8, format: 'float32x2' },  // uv
+                        { shaderLocation: 2, offset: 16, format: 'float32' }    // isSkirt
                     ]
                 }]
             },
@@ -117,11 +119,8 @@ export class TerrainLayer {
                 module: shaderModule,
                 entryPoint: 'fs_main',
                 targets: [{
-                    format: format,
-                    blend: {
-                        color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
-                        alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' }
-                    }
+                    format: format
+                    // No blend - opaque land surface
                 }]
             },
             primitive: {
@@ -130,35 +129,35 @@ export class TerrainLayer {
             },
             depthStencil: {
                 format: 'depth24plus',
-                depthWriteEnabled: false,  // Don't write depth - overlay only
-                depthCompare: 'always'     // Always render on top as overlay
+                depthWriteEnabled: true,   // Write depth - solid surface
+                depthCompare: 'less'       // Normal depth test
             },
             multisample: { count: 4 } // Match main renderer MSAA
         });
         
-        // Create overlay pipeline with MULTIPLY blend for hillshade on top of vectors
-        // This darkens slopes and preserves colors on flat/lit areas
+        // Create overlay pipeline with alpha blend for hillshade on top of vectors
+        // Uses fs_overlay which outputs black with alpha to darken shaded slopes
         this.overlayPipeline = this.device.createRenderPipeline({
             layout: pipelineLayout,
             vertex: {
                 module: shaderModule,
                 entryPoint: 'vs_main',
                 buffers: [{
-                    arrayStride: 16, // x, y, u, v
+                    arrayStride: 20, // x, y, u, v, isSkirt (5 floats)
                     attributes: [
-                        { shaderLocation: 0, offset: 0, format: 'float32x2' },
-                        { shaderLocation: 1, offset: 8, format: 'float32x2' }
+                        { shaderLocation: 0, offset: 0, format: 'float32x2' },  // clipPos
+                        { shaderLocation: 1, offset: 8, format: 'float32x2' },  // uv
+                        { shaderLocation: 2, offset: 16, format: 'float32' }    // isSkirt
                     ]
                 }]
             },
             fragment: {
                 module: shaderModule,
-                entryPoint: 'fs_main',
+                entryPoint: 'fs_overlay',  // Use overlay fragment shader
                 targets: [{
                     format: format,
                     blend: {
-                        // Soft overlay blend: src-alpha blends the grayscale shading onto vectors
-                        // Shader outputs grayscale (white=no change, gray=darken)
+                        // Alpha blend: black with alpha darkens underlying colors
                         color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
                         alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' }
                     }
@@ -177,7 +176,7 @@ export class TerrainLayer {
         });
         
         // Grid mesh will be created per-tile with transformed coordinates
-        this.gridSize = 64; // Vertices per tile edge
+        this.gridSize = 128; // Higher resolution for better edge alignment
         this.gridIndices = this.createGridIndices();
         this.initialized = true;
         console.log('🏔️ TerrainLayer initialized');
@@ -190,7 +189,7 @@ export class TerrainLayer {
         const indices = [];
         const n = this.gridSize;
         
-        // Create triangle indices
+        // Create triangle indices for grid
         for (let y = 0; y < n; y++) {
             for (let x = 0; x < n; x++) {
                 const i = y * (n + 1) + x;
@@ -205,27 +204,29 @@ export class TerrainLayer {
 
     /**
      * Create grid mesh for a specific tile with pre-transformed Mercator coordinates
+     * Simple grid mesh - no overlap, no skirts
      */
     createTileMesh(z, x, y) {
         const vertices = [];
         const n = this.gridSize;
         const extent = 4096; // Standard tile extent
         
-        // Create grid vertices with coordinates transformed using same math as vector tiles
+        // Create grid vertices at exact tile boundaries
+        // Vertex format: clipX, clipY, u, v, unused (kept for compatibility)
         for (let gy = 0; gy <= n; gy++) {
             for (let gx = 0; gx <= n; gx++) {
-                // Grid position -> tile pixel position (0 to extent)
+                // Grid position -> tile pixel position (0 to extent exactly)
                 const tilePixelX = (gx / n) * extent;
                 const tilePixelY = (gy / n) * extent;
                 
-                // Transform to clip space using EXACT same function as vector tiles
+                // Transform to clip space
                 const [clipX, clipY] = transformTileCoords(tilePixelX, tilePixelY, x, y, z, extent);
                 
                 // UV for texture sampling
                 const u = gx / n;
                 const v = gy / n;
                 
-                vertices.push(clipX, clipY, u, v);
+                vertices.push(clipX, clipY, u, v, 0.0);
             }
         }
         
@@ -345,6 +346,12 @@ export class TerrainLayer {
             Math.max(Math.floor(zoom), source.minZoom), 
             source.maxZoom
         );
+        
+        // Debug: log zoom levels once
+        if (!this._loggedZoomLevels) {
+            console.log(`🏔️ Terrain zoom: view=${zoom.toFixed(1)}, tileZoom=${tileZoom}, source range=${source.minZoom}-${source.maxZoom}`);
+            this._loggedZoomLevels = true;
+        }
         
         // Use the same visible tiles function as vector tiles
         // This ensures terrain loads exactly where vector tiles load
@@ -711,7 +718,9 @@ export class TerrainLayer {
         if (loadedTiles.length === 1) {
             return {
                 texture: loadedTiles[0].texture,
-                bounds: this.atlasBounds
+                bounds: this.atlasBounds,
+                tilesX: 1,
+                tilesY: 1
             };
         }
         
@@ -740,7 +749,9 @@ export class TerrainLayer {
         if (tileClipWidth <= 0 || tileClipHeight <= 0) {
             return {
                 texture: loadedTiles[0].texture,
-                bounds: this.atlasBounds
+                bounds: this.atlasBounds,
+                tilesX: 1,
+                tilesY: 1
             };
         }
         
@@ -785,7 +796,9 @@ export class TerrainLayer {
         
         return {
             texture: this.atlasTexture,
-            bounds: this.atlasBounds
+            bounds: this.atlasBounds,
+            tilesX: tilesX,
+            tilesY: tilesY
         };
     }
 

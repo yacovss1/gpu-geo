@@ -13,6 +13,7 @@
  */
 
 import { transformTileCoords } from './vectorTileParser.js';
+import { TERRAIN_CONFIG } from '../core/terrainConfig.js';
 
 export class TileCoordinator {
     constructor() {
@@ -21,9 +22,9 @@ export class TileCoordinator {
         this.terrainLoading = new Map(); // Map<key, Promise>
         this.terrainFailed = new Set();
         
-        // Configuration
-        this.terrainSource = 'aws';
-        this.exaggeration = 5;  // Match terrainLayer default
+        // Configuration - uses global terrain config
+        this.terrainSource = TERRAIN_CONFIG.DEFAULT_SOURCE;
+        this.exaggeration = TERRAIN_CONFIG.DEFAULT_EXAGGERATION;
         this.terrainEnabled = true;
         
         // Pending requests waiting for terrain

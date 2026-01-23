@@ -147,6 +147,11 @@ export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, text
     
     // fillsWithExtrusions already computed above for hidden pass
     
+    // TERRAIN DISABLED: The terrain mesh approach causes visible seams at tile boundaries
+    // due to height mismatches in the terrain tile data (known issue in MapLibre too).
+    // Features still get terrain height projection via GPU texture sampling.
+    // TODO: Implement proper terrain stitching or use pre-stitched terrain tiles.
+    
     // Render ALL geometry in true style order
     if (style?.layers) {
         for (const layer of style.layers) {
@@ -249,11 +254,9 @@ export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, text
         }
     }
     
-    // Render terrain hillshade AFTER vectors as a multiplicative overlay
-    // This applies shading (darken slopes, brighten ridges) on top of vector colors
-    if (terrainLayer && terrainLayer.enabled) {
-        terrainLayer.renderOverlay(colorPass, camera.getMatrix(), camera, renderZoom);
-    }
+    // Terrain hillshade is now applied directly to vector features via fragment shader
+    // (using terrain normals sampled in vertex shader)
+    // No separate terrain overlay layer needed
     
     colorPass.end();
     

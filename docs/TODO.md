@@ -136,4 +136,76 @@
 - Add unit tests for coordinate transforms
 - Simplify TileManager if needed
 
+---
+
+## KNOWN ARCHITECTURAL ISSUES
+
+### 1. Duplicate Terrain Tile Loading (CPU & GPU paths)
+**Problem:** Two separate terrain loading systems exist:
+- `terrainLayer.js` → Loads tiles into `this.terrainTiles` Map for GPU overlay rendering
+- `TileCoordinator.js` → Loads tiles into `this.terrainCache` Map for CPU height baking
+
+**Impact:**
+- Same terrain tiles may be loaded twice (memory waste)
+- Different tile caches with no sharing
+- When terrain overlay disabled, `terrainLayer.terrainTiles` is empty but `TileCoordinator.terrainCache` has tiles
+
+**Why it exists:**
+- terrainLayer was built for visible hillshade mesh rendering
+- TileCoordinator was added later for CPU-side vertex height baking
+- No refactor was done to unify them
+
+**Proper solution:** Share terrain cache between both systems OR load terrain once and route to both
+
+### 2. setExaggeration() API Doesn't Work on Vector Features
+**Problem:** `window.mapTerrain.setExaggeration(N)` does NOT affect vector feature heights in real-time
+
+**Root cause:**
+- Vector features bake terrain heights at tile parse time (CPU-side in `geojson.js`)
+- The baked height uses `TileCoordinator.exaggeration` at parse time
+- After parsing, vertex Z values are fixed in GPU buffers
+- Changing exaggeration later doesn't re-parse tiles
+
+**When terrain overlay was enabled:** Overlay mesh responded to exaggeration changes, but vectors didn't
+
+**When terrain overlay is disabled (current):**
+- `terrainLayer.terrainTiles` is empty (tiles not loaded)
+- `buildTerrainAtlas()` returns null
+- GPU shader gets `enabled=0`, disabling height sampling
+- Even GPU-based height sampling (for z=0 vertices) doesn't work
+
+**Workaround:** Set default exaggeration in `src/core/terrainConfig.js` before app starts
+
+**Proper solution:** Either:
+1. Share terrain tiles between terrainLayer and TileCoordinator
+2. Trigger full tile reload when exaggeration changes
+3. Move ALL height projection to GPU (no CPU baking)
+
+### 3. Tile Boundary Seams with Semi-Transparent Fills
+**Problem:** Vector tiles include overlapping buffer zones at edges. With alpha blending, overlaps cause visible seams.
+
+**Current workaround:** Force `alpha = 1.0` in fragment shader (breaks true transparency)
+
+**Proper solutions (not yet implemented):**
+1. **Stencil-based rendering:** Render each tile with stencil to prevent double-draw
+2. **Hidden buffer merge:** Merge tile boundaries in post-processing
+3. **Polygon clipping:** Clip to exact tile bounds (tried, broke rendering)
+
+**Status:** Using alpha=1.0 workaround; transparency solution is PRIORITY TODO
+
+### 4. CPU vs GPU Height Projection Split
+**Problem:** Some geometry gets CPU-baked heights, some gets GPU-sampled heights
+
+**Current behavior:**
+- **Roads/Lines:** CPU bakes terrain height at centerline, stored in vertex Z
+- **Fills/Polygons:** Vertex Z=0, GPU samples terrain at runtime
+
+**Why:**
+- Roads need consistent height along width (left/right edges at same elevation)
+- CPU baking samples once at centerline, applies to all vertices
+- GPU sampling would give different heights for left vs right edges
+
+**Issue:** If terrain overlay disabled, GPU sampling doesn't work (enabled=0), so fills stay flat
+
+**This is by design** but confusing. The shader checks `if (abs(inPosition.z) < 0.0000001)` to decide CPU vs GPU path.
 
