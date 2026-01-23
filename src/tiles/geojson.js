@@ -409,15 +409,22 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
     // Create two separate vertex arrays for visible and hidden rendering
     // NOTE: Coordinates are PRE-TRANSFORMED by vectorTileParser - use directly!
     // If terrainData is provided, bake terrain height into Z coordinate
+    // Layer Z offset ensures proper stacking via z-buffer (later layers appear on top)
     // Vertex format: position(3) + normal(3) + color(4) = 10 floats
     const coordsToVertices = (coords, color, targetArray) => {
         const vertexStartIndex = targetArray.length / VERTEX_STRIDE;
+        // Get layer Z offset for proper stacking (later style layers render on top)
+        const layerIdx = getLayerIndex(layerId);
+        const layerZOffset = layerIdx * 0.00000005; // Tiny offset per layer for z-buffer ordering
+        
         coords.forEach(coord => {
             const [x, y] = coord; // Coordinates already in Mercator clip space!
             // Sample terrain height if available, otherwise 0
-            const z = terrainData ? sampleTerrainHeight(x, y, terrainData) : 0.0;
+            const terrainZ = terrainData ? sampleTerrainHeight(x, y, terrainData) : 0.0;
+            // Add layer offset so later layers appear on top
+            const z = terrainZ + layerZOffset;
             targetArray.push(
-                x, y, z,       // Position with terrain height baked in
+                x, y, z,       // Position with terrain height + layer offset
                 ...UP_NORMAL,  // Normal (pointing up for flat surfaces)
                 ...color       // Color
             );
@@ -429,6 +436,7 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
     // Encode feature ID and layer ID into RGBA channels for hidden buffer
     // If terrainData is provided, bake terrain height into Z coordinate
     // If baseTerrainZ is provided (for buildings), use that instead of per-vertex sampling
+    // Layer Z offset ensures proper stacking via z-buffer (later layers appear on top)
     // Vertex format: position(3) + normal(3) + color(4) = 10 floats
     const coordsToIdVertices = (coords, featureId, targetArray, zHeight = 0.0, layerName = 'unknown', baseTerrainZ = null) => {
         const vertexStartIndex = targetArray.length / VERTEX_STRIDE;
@@ -443,6 +451,8 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
         // Get proper layer ID index (0-255) using getLayerIndex
         const layerIdx = getLayerIndex(layerName);
         const normalizedB = layerIdx / 255.0;
+        // Layer Z offset for proper stacking (same as visible pass)
+        const layerZOffset = layerIdx * 0.00000005;
         
         // Alpha channel can be used for other purposes if needed (currently unused)
         const normalizedA = 1.0;
@@ -460,8 +470,10 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                 const terrainZ = sampleTerrainHeight(x, y, terrainData);
                 z = zHeight + terrainZ;
             }
+            // Add layer offset so later layers appear on top
+            z += layerZOffset;
             targetArray.push(
-                x, y, z,       // Position with terrain + extrusion height
+                x, y, z,       // Position with terrain + extrusion height + layer offset
                 ...UP_NORMAL,  // Normal (pointing up for flat/hidden surfaces)
                 normalizedR, normalizedG, normalizedB, normalizedA  // R+G=ID, B=layerID, A=unused
             );
@@ -989,18 +1001,24 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
             } else {
                 // Regular flat 2D line rendering - sample terrain at CENTERLINE for each vertex
                 // This prevents Z-fighting: left and right edges share the same terrain height
+                // Layer Z offset ensures proper stacking via z-buffer
                 const lineStartIndex = fillVertices.length / VERTEX_STRIDE;
+                const lineLayerIdx = getLayerIndex(layerId);
+                const lineLayerZOffset = lineLayerIdx * 0.00000005;
+                
                 for (let i = 0; i < tessellated.vertices.length; i += 2) {
                     const x = tessellated.vertices[i];
                     const y = tessellated.vertices[i + 1];
                     // Sample terrain at centerline position, not at vertex edge position
                     const centerlineX = tessellated.centerlines[i];
                     const centerlineY = tessellated.centerlines[i + 1];
-                    const z = terrainData ? sampleTerrainHeight(centerlineX, centerlineY, terrainData) : 0.0;
+                    const terrainZ = terrainData ? sampleTerrainHeight(centerlineX, centerlineY, terrainData) : 0.0;
+                    // Add layer offset for proper z-buffer ordering
+                    const z = terrainZ + lineLayerZOffset;
                     fillVertices.push(
                         x,             // x (edge position)
                         y,             // y (edge position)
-                        z,             // z sampled at centerline (terrain only)
+                        z,             // z sampled at centerline + layer offset
                         ...UP_NORMAL,  // Normal (flat lines point up)
                         ..._borderColor               // color
                     );
@@ -1018,18 +1036,21 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                 const lowByte = safeId % 256;
                 const normalizedR = highByte / 255.0;
                 const normalizedG = lowByte / 255.0;
-                const layerIdx = getLayerIndex(layerId);
-                const normalizedB = layerIdx / 255.0;
+                const hiddenLayerIdx = getLayerIndex(layerId);
+                const normalizedB = hiddenLayerIdx / 255.0;
+                const hiddenLayerZOffset = hiddenLayerIdx * 0.00000005;
                 
                 for (let i = 0; i < tessellated.vertices.length; i += 2) {
                     // Sample terrain at centerline for hidden buffer too
                     const centerlineX = tessellated.centerlines[i];
                     const centerlineY = tessellated.centerlines[i + 1];
-                    const z = terrainData ? sampleTerrainHeight(centerlineX, centerlineY, terrainData) : 0.0;
+                    const terrainZ = terrainData ? sampleTerrainHeight(centerlineX, centerlineY, terrainData) : 0.0;
+                    // Add layer offset for consistent z-buffer ordering
+                    const z = terrainZ + hiddenLayerZOffset;
                     hiddenVertices.push(
                         tessellated.vertices[i],     // x
                         tessellated.vertices[i + 1], // y
-                        z,                           // z from centerline terrain
+                        z,                           // z from centerline terrain + layer offset
                         ...UP_NORMAL,                // Normal
                         normalizedR, normalizedG, normalizedB, 1.0  // R+G=ID, B=layerID
                     );
@@ -1092,6 +1113,7 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
             const multiNormalizedG = multiLowByte / 255.0;
             const multiLayerIdx = getLayerIndex(layerId);
             const multiNormalizedB = multiLayerIdx / 255.0;
+            const multiLayerZOffset = multiLayerIdx * 0.00000005;
             
             feature.geometry.coordinates.forEach(line => {
                 // Coordinates are already transformed
@@ -1101,7 +1123,7 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                 // Tessellate each line
                 const lineTessellated = tessellateLine(transformedLine, multiWorldWidth, multiLineCap, multiLineJoin, multiMiterLimit);
                 
-                // Add tessellated vertices with terrain height sampled at CENTERLINE
+                // Add tessellated vertices with terrain height sampled at CENTERLINE + layer offset
                 const multiLineStartIndex = fillVertices.length / VERTEX_STRIDE;
                 for (let i = 0; i < lineTessellated.vertices.length; i += 2) {
                     const x = lineTessellated.vertices[i];
@@ -1109,7 +1131,8 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                     // Sample terrain at centerline position, not at vertex edge position
                     const centerlineX = lineTessellated.centerlines[i];
                     const centerlineY = lineTessellated.centerlines[i + 1];
-                    const z = terrainData ? sampleTerrainHeight(centerlineX, centerlineY, terrainData) : 0.0;
+                    const terrainZ = terrainData ? sampleTerrainHeight(centerlineX, centerlineY, terrainData) : 0.0;
+                    const z = terrainZ + multiLayerZOffset;
                     fillVertices.push(x, y, z, ...UP_NORMAL, ..._borderColor);
                 }
                 
@@ -1118,14 +1141,15 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                     fillIndices.push(multiLineStartIndex + idx);
                 });
                 
-                // Generate hidden buffer for line picking with terrain height at centerline
+                // Generate hidden buffer for line picking with terrain height + layer offset
                 const hiddenMultiLineStartIndex = hiddenVertices.length / VERTEX_STRIDE;
                 for (let i = 0; i < lineTessellated.vertices.length; i += 2) {
                     const x = lineTessellated.vertices[i];
                     const y = lineTessellated.vertices[i + 1];
                     const centerlineX = lineTessellated.centerlines[i];
                     const centerlineY = lineTessellated.centerlines[i + 1];
-                    const z = terrainData ? sampleTerrainHeight(centerlineX, centerlineY, terrainData) : 0.0;
+                    const terrainZ = terrainData ? sampleTerrainHeight(centerlineX, centerlineY, terrainData) : 0.0;
+                    const z = terrainZ + multiLayerZOffset;
                     hiddenVertices.push(x, y, z, ...UP_NORMAL, multiNormalizedR, multiNormalizedG, multiNormalizedB, 1.0);
                 }
                 

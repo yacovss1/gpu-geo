@@ -365,11 +365,15 @@ export class MapRenderer {
         cachedLayouts = {};
         
         // Create main rendering pipelines
-        // Regular fill pipeline - depth tested for 3D geometry
+        // ALL pipelines use depth testing - pure z-buffer approach
+        // Layer ordering is achieved via small Z offsets baked into vertex data
+        
+        // Regular fill pipeline - depth tested
         this.pipelines.fill = createRenderPipeline(this.device, this.format, "triangle-list", false, 0);
-        // Flat 2D pipeline - NO depth testing, uses painter's algorithm for 2D layers on terrain
-        this.pipelines.flat = createRenderPipeline(this.device, this.format, "triangle-list", false, 0, true);
-        // Fill with depth bias - ONLY for fills that have a corresponding extrusion
+        // Flat 2D pipeline - NOW uses depth testing (was painter's algorithm)
+        // Layer stacking is handled by Z offsets in vertex shader
+        this.pipelines.flat = createRenderPipeline(this.device, this.format, "triangle-list", false, 0, false);
+        // Fill with depth bias - for fills that have a corresponding extrusion
         this.pipelines.fillWithBias = createRenderPipeline(this.device, this.format, "triangle-list", false, 100);
         // Extrusion pipeline - small depth bias to reduce z-fighting between adjacent walls
         this.pipelines.extrusion = createRenderPipeline(this.device, this.format, "triangle-list", false, 2);
@@ -377,7 +381,7 @@ export class MapRenderer {
         // Hidden pipelines - MUST match depth bias of corresponding color pipelines
         // to ensure consistent depth test results between passes
         this.pipelines.hidden = createRenderPipeline(this.device, this.format, "triangle-list", true, 0);
-        this.pipelines.hiddenFlat = createRenderPipeline(this.device, this.format, "triangle-list", true, 0, true);
+        this.pipelines.hiddenFlat = createRenderPipeline(this.device, this.format, "triangle-list", true, 0, false);
         this.pipelines.hiddenWithBias = createRenderPipeline(this.device, this.format, "triangle-list", true, 100);
         this.pipelines.edgeDetection = createEdgeDetectionPipeline(this.device, this.format);
         this.pipelines.debug = createDebugTexturePipeline(this.device, this.format);

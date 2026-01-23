@@ -76,7 +76,7 @@ export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, text
             if (!buffers) continue;
             
             // Determine if this layer needs depth bias (same logic as color pass)
-            // 2D layers use flat pipeline (painter's algorithm) to avoid z-fighting on terrain
+            // All layers use z-buffer - layer stacking via Z offsets baked into vertices
             const useBias = layerType === 'fill' && fillsWithExtrusions.has(layerId);
             const is3DLayer = layerType === 'fill-extrusion' || layerType === 'line-extrusion';
             const hiddenPipeline = useBias ? renderer.pipelines.hiddenWithBias : 
@@ -200,7 +200,7 @@ export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, text
                         bindGroup = renderer.getOrCreateEffectBindGroup(effectType);
                     } else {
                         const useBias = fillsWithExtrusions.has(layerId);
-                        // Use flat pipeline (no depth test) for 2D fills - painter's algorithm on terrain
+                        // All layers use depth testing - layer stacking via Z offsets baked into vertices
                         pipeline = useBias ? renderer.pipelines.fillWithBias : renderer.pipelines.flat;
                         bindGroup = renderer.bindGroups.main;
                     }
@@ -224,7 +224,7 @@ export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, text
                     const isTubeLayer = layer?.metadata?.['render-as-tubes'] === true;
                     
                     if (!isTubeLayer) {
-                        // Use flat pipeline (no depth test) for 2D lines - painter's algorithm on terrain
+                        // All layers use depth testing - layer stacking via Z offsets baked into vertices
                         colorPass.setPipeline(renderer.pipelines.flat);
                         colorPass.setVertexBuffer(0, vertexBuffer);
                         colorPass.setIndexBuffer(fillIndexBuffer, "uint32");
