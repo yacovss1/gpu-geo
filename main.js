@@ -143,8 +143,7 @@ async function main() {
         const textureView = currentTexture.createView();
 
         // Update terrain for GPU-based vector projection
-        // Pass visible vector tiles to ensure terrain atlas covers all rendered geometry
-        renderer.updateTerrainForProjection(camera, camera.zoom, tileManager.visibleTileBuffers);
+        renderer.updateTerrainForProjection(camera, camera.zoom);
 
         // Render map geometry
         const mapEncoder = renderMap(

@@ -55,28 +55,31 @@ fn sampleTerrainHeight(clipX: f32, clipY: f32) -> f32 {
         return 0.0;
     }
     
+    // Check if position is within terrain bounds (with small margin)
+    let margin = 0.001;
+    if (clipX < terrainData.minX - margin || clipX > terrainData.maxX + margin ||
+        clipY < terrainData.minY - margin || clipY > terrainData.maxY + margin) {
+        return 0.0;
+    }
+    
     // Convert clip coords to UV (0-1) across the entire atlas
-    // No bounds check - rely on UV clamping for edge cases
     let u = (clipX - terrainData.minX) / (terrainData.maxX - terrainData.minX);
     let v = 1.0 - (clipY - terrainData.minY) / (terrainData.maxY - terrainData.minY);
     
-    // Clamp to valid UV range - handles out-of-bounds gracefully
-    let clampedU = clamp(u, 0.0, 1.0);
-    let clampedV = clamp(v, 0.0, 1.0);
+    // Clamp to valid UV range (let GPU bilinear filter handle edge interpolation)
+    let clampedU = clamp(u, 0.001, 0.999);
+    let clampedV = clamp(v, 0.001, 0.999);
     
-    // Sample terrain texture
+    // Sample terrain texture directly - atlas is pre-stitched
     let pixel = textureSampleLevel(terrainTexture, terrainSampler, vec2<f32>(clampedU, clampedV), 0.0);
     
-    // Decode Terrarium height: height = (R * 256 + G + B / 256) - 32768
-    let r = pixel.r * 255.0;
-    let g = pixel.g * 255.0;
-    let b = pixel.b * 255.0;
-    let rawHeight = (r * 256.0 + g + b / 256.0) - 32768.0;
+    // Decode Terrarium height
+    let rawHeight = decodeTerrainHeight(pixel);
     
-    // Clamp height to reasonable range
+    // Clamp height to reasonable range (0 to 9000m - slightly above Everest)
     let height = clamp(rawHeight, 0.0, 9000.0);
     
-    // Scale to clip space with exaggeration
+    // Scale height to clip space - no edge fading
     return (height / 50000000.0) * terrainData.exaggeration;
 }
 
@@ -125,14 +128,16 @@ fn calculateLighting(normal: vec3<f32>) -> f32 {
 fn main(@location(0) inPosition: vec3<f32>, @location(1) inNormal: vec3<f32>, @location(2) inColor: vec4<f32>) -> VertexOutput {
     var output: VertexOutput;
     
-    // GPU terrain sampling for flat polygons (Z ≈ 0)
-    // Features with CPU-baked terrain have Z > 0.0001, so they skip this
+    // GPU terrain sampling:
+    // - For features with CPU-baked terrain (Z > tiny): keep as-is, don't add GPU terrain
+    // - For features at Z=0: sample GPU terrain
     var terrainHeight = 0.0;
-    if (abs(inPosition.z) < 0.0001) {
+    if (abs(inPosition.z) < 0.0000001) {
+        // Z is zero - sample terrain at vertex position
         terrainHeight = sampleTerrainHeight(inPosition.x, inPosition.y);
     }
     
-    // Add terrain height to vertex Z
+    // Add terrain height to vertex Z (preserves pre-baked Z, adds GPU terrain only for Z=0)
     let pos = vec4<f32>(inPosition.x, inPosition.y, inPosition.z + terrainHeight, 1.0);
 
     // Apply camera transform

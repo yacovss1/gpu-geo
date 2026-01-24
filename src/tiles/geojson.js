@@ -427,8 +427,7 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
 
     // Create two separate vertex arrays for visible and hidden rendering
     // NOTE: Coordinates are PRE-TRANSFORMED by vectorTileParser - use directly!
-    // All geometry uses CPU terrain for consistency
-    // This ensures polygons, lines, and buildings all use the same terrain source
+    // If terrainData is provided, bake terrain height into Z coordinate
     // Layer Z offset ensures proper stacking via z-buffer (later layers appear on top)
     // Vertex format: position(3) + normal(3) + color(4) = 10 floats
     const coordsToVertices = (coords, color, targetArray) => {
@@ -439,12 +438,12 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
         
         coords.forEach(coord => {
             const [x, y] = coord; // Coordinates already in Mercator clip space!
-            // Sample CPU terrain at each vertex (same source as lines/buildings)
+            // Sample terrain height if available, otherwise 0
             const terrainZ = terrainData ? sampleTerrainHeight(x, y, terrainData) : 0.0;
-            // Add layer offset for z-buffer ordering
+            // Add layer offset so later layers appear on top
             const z = terrainZ + layerZOffset;
             targetArray.push(
-                x, y, z,       // Position with CPU terrain + layer offset
+                x, y, z,       // Position with terrain height + layer offset
                 ...UP_NORMAL,  // Normal (pointing up for flat surfaces)
                 ...color       // Color
             );
