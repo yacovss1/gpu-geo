@@ -138,7 +138,7 @@ export class TileCoordinator {
             const [maxX, minY] = transformTileCoords(extent, extent, x, y, z, extent);
             const bounds = { minX, minY, maxX, maxY };
             
-            const terrainData = { heights, width, height, bounds };
+            const terrainData = { heights, width, height, bounds, exaggeration: this.exaggeration };
             this.terrainCache.set(key, terrainData);
             
             return terrainData;

@@ -565,8 +565,9 @@ export class MapRenderer {
      * Note: Always update terrain for vector Z heights, regardless of whether
      * the terrain overlay layer is rendered. The 'enabled' flag on terrainLayer
      * controls overlay rendering, not height projection.
+     * @param {Object} vectorTiles - Optional map of visible vector tiles (unused, kept for API compat)
      */
-    updateTerrainForProjection(camera, zoom) {
+    updateTerrainForProjection(camera, zoom, vectorTiles = null) {
         if (!this.terrainLayer) {
             // No terrain layer at all - disable terrain in shader
             this.device.queue.writeBuffer(this.buffers.terrainBounds, 0, new Float32Array([
@@ -576,13 +577,25 @@ export class MapRenderer {
             return;
         }
         
-        // Get visible terrain tiles and build atlas
-        // Always do this regardless of terrainLayer.enabled - vectors need heights
-        const visibleTiles = this.terrainLayer.getVisibleTerrainTiles(camera, zoom);
-        const atlas = this.terrainLayer.buildTerrainAtlas(visibleTiles);
+        // Use terrain layer's own visible tile calculation
+        // This matches how CPU terrain works and ensures tiles are loaded
+        const tilesToCover = this.terrainLayer.getVisibleTerrainTiles(camera, zoom);
+        
+        // Ensure terrain tiles are loaded (even if terrain overlay is disabled)
+        // This is needed for GPU vector terrain projection
+        for (const tile of tilesToCover) {
+            const key = `${tile.z}/${tile.x}/${tile.y}`;
+            if (!this.terrainLayer.terrainTiles.has(key) && 
+                !this.terrainLayer.loadingTiles.has(key) &&
+                !this.terrainLayer.failedTiles.has(key)) {
+                this.terrainLayer.loadTerrainTile(tile.z, tile.x, tile.y);
+            }
+        }
+        
+        const atlas = this.terrainLayer.buildTerrainAtlas(tilesToCover);
         
         if (!atlas) {
-            //console.log(`🏔️ No atlas - terrain tiles not loaded. Exaggeration: ${this.terrainLayer.exaggeration}`);
+            // console.log(`🏔️ No atlas - terrain tiles not loaded yet. Tiles to cover: ${tilesToCover.length}`);
             this.device.queue.writeBuffer(this.buffers.terrainBounds, 0, new Float32Array([
                 -1, -1, 1, 1,
                 this.terrainLayer.exaggeration, 0, 0, 0
@@ -590,9 +603,11 @@ export class MapRenderer {
             return;
         }
         
+        // console.log(`🏔️ Atlas built with ${tilesToCover.length} tiles, bounds: ${atlas.bounds.minX.toFixed(4)} to ${atlas.bounds.maxX.toFixed(4)}`);
+        
         // Update bounds uniform with atlas bounds and tile count
         const exagg = this.terrainLayer.exaggeration;
-        console.log(`🏔️ Writing exaggeration to GPU: ${exagg}`);
+        // console.log(`🏔️ Writing exaggeration to GPU: ${exagg}`);
         this.device.queue.writeBuffer(this.buffers.terrainBounds, 0, new Float32Array([
             atlas.bounds.minX, atlas.bounds.minY, atlas.bounds.maxX, atlas.bounds.maxY,
             exagg,
