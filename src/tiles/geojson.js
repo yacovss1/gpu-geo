@@ -771,8 +771,10 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
             
             // Coordinates are already transformed - use directly
             // Subdivide long segments for proper terrain height sampling
-            // Use 0.02 clip space units for dense subdivision to capture terrain detail
-            const subdividedCoords = subdivideLine(feature.geometry.coordinates, 0.02);
+            // Calculate zoom-dependent threshold: at zoom Z, tile = 2/(2^Z), we want ~20 points per tile
+            // So maxSegmentLength = 2/(2^Z * 20) = 1/(2^(Z-1) * 10)
+            const subdivisionThreshold = 1 / (Math.pow(2, zoom - 1) * 10);
+            const subdividedCoords = subdivideLine(feature.geometry.coordinates, subdivisionThreshold);
             const transformedLineCoords = subdividedCoords;
             
             // Check if this is a line-extrusion layer (needs 3D tube geometry)
@@ -1321,7 +1323,9 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                 
                 // Process each line in the MultiLineString with extrusion
                 feature.geometry.coordinates.forEach(line => {
-                    const transformedLine = subdivideLine(line, 0.02);
+                    // Subdivide for terrain sampling - zoom-dependent threshold (~20 points per tile)
+                    const subdivisionThreshold = 1 / (Math.pow(2, zoom - 1) * 10);
+                    const transformedLine = subdivideLine(line, subdivisionThreshold);
                     
                     if (tubeShape === 'circular') {
                         // ===== CIRCULAR TUBE for MultiLineString =====
@@ -1570,8 +1574,9 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                 // Flat 2D rendering for MultiLineString
                 feature.geometry.coordinates.forEach(line => {
                 // Coordinates are already transformed
-                // Subdivide long segments for proper terrain height sampling
-                const transformedLine = subdivideLine(line, 0.02);
+                // Subdivide long segments for proper terrain height sampling - zoom-dependent (~20 points per tile)
+                const subdivisionThreshold = 1 / (Math.pow(2, zoom - 1) * 10);
+                const transformedLine = subdivideLine(line, subdivisionThreshold);
                 
                 // Tessellate each line
                 const lineTessellated = tessellateLine(transformedLine, multiWorldWidth, multiLineCap, multiLineJoin, multiMiterLimit);
