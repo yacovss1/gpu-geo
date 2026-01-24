@@ -722,6 +722,10 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
             isFilled = false;
             isLine = true;
             
+            // Calculate layer Z offset for proper stacking
+            const lineLayerIdx = getLayerIndex(layerId);
+            const lineLayerZOffset = lineLayerIdx * 0.00000005;
+            
             // Get line width and style properties
             let lineWidth = 1;
             let lineCap = 'round';
@@ -787,11 +791,12 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                 const lineExtrusionBase = getPaintProperty(style, layerId, 'line-extrusion-base', {}) || 0;
                 const lineWidth = getPaintProperty(style, layerId, 'line-width', {}) || 3.0;
                 
-                // Convert line width from pixels to meters (approximate - depends on zoom)
-                // At zoom 14, roughly 1 pixel = 2.4 meters
-                const widthInMeters = lineWidth * 2.4;
-                const radius = (widthInMeters * zoomExtrusion) / 2;
+                // IMPORTANT: Width should use worldWidth (clip space), NOT zoomExtrusion scaling
+                // worldWidth is already calculated above for 2D lines - reuse it for tube width
+                // This keeps tubes visually consistent with non-extruded lines
+                const radius = worldWidth / 2;
                 
+                // Height uses zoomExtrusion to convert meters to clip space
                 const heightZ = lineExtrusionHeight * zoomExtrusion;
                 const baseZ = lineExtrusionBase * zoomExtrusion;
                 
@@ -857,8 +862,8 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                             // Apply horizontal offset perpendicular to path
                             const vx = cx + perpX * horizontalOffset;
                             const vy = cy + perpY * horizontalOffset;
-                            // Add terrain height to tube position
-                            const vz = (baseZ + heightZ) / 2 + verticalOffset + terrainZ;
+                            // Add terrain height and layer offset to tube position
+                            const vz = (baseZ + heightZ) / 2 + verticalOffset + terrainZ + lineLayerZOffset;
                             
                             // Calculate surface normal for lighting
                             const normalX = perpX * Math.cos(angle);
@@ -946,11 +951,11 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                     const DOWN_NORMAL = [0, 0, -1];
                     const bottomVerts = [];
                     leftEdge.forEach(([x, y, tz]) => {
-                        fillVertices.push(x, y, baseZ + tz, ...DOWN_NORMAL, ..._borderColor);
+                        fillVertices.push(x, y, baseZ + tz + lineLayerZOffset, ...DOWN_NORMAL, ..._borderColor);
                         bottomVerts.push(fillVertices.length / VERTEX_STRIDE - 1);
                     });
                     rightEdge.slice().reverse().forEach(([x, y, tz]) => {
-                        fillVertices.push(x, y, baseZ + tz, ...DOWN_NORMAL, ..._borderColor);
+                        fillVertices.push(x, y, baseZ + tz + lineLayerZOffset, ...DOWN_NORMAL, ..._borderColor);
                         bottomVerts.push(fillVertices.length / VERTEX_STRIDE - 1);
                     });
                     
@@ -958,21 +963,49 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                     // Top faces point up: normal = [0, 0, 1]
                     const topVerts = [];
                     leftEdge.forEach(([x, y, tz]) => {
-                        fillVertices.push(x, y, heightZ + tz, ...UP_NORMAL, ..._borderColor);
+                        fillVertices.push(x, y, heightZ + tz + lineLayerZOffset, ...UP_NORMAL, ..._borderColor);
                         topVerts.push(fillVertices.length / VERTEX_STRIDE - 1);
                     });
                     rightEdge.slice().reverse().forEach(([x, y, tz]) => {
-                        fillVertices.push(x, y, heightZ + tz, ...UP_NORMAL, ..._borderColor);
+                        fillVertices.push(x, y, heightZ + tz + lineLayerZOffset, ...UP_NORMAL, ..._borderColor);
                         topVerts.push(fillVertices.length / VERTEX_STRIDE - 1);
                     });
                     
-                    // Triangulate bottom and top faces using earcut
-                    const bottomCoords = [];
-                    leftEdge.forEach(([x, y, tz]) => bottomCoords.push(x, y));
-                    rightEdge.slice().reverse().forEach(([x, y, tz]) => bottomCoords.push(x, y));
-                    const bottomIndices = earcut(bottomCoords, null, 2);
-                    bottomIndices.forEach(idx => fillIndices.push(bottomVerts[idx]));
-                    bottomIndices.forEach(idx => fillIndices.push(topVerts[idx]));  // Same triangulation for top
+                    // Triangulate bottom and top faces using triangle fan from center
+                    // This is more robust than earcut for potentially self-intersecting polygons
+                    
+                    // Calculate center point for bottom face
+                    let bottomCenterX = 0, bottomCenterY = 0;
+                    const allBottomEdgePoints = [...leftEdge, ...rightEdge];
+                    allBottomEdgePoints.forEach(([x, y]) => {
+                        bottomCenterX += x;
+                        bottomCenterY += y;
+                    });
+                    bottomCenterX /= allBottomEdgePoints.length;
+                    bottomCenterY /= allBottomEdgePoints.length;
+                    
+                    // Sample terrain at center
+                    const centerTerrainZ = terrainData ? sampleTerrainHeight(bottomCenterX, bottomCenterY, terrainData) : 0;
+                    
+                    // Add center vertices for bottom and top
+                    const bottomCenterIdx = fillVertices.length / VERTEX_STRIDE;
+                    fillVertices.push(bottomCenterX, bottomCenterY, baseZ + centerTerrainZ + lineLayerZOffset, ...DOWN_NORMAL, ..._borderColor);
+                    const topCenterIdx = fillVertices.length / VERTEX_STRIDE;
+                    fillVertices.push(bottomCenterX, bottomCenterY, heightZ + centerTerrainZ + lineLayerZOffset, ...UP_NORMAL, ..._borderColor);
+                    
+                    // Create bottom face triangles (center to each edge, reversed winding for downward)
+                    const numBottomVerts = bottomVerts.length;
+                    for (let i = 0; i < numBottomVerts; i++) {
+                        const next = (i + 1) % numBottomVerts;
+                        fillIndices.push(bottomCenterIdx, bottomVerts[next], bottomVerts[i]);
+                    }
+                    
+                    // Create top face triangles (center to each edge, normal winding for upward)
+                    const numTopVerts = topVerts.length;
+                    for (let i = 0; i < numTopVerts; i++) {
+                        const next = (i + 1) % numTopVerts;
+                        fillIndices.push(topCenterIdx, topVerts[i], topVerts[next]);
+                    }
                     
                     // Create walls around the perimeter with proper normals
                     const createWall = (edge, isLeftSide) => {
@@ -988,11 +1021,11 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                             const wallNormal = len > 0 ? [-dy / len * sign, dx / len * sign, 0] : [1, 0, 0];
                             
                             const vOff = fillVertices.length / VERTEX_STRIDE;
-                            // Add terrain height to wall vertices
-                            fillVertices.push(x1, y1, baseZ + tz1, ...wallNormal, ..._borderColor);
-                            fillVertices.push(x2, y2, baseZ + tz2, ...wallNormal, ..._borderColor);
-                            fillVertices.push(x2, y2, heightZ + tz2, ...wallNormal, ..._borderColor);
-                            fillVertices.push(x1, y1, heightZ + tz1, ...wallNormal, ..._borderColor);
+                            // Add terrain height and layer offset to wall vertices
+                            fillVertices.push(x1, y1, baseZ + tz1 + lineLayerZOffset, ...wallNormal, ..._borderColor);
+                            fillVertices.push(x2, y2, baseZ + tz2 + lineLayerZOffset, ...wallNormal, ..._borderColor);
+                            fillVertices.push(x2, y2, heightZ + tz2 + lineLayerZOffset, ...wallNormal, ..._borderColor);
+                            fillVertices.push(x1, y1, heightZ + tz1 + lineLayerZOffset, ...wallNormal, ..._borderColor);
                             
                             fillIndices.push(vOff, vOff + 1, vOff + 2, vOff, vOff + 2, vOff + 3);
                         }
@@ -1000,6 +1033,42 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                     
                     createWall(leftEdge, true);
                     createWall(rightEdge, false);
+                    
+                    // Add front and back cap walls to close the tube
+                    if (leftEdge.length > 0 && rightEdge.length > 0) {
+                        // Front cap (start of tube)
+                        const [lx0, ly0, ltz0] = leftEdge[0];
+                        const [rx0, ry0, rtz0] = rightEdge[0];
+                        const frontVOff = fillVertices.length / VERTEX_STRIDE;
+                        // Calculate front normal (pointing backward along path)
+                        const [lx1, ly1] = leftEdge[1];
+                        const fdx = lx0 - lx1, fdy = ly0 - ly1;
+                        const flen = Math.sqrt(fdx * fdx + fdy * fdy);
+                        const frontNormal = flen > 0 ? [fdx / flen, fdy / flen, 0] : [-1, 0, 0];
+                        
+                        fillVertices.push(lx0, ly0, baseZ + ltz0 + lineLayerZOffset, ...frontNormal, ..._borderColor);
+                        fillVertices.push(rx0, ry0, baseZ + rtz0 + lineLayerZOffset, ...frontNormal, ..._borderColor);
+                        fillVertices.push(rx0, ry0, heightZ + rtz0 + lineLayerZOffset, ...frontNormal, ..._borderColor);
+                        fillVertices.push(lx0, ly0, heightZ + ltz0 + lineLayerZOffset, ...frontNormal, ..._borderColor);
+                        fillIndices.push(frontVOff, frontVOff + 1, frontVOff + 2, frontVOff, frontVOff + 2, frontVOff + 3);
+                        
+                        // Back cap (end of tube)
+                        const lastIdx = leftEdge.length - 1;
+                        const [lxN, lyN, ltzN] = leftEdge[lastIdx];
+                        const [rxN, ryN, rtzN] = rightEdge[lastIdx];
+                        const backVOff = fillVertices.length / VERTEX_STRIDE;
+                        // Calculate back normal (pointing forward along path)
+                        const [lxP, lyP] = leftEdge[lastIdx - 1];
+                        const bdx = lxN - lxP, bdy = lyN - lyP;
+                        const blen = Math.sqrt(bdx * bdx + bdy * bdy);
+                        const backNormal = blen > 0 ? [bdx / blen, bdy / blen, 0] : [1, 0, 0];
+                        
+                        fillVertices.push(lxN, lyN, baseZ + ltzN + lineLayerZOffset, ...backNormal, ..._borderColor);
+                        fillVertices.push(rxN, ryN, baseZ + rtzN + lineLayerZOffset, ...backNormal, ..._borderColor);
+                        fillVertices.push(rxN, ryN, heightZ + rtzN + lineLayerZOffset, ...backNormal, ..._borderColor);
+                        fillVertices.push(lxN, lyN, heightZ + ltzN + lineLayerZOffset, ...backNormal, ..._borderColor);
+                        fillIndices.push(backVOff, backVOff + 2, backVOff + 1, backVOff, backVOff + 3, backVOff + 2);
+                    }
                 }
                 
             } else {
@@ -1081,7 +1150,7 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
             if (style && sourceId) {
                 const layers = getLayersBySource(sourceId);
                 const lineLayer = layers.find(l => 
-                    l.type === 'line' && 
+                    (l.type === 'line' || l.type === 'line-extrusion') &&  // Check for BOTH line types
                     (!l['source-layer'] || l['source-layer'] === feature.layer?.name) &&
                     l.layout?.visibility !== 'none'
                 );
@@ -1094,6 +1163,12 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                     multiMiterLimit = lineLayer.layout?.['line-miter-limit'] || 2;
                 }
             }
+            
+            // Check if this is a line-extrusion layer (needs 3D tube geometry)
+            const isMultiLineExtrusion = style && sourceId && getLayersBySource(sourceId).some(l =>
+                (l.type === 'line-extrusion' || l.metadata?.['render-as-tubes'] === true) &&
+                l.id === layerId
+            );
             
             // Convert line width from pixels to world space
             const multiWorldWidth = screenWidthToWorld(multiLineWidth, zoom, 512);
@@ -1119,7 +1194,171 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
             const multiNormalizedB = multiLayerIdx / 255.0;
             const multiLayerZOffset = multiLayerIdx * 0.00000005;
             
-            feature.geometry.coordinates.forEach(line => {
+            if (isMultiLineExtrusion) {
+                // Get extrusion parameters for MultiLineString
+                const tubeShape = style?.layers?.find(l => l.id === layerId)?.metadata?.['tube-shape'] || 'rectangular';
+                const lineExtrusionHeight = getPaintProperty(layerId, 'line-extrusion-height', feature, zoom) || 10;
+                const lineExtrusionBase = getPaintProperty(layerId, 'line-extrusion-base', feature, zoom) || 0;
+                
+                // IMPORTANT: Width should use multiWorldWidth (clip space), NOT zoomExtrusion scaling
+                // This keeps tubes visually consistent with non-extruded lines
+                const radius = multiWorldWidth / 2;
+                
+                // Height uses zoomExtrusion to convert meters to clip space
+                const heightZ = lineExtrusionHeight * zoomExtrusion;
+                const baseZ = lineExtrusionBase * zoomExtrusion;
+                
+                // Process each line in the MultiLineString with extrusion
+                feature.geometry.coordinates.forEach(line => {
+                    const transformedLine = subdivideLine(line, 0.05);
+                    
+                    if (tubeShape === 'circular') {
+                        // ===== CIRCULAR TUBE for MultiLineString =====
+                        const segments = 12;
+                        
+                        // Generate circle cross-sections along the line
+                        const circles = [];
+                        for (let i = 0; i < transformedLine.length; i++) {
+                            const [cx, cy] = transformedLine[i];
+                            
+                            let perpX, perpY;
+                            if (i === 0) {
+                                const [nx, ny] = transformedLine[i + 1];
+                                const dx = nx - cx, dy = ny - cy;
+                                const len = Math.sqrt(dx * dx + dy * dy);
+                                perpX = -dy / len;
+                                perpY = dx / len;
+                            } else if (i === transformedLine.length - 1) {
+                                const [px, py] = transformedLine[i - 1];
+                                const dx = cx - px, dy = cy - py;
+                                const len = Math.sqrt(dx * dx + dy * dy);
+                                perpX = -dy / len;
+                                perpY = dx / len;
+                            } else {
+                                const [px, py] = transformedLine[i - 1];
+                                const [nx, ny] = transformedLine[i + 1];
+                                const dx1 = cx - px, dy1 = cy - py;
+                                const dx2 = nx - cx, dy2 = ny - cy;
+                                const len1 = Math.sqrt(dx1 * dx1 + dy1 * dy1);
+                                const len2 = Math.sqrt(dx2 * dx2 + dy2 * dy2);
+                                perpX = -(dy1 / len1 + dy2 / len2) / 2;
+                                perpY = (dx1 / len1 + dx2 / len2) / 2;
+                                const perpLen = Math.sqrt(perpX * perpX + perpY * perpY);
+                                perpX /= perpLen;
+                                perpY /= perpLen;
+                            }
+                            
+                            const terrainZ = terrainData ? sampleTerrainHeight(cx, cy, terrainData) : 0;
+                            circles.push({ cx, cy, perpX, perpY, terrainZ });
+                        }
+                        
+                        // Generate vertices for all circles
+                        const circleStartIdx = fillVertices.length / VERTEX_STRIDE;
+                        for (let i = 0; i < circles.length; i++) {
+                            const { cx, cy, perpX, perpY, terrainZ } = circles[i];
+                            
+                            for (let s = 0; s < segments; s++) {
+                                const angle = (s / segments) * Math.PI * 2;
+                                const horizontalOffset = Math.cos(angle) * radius;
+                                const verticalOffset = Math.sin(angle) * radius;
+                                
+                                const vx = cx + perpX * horizontalOffset;
+                                const vy = cy + perpY * horizontalOffset;
+                                const vz = (baseZ + heightZ) / 2 + verticalOffset + terrainZ + multiLayerZOffset;
+                                
+                                const normalX = perpX * Math.cos(angle);
+                                const normalY = perpY * Math.cos(angle);
+                                const normalZ = Math.sin(angle);
+                                const tubeNormal = [normalX, normalY, normalZ];
+                                
+                                fillVertices.push(vx, vy, vz, ...tubeNormal, ..._borderColor);
+                            }
+                        }
+                        
+                        // Connect adjacent circles with quad strips
+                        for (let i = 0; i < circles.length - 1; i++) {
+                            const ring1Start = circleStartIdx + i * segments;
+                            const ring2Start = circleStartIdx + (i + 1) * segments;
+                            
+                            for (let s = 0; s < segments; s++) {
+                                const next = (s + 1) % segments;
+                                const v1 = ring1Start + s;
+                                const v2 = ring1Start + next;
+                                const v3 = ring2Start + next;
+                                const v4 = ring2Start + s;
+                                
+                                fillIndices.push(v1, v2, v3);
+                                fillIndices.push(v1, v3, v4);
+                            }
+                        }
+                        
+                    } else if (tubeShape === 'rectangular') {
+                        // Generate rectangular tube for each line segment
+                        const leftEdge = [];
+                        const rightEdge = [];
+                        
+                        for (let i = 0; i < transformedLine.length; i++) {
+                            const [x, y] = transformedLine[i];
+                            let perpX, perpY;
+                            
+                            if (i === 0) {
+                                const [nx, ny] = transformedLine[i + 1];
+                                const dx = nx - x, dy = ny - y;
+                                const len = Math.sqrt(dx * dx + dy * dy);
+                                perpX = -dy / len;
+                                perpY = dx / len;
+                            } else if (i === transformedLine.length - 1) {
+                                const [px, py] = transformedLine[i - 1];
+                                const dx = x - px, dy = y - py;
+                                const len = Math.sqrt(dx * dx + dy * dy);
+                                perpX = -dy / len;
+                                perpY = dx / len;
+                            } else {
+                                const [px, py] = transformedLine[i - 1];
+                                const [nx, ny] = transformedLine[i + 1];
+                                const dx1 = x - px, dy1 = y - py;
+                                const dx2 = nx - x, dy2 = ny - y;
+                                const len1 = Math.sqrt(dx1 * dx1 + dy1 * dy1);
+                                const len2 = Math.sqrt(dx2 * dx2 + dy2 * dy2);
+                                perpX = -(dy1 / len1 + dy2 / len2) / 2;
+                                perpY = (dx1 / len1 + dx2 / len2) / 2;
+                                const perpLen = Math.sqrt(perpX * perpX + perpY * perpY);
+                                perpX /= perpLen;
+                                perpY /= perpLen;
+                            }
+                            
+                            const terrainZ = terrainData ? sampleTerrainHeight(x, y, terrainData) : 0;
+                            leftEdge.push([x + perpX * radius, y + perpY * radius, terrainZ]);
+                            rightEdge.push([x - perpX * radius, y - perpY * radius, terrainZ]);
+                        }
+                        
+                        // Create tube walls
+                        const createWall = (edge, isLeftSide) => {
+                            for (let i = 0; i < edge.length - 1; i++) {
+                                const [x1, y1, tz1] = edge[i];
+                                const [x2, y2, tz2] = edge[i + 1];
+                                const dx = x2 - x1, dy = y2 - y1;
+                                const len = Math.sqrt(dx * dx + dy * dy);
+                                const sign = isLeftSide ? 1 : -1;
+                                const wallNormal = len > 0 ? [-dy / len * sign, dx / len * sign, 0] : [1, 0, 0];
+                                
+                                const vOff = fillVertices.length / VERTEX_STRIDE;
+                                fillVertices.push(x1, y1, baseZ + tz1 + multiLayerZOffset, ...wallNormal, ..._borderColor);
+                                fillVertices.push(x2, y2, baseZ + tz2 + multiLayerZOffset, ...wallNormal, ..._borderColor);
+                                fillVertices.push(x2, y2, heightZ + tz2 + multiLayerZOffset, ...wallNormal, ..._borderColor);
+                                fillVertices.push(x1, y1, heightZ + tz1 + multiLayerZOffset, ...wallNormal, ..._borderColor);
+                                
+                                fillIndices.push(vOff, vOff + 1, vOff + 2, vOff, vOff + 2, vOff + 3);
+                            }
+                        };
+                        
+                        createWall(leftEdge, true);
+                        createWall(rightEdge, false);
+                    }
+                });
+            } else {
+                // Flat 2D rendering for MultiLineString
+                feature.geometry.coordinates.forEach(line => {
                 // Coordinates are already transformed
                 // Subdivide long segments for proper terrain height sampling
                 const transformedLine = subdivideLine(line, 0.02);
@@ -1162,6 +1401,7 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                     hiddenfillIndices.push(hiddenMultiLineStartIndex + idx);
                 });
             });
+            } // End of flat 2D rendering for MultiLineString
             break;
         case 'Point':
             const point = feature.geometry.coordinates; // Already transformed!
