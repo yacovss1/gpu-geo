@@ -142,17 +142,32 @@ function sampleTerrainHeight(x, y, terrainData) {
     const rawU = (x - bounds.minX) / (bounds.maxX - bounds.minX);
     const rawV = 1 - (y - bounds.minY) / (bounds.maxY - bounds.minY);
     
-    // Quantize and clamp (matches GPU shader)
-    const u = Math.max(0.001, Math.min(0.999, Math.floor(rawU * uvScale) / uvScale));
-    const v = Math.max(0.001, Math.min(0.999, Math.floor(rawV * uvScale) / uvScale));
+    // Clamp to valid range (matches GPU shader - no quantization!)
+    const u = Math.max(0.001, Math.min(0.999, rawU));
+    const v = Math.max(0.001, Math.min(0.999, rawV));
     
-    // Convert to pixel coordinates
-    const px = Math.floor(u * (width - 1));
-    const py = Math.floor(v * (height - 1));
+    // Bilinear interpolation to match GPU textureSampleLevel behavior
+    const fx = u * (width - 1);
+    const fy = v * (height - 1);
+    const x0 = Math.floor(fx);
+    const y0 = Math.floor(fy);
+    const x1 = Math.min(x0 + 1, width - 1);
+    const y1 = Math.min(y0 + 1, height - 1);
     
-    // Sample height
-    const idx = py * width + px;
-    const rawHeight = heights[idx] || 0;
+    // Get 4 corner heights
+    const h00 = heights[y0 * width + x0] || 0;
+    const h10 = heights[y0 * width + x1] || 0;
+    const h01 = heights[y1 * width + x0] || 0;
+    const h11 = heights[y1 * width + x1] || 0;
+    
+    // Interpolation weights
+    const wx = fx - x0;
+    const wy = fy - y0;
+    
+    // Bilinear interpolation
+    const h0 = h00 * (1 - wx) + h10 * wx;
+    const h1 = h01 * (1 - wx) + h11 * wx;
+    const rawHeight = h0 * (1 - wy) + h1 * wy;
     
     // Clamp to reasonable range and scale (same as GPU shader)
     const clampedHeight = Math.max(0, Math.min(9000, rawHeight));
@@ -486,8 +501,8 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
     };
     
     // Helper to subdivide a ring/line for terrain conformance
-    const subdivideRing = (coords, maxLength = 0.02) => {
-        if (!terrainData || coords.length < 2) return coords;
+    const subdivideRing = (coords, maxLength = 0.005) => {
+        if (coords.length < 2) return coords;
         
         const result = [coords[0]];
         for (let i = 1; i < coords.length; i++) {
@@ -756,8 +771,8 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
             
             // Coordinates are already transformed - use directly
             // Subdivide long segments for proper terrain height sampling
-            // Use 0.05 clip space units for moderate subdivision (larger = fewer vertices)
-            const subdividedCoords = subdivideLine(feature.geometry.coordinates, 0.05);
+            // Use 0.02 clip space units for dense subdivision to capture terrain detail
+            const subdividedCoords = subdivideLine(feature.geometry.coordinates, 0.02);
             const transformedLineCoords = subdividedCoords;
             
             // Check if this is a line-extrusion layer (needs 3D tube geometry)
@@ -849,7 +864,7 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                     // Step 2: Generate vertices for all circles
                     const circleStartIdx = fillVertices.length / VERTEX_STRIDE;
                     for (let i = 0; i < circles.length; i++) {
-                        const { cx, cy, perpX, perpY, terrainZ } = circles[i];
+                        const { cx, cy, perpX, perpY } = circles[i];
                         
                         // Create ring of vertices around circle
                         for (let s = 0; s < segments; s++) {
@@ -863,11 +878,11 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                             const vx = cx + perpX * horizontalOffset;
                             const vy = cy + perpY * horizontalOffset;
                             
-                            // Sample terrain at the ACTUAL vertex position, not centerline
+                            // Sample terrain at actual vertex position for consistency with polygons
                             const terrainZ = terrainData ? sampleTerrainHeight(vx, vy, terrainData) : 0;
                             
-                            // Add terrain height and layer offset to tube position
-                            const vz = (baseZ + heightZ) / 2 + verticalOffset + terrainZ + lineLayerZOffset;
+                            // Tube sits on terrain at baseZ, extends upward to heightZ
+                            const vz = baseZ + verticalOffset + terrainZ + lineLayerZOffset;
                             
                             // Calculate surface normal for lighting
                             const normalX = perpX * Math.cos(angle);
@@ -893,6 +908,101 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                             const v4 = ring2Start + s;
                             
                             // Two triangles per quad
+                            fillIndices.push(v1, v2, v3);
+                            fillIndices.push(v1, v3, v4);
+                        }
+                    }
+                    
+                } else if (tubeShape === 'half-ellipse') {
+                    // ===== HALF-ELLIPSE (DOME) TUBE GEOMETRY =====
+                    // Creates a rounded road surface - flat bottom touching terrain, domed top
+                    // Flatter ellipse: height is 1/4 of width for a more road-like appearance
+                    const segments = 8; // Half-circle segments (top half only)
+                    const heightRatio = 0.25; // Height is 25% of width (flatter dome)
+                    
+                    // Step 1: Generate all half-ellipse arch cross-sections along the line path
+                    const arches = [];
+                    for (let i = 0; i < transformedLineCoords.length; i++) {
+                        const [cx, cy] = transformedLineCoords[i];
+                        
+                        // Calculate perpendicular direction at this point
+                        let perpX, perpY;
+                        if (i === 0) {
+                            const [nx, ny] = transformedLineCoords[i + 1];
+                            const dx = nx - cx, dy = ny - cy;
+                            const len = Math.sqrt(dx * dx + dy * dy);
+                            perpX = -dy / len;
+                            perpY = dx / len;
+                        } else if (i === transformedLineCoords.length - 1) {
+                            const [px, py] = transformedLineCoords[i - 1];
+                            const dx = cx - px, dy = cy - py;
+                            const len = Math.sqrt(dx * dx + dy * dy);
+                            perpX = -dy / len;
+                            perpY = dx / len;
+                        } else {
+                            const [px, py] = transformedLineCoords[i - 1];
+                            const [nx, ny] = transformedLineCoords[i + 1];
+                            const dx1 = cx - px, dy1 = cy - py;
+                            const dx2 = nx - cx, dy2 = ny - cy;
+                            const len1 = Math.sqrt(dx1 * dx1 + dy1 * dy1);
+                            const len2 = Math.sqrt(dx2 * dx2 + dy2 * dy2);
+                            perpX = -(dy1 / len1 + dy2 / len2) / 2;
+                            perpY = (dx1 / len1 + dx2 / len2) / 2;
+                            const perpLen = Math.sqrt(perpX * perpX + perpY * perpY);
+                            perpX /= perpLen;
+                            perpY /= perpLen;
+                        }
+                        
+                        arches.push({ cx, cy, perpX, perpY });
+                    }
+                    
+                    // Step 2: Generate vertices for all half-ellipse arches
+                    // segments+1 points from angle 0 to PI (left edge to right edge over the top)
+                    const archStartIdx = fillVertices.length / VERTEX_STRIDE;
+                    const pointsPerArch = segments + 1;
+                    
+                    for (let i = 0; i < arches.length; i++) {
+                        const { cx, cy, perpX, perpY } = arches[i];
+                        
+                        for (let s = 0; s <= segments; s++) {
+                            // Angle from 0 (right edge at ground) to PI (left edge at ground)
+                            // Going over the top at PI/2
+                            const angle = (s / segments) * Math.PI;
+                            const horizontalOffset = Math.cos(angle) * radius; // -radius to +radius
+                            const verticalOffset = Math.sin(angle) * radius * heightRatio; // Flatter dome
+                            
+                            const vx = cx + perpX * horizontalOffset;
+                            const vy = cy + perpY * horizontalOffset;
+                            
+                            // Sample terrain at actual vertex position
+                            const terrainZ = terrainData ? sampleTerrainHeight(vx, vy, terrainData) : 0;
+                            
+                            // Base sits on terrain, dome rises above
+                            const vz = baseZ + verticalOffset + terrainZ + lineLayerZOffset;
+                            
+                            // Normal for ellipse: scale z component by heightRatio for correct lighting
+                            const normalX = perpX * Math.cos(angle);
+                            const normalY = perpY * Math.cos(angle);
+                            const normalZ = Math.sin(angle) / heightRatio; // Adjust for flat ellipse
+                            // Normalize the normal vector
+                            const nLen = Math.sqrt(normalX * normalX + normalY * normalY + normalZ * normalZ);
+                            const archNormal = [normalX / nLen, normalY / nLen, normalZ / nLen];
+                            
+                            fillVertices.push(vx, vy, vz, ...archNormal, ..._borderColor);
+                        }
+                    }
+                    
+                    // Step 3: Connect adjacent arches with quad strips (the dome surface)
+                    for (let i = 0; i < arches.length - 1; i++) {
+                        const arch1Start = archStartIdx + i * pointsPerArch;
+                        const arch2Start = archStartIdx + (i + 1) * pointsPerArch;
+                        
+                        for (let s = 0; s < segments; s++) {
+                            const v1 = arch1Start + s;
+                            const v2 = arch1Start + s + 1;
+                            const v3 = arch2Start + s + 1;
+                            const v4 = arch2Start + s;
+                            
                             fillIndices.push(v1, v2, v3);
                             fillIndices.push(v1, v3, v4);
                         }
@@ -1211,7 +1321,7 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                 
                 // Process each line in the MultiLineString with extrusion
                 feature.geometry.coordinates.forEach(line => {
-                    const transformedLine = subdivideLine(line, 0.05);
+                    const transformedLine = subdivideLine(line, 0.02);
                     
                     if (tubeShape === 'circular') {
                         // ===== CIRCULAR TUBE for MultiLineString =====
@@ -1256,7 +1366,7 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                         // Generate vertices for all circles
                         const circleStartIdx = fillVertices.length / VERTEX_STRIDE;
                         for (let i = 0; i < circles.length; i++) {
-                            const { cx, cy, perpX, perpY, terrainZ } = circles[i];
+                            const { cx, cy, perpX, perpY } = circles[i];
                             
                             for (let s = 0; s < segments; s++) {
                                 const angle = (s / segments) * Math.PI * 2;
@@ -1265,6 +1375,10 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                                 
                                 const vx = cx + perpX * horizontalOffset;
                                 const vy = cy + perpY * horizontalOffset;
+                                
+                                // Sample terrain at actual vertex position for consistency with polygons
+                                const terrainZ = terrainData ? sampleTerrainHeight(vx, vy, terrainData) : 0;
+                                
                                 const vz = (baseZ + heightZ) / 2 + verticalOffset + terrainZ + multiLayerZOffset;
                                 
                                 const normalX = perpX * Math.cos(angle);
@@ -1287,6 +1401,101 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                                 const v2 = ring1Start + next;
                                 const v3 = ring2Start + next;
                                 const v4 = ring2Start + s;
+                                
+                                fillIndices.push(v1, v2, v3);
+                                fillIndices.push(v1, v3, v4);
+                            }
+                        }
+                        
+                    } else if (tubeShape === 'half-ellipse') {
+                        // ===== HALF-ELLIPSE (DOME) TUBE for MultiLineString =====
+                        // Creates a rounded road surface - flat bottom, domed top
+                        // Flatter ellipse: height is 1/4 of width for a more road-like appearance
+                        const segments = 8; // Half-circle segments (top half only)
+                        const heightRatio = 0.25; // Height is 25% of width (flatter dome)
+                        
+                        // Generate half-ellipse cross-sections along the line
+                        const arches = [];
+                        for (let i = 0; i < transformedLine.length; i++) {
+                            const [cx, cy] = transformedLine[i];
+                            
+                            let perpX, perpY;
+                            if (i === 0) {
+                                const [nx, ny] = transformedLine[i + 1];
+                                const dx = nx - cx, dy = ny - cy;
+                                const len = Math.sqrt(dx * dx + dy * dy);
+                                perpX = -dy / len;
+                                perpY = dx / len;
+                            } else if (i === transformedLine.length - 1) {
+                                const [px, py] = transformedLine[i - 1];
+                                const dx = cx - px, dy = cy - py;
+                                const len = Math.sqrt(dx * dx + dy * dy);
+                                perpX = -dy / len;
+                                perpY = dx / len;
+                            } else {
+                                const [px, py] = transformedLine[i - 1];
+                                const [nx, ny] = transformedLine[i + 1];
+                                const dx1 = cx - px, dy1 = cy - py;
+                                const dx2 = nx - cx, dy2 = ny - cy;
+                                const len1 = Math.sqrt(dx1 * dx1 + dy1 * dy1);
+                                const len2 = Math.sqrt(dx2 * dx2 + dy2 * dy2);
+                                perpX = -(dy1 / len1 + dy2 / len2) / 2;
+                                perpY = (dx1 / len1 + dx2 / len2) / 2;
+                                const perpLen = Math.sqrt(perpX * perpX + perpY * perpY);
+                                perpX /= perpLen;
+                                perpY /= perpLen;
+                            }
+                            
+                            const terrainZ = terrainData ? sampleTerrainHeight(cx, cy, terrainData) : 0;
+                            arches.push({ cx, cy, perpX, perpY, terrainZ });
+                        }
+                        
+                        // Generate vertices for all half-ellipse arches
+                        // segments+1 points from angle 0 to PI (left edge to right edge over the top)
+                        const archStartIdx = fillVertices.length / VERTEX_STRIDE;
+                        const pointsPerArch = segments + 1;
+                        
+                        for (let i = 0; i < arches.length; i++) {
+                            const { cx, cy, perpX, perpY } = arches[i];
+                            
+                            for (let s = 0; s <= segments; s++) {
+                                // Angle from 0 (right/left edge at ground) to PI (other edge at ground)
+                                // Going over the top at PI/2
+                                const angle = (s / segments) * Math.PI;
+                                const horizontalOffset = Math.cos(angle) * radius; // -radius to +radius
+                                const verticalOffset = Math.sin(angle) * radius * heightRatio; // Flatter dome
+                                
+                                const vx = cx + perpX * horizontalOffset;
+                                const vy = cy + perpY * horizontalOffset;
+                                
+                                // Sample terrain at actual vertex position
+                                const terrainZ = terrainData ? sampleTerrainHeight(vx, vy, terrainData) : 0;
+                                
+                                // Base sits on terrain, dome rises above
+                                const vz = baseZ + verticalOffset + terrainZ + multiLayerZOffset;
+                                
+                                // Normal for ellipse: scale z component by heightRatio for correct lighting
+                                const normalX = perpX * Math.cos(angle);
+                                const normalY = perpY * Math.cos(angle);
+                                const normalZ = Math.sin(angle) / heightRatio; // Adjust for flat ellipse
+                                // Normalize the normal vector
+                                const nLen = Math.sqrt(normalX * normalX + normalY * normalY + normalZ * normalZ);
+                                const archNormal = [normalX / nLen, normalY / nLen, normalZ / nLen];
+                                
+                                fillVertices.push(vx, vy, vz, ...archNormal, ..._borderColor);
+                            }
+                        }
+                        
+                        // Connect adjacent arches with quad strips (the dome surface)
+                        for (let i = 0; i < arches.length - 1; i++) {
+                            const arch1Start = archStartIdx + i * pointsPerArch;
+                            const arch2Start = archStartIdx + (i + 1) * pointsPerArch;
+                            
+                            for (let s = 0; s < segments; s++) {
+                                const v1 = arch1Start + s;
+                                const v2 = arch1Start + s + 1;
+                                const v3 = arch2Start + s + 1;
+                                const v4 = arch2Start + s;
                                 
                                 fillIndices.push(v1, v2, v3);
                                 fillIndices.push(v1, v3, v4);

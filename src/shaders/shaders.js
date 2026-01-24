@@ -128,16 +128,16 @@ fn calculateLighting(normal: vec3<f32>) -> f32 {
 fn main(@location(0) inPosition: vec3<f32>, @location(1) inNormal: vec3<f32>, @location(2) inColor: vec4<f32>) -> VertexOutput {
     var output: VertexOutput;
     
-    // Check if Z is already set (CPU-baked terrain from centerline)
-    // If so, skip GPU terrain sampling to avoid Z-fighting
-    // (Left/right road edges would sample different terrain heights)
+    // GPU terrain sampling:
+    // - For features with CPU-baked terrain (Z > tiny): keep as-is, don't add GPU terrain
+    // - For features at Z=0: sample GPU terrain
     var terrainHeight = 0.0;
     if (abs(inPosition.z) < 0.0000001) {
-        // Z is zero - sample terrain at vertex position (polygons, non-line geometry)
+        // Z is zero - sample terrain at vertex position
         terrainHeight = sampleTerrainHeight(inPosition.x, inPosition.y);
     }
     
-    // Add terrain height to vertex Z (or use pre-baked Z)
+    // Add terrain height to vertex Z (preserves pre-baked Z, adds GPU terrain only for Z=0)
     let pos = vec4<f32>(inPosition.x, inPosition.y, inPosition.z + terrainHeight, 1.0);
 
     // Apply camera transform

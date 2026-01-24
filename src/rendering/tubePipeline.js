@@ -103,8 +103,8 @@ export class TubePipeline {
                 cullMode: 'none'  // Disable culling to see both sides
             },
             depthStencil: {
-                depthWriteEnabled: false,
-                depthCompare: 'always',
+                depthWriteEnabled: true,
+                depthCompare: 'less-equal',
                 format: 'depth24plus'
             },
             multisample: { count: 4 }

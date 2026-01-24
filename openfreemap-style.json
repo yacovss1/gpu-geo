@@ -201,12 +201,12 @@
       "filter": ["==", ["get", "class"], "tertiary"],
       "metadata": {
         "render-as-tubes": true,
-        "tube-shape": "circular"
+        "tube-shape": "half-ellipse"
       },
       "paint": {
         "line-color": "#fea",
         "line-width": ["interpolate", ["exponential", 1.5], ["zoom"], 10, 0.5, 12, 1, 14, 2, 16, 3, 18, 3.5, 20, 1],
-        "line-extrusion-height": 20,
+        "line-extrusion-height": 5,
         "line-extrusion-base": 0
       }
     },
@@ -219,12 +219,12 @@
       "filter": ["==", ["get", "class"], "minor"],
       "metadata": {
         "render-as-tubes": true,
-        "tube-shape": "circular"
+        "tube-shape": "half-ellipse"
       },
       "paint": {
         "line-color": "#ffffff",
         "line-width": ["interpolate", ["exponential", 1.5], ["zoom"], 13, 0.5, 14, 1, 16, 2, 18, 2.5, 20, 1],
-        "line-extrusion-height": 20,
+        "line-extrusion-height": 5,
         "line-extrusion-base": 0
       }
     },

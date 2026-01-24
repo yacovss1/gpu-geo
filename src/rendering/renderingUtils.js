@@ -153,13 +153,34 @@ export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, text
     // Features still get terrain height projection via GPU texture sampling.
     // TODO: Implement proper terrain stitching or use pre-stitched terrain tiles.
     
-    // Render ALL geometry in true style order
+    // Render geometry in two passes: opaque first, transparent last
+    // This ensures transparent layers don't block opaque layers with depth buffer
     if (style?.layers) {
+        const opaqueLayers = [];
+        const transparentLayers = [];
+        
+        // Sort layers by opacity
         for (const layer of style.layers) {
+            if (!shouldRenderLayer(layer.id, renderZoom)) continue;
+            if (!tileBuffers.get(layer.id)) continue;
+            
+            // Check if layer is transparent (opacity < 1.0)
+            const opacity = layer.paint?.['fill-opacity'] ?? layer.paint?.['fill-extrusion-opacity'] ?? layer.paint?.['line-opacity'] ?? 1.0;
+            const isTransparent = typeof opacity === 'number' ? opacity < 1.0 : false;
+            
+            if (isTransparent) {
+                transparentLayers.push(layer);
+            } else {
+                opaqueLayers.push(layer);
+            }
+        }
+        
+        // Render opaque layers first, then transparent
+        const layersToRender = [...opaqueLayers, ...transparentLayers];
+        
+        for (const layer of layersToRender) {
             const layerId = layer.id;
             const layerType = layer.type;
-            
-            if (!shouldRenderLayer(layerId, renderZoom)) continue;
             
             const buffers = tileBuffers.get(layerId);
             if (!buffers) continue;
