@@ -862,6 +862,10 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                             // Apply horizontal offset perpendicular to path
                             const vx = cx + perpX * horizontalOffset;
                             const vy = cy + perpY * horizontalOffset;
+                            
+                            // Sample terrain at the ACTUAL vertex position, not centerline
+                            const terrainZ = terrainData ? sampleTerrainHeight(vx, vy, terrainData) : 0;
+                            
                             // Add terrain height and layer offset to tube position
                             const vz = (baseZ + heightZ) / 2 + verticalOffset + terrainZ + lineLayerZOffset;
                             
@@ -1200,11 +1204,8 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                 const lineExtrusionHeight = getPaintProperty(layerId, 'line-extrusion-height', feature, zoom) || 10;
                 const lineExtrusionBase = getPaintProperty(layerId, 'line-extrusion-base', feature, zoom) || 0;
                 
-                // IMPORTANT: Width should use multiWorldWidth (clip space), NOT zoomExtrusion scaling
-                // This keeps tubes visually consistent with non-extruded lines
+                // Use multiWorldWidth for proper tube width
                 const radius = multiWorldWidth / 2;
-                
-                // Height uses zoomExtrusion to convert meters to clip space
                 const heightZ = lineExtrusionHeight * zoomExtrusion;
                 const baseZ = lineExtrusionBase * zoomExtrusion;
                 
