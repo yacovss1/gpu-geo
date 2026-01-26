@@ -177,8 +177,8 @@ export class TileManager {
                 const tileTerrainPolygons = []; // Collect flat polygons for terrain-based geometry
                 
                 // Determine if we should build terrain-based polygon geometry
-                // Only active at zoom 13+ where terrain detail is meaningful
-                const minTerrainPolygonZoom = 13;
+                // Only active at zoom 14+ where terrain detail is meaningful
+                const minTerrainPolygonZoom = 14;
                 const useTerrainPolygons = this.terrainLayer && 
                     this.terrainLayer.enabled && 
                     terrainData && 

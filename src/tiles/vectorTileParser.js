@@ -22,13 +22,22 @@ import { VectorTile } from '@mapbox/vector-tile';
  * @param {number} tileY - Tile Y index
  * @param {number} zoom - Zoom level
  * @param {number} extent - Tile extent (typically 4096)
+ * @param {boolean} clip - Whether to clip coordinates to tile bounds (default: false)
  * @returns {[number, number]} [x, y] in Mercator clip space
  */
-export function transformTileCoords(x, y, tileX, tileY, zoom, extent = 4096) {
+export function transformTileCoords(x, y, tileX, tileY, zoom, extent = 4096, clip = false) {
+  // Clip to tile bounds if requested (prevents buffer zone overlap between tiles)
+  let clippedX = x;
+  let clippedY = y;
+  if (clip) {
+    clippedX = Math.max(0, Math.min(extent, x));
+    clippedY = Math.max(0, Math.min(extent, y));
+  }
+  
   // Step 1: Tile-local (0-extent) → World coordinates (0-1)
   const tilesAtZoom = Math.pow(2, zoom);
-  const worldX = (tileX + x / extent) / tilesAtZoom;
-  const worldY = (tileY + y / extent) / tilesAtZoom;
+  const worldX = (tileX + clippedX / extent) / tilesAtZoom;
+  const worldY = (tileY + clippedY / extent) / tilesAtZoom;
   
   // Step 2: World coords → Geographic (lon/lat)
   const lon = worldX * 360 - 180;

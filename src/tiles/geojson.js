@@ -53,12 +53,20 @@ function getSmartFeatureId(feature, sourceId) {
         console.log(`� getSmartFeatureId Tunisia: feature.id=${featureId}, typeof=${typeof featureId}`);
     }
     
-    // If we have a valid numeric feature.id, use it directly
+    // If we have a valid numeric feature.id in the 16-bit range, use it directly
     if (typeof featureId === 'number' && featureId >= 1 && featureId <= 65534) {
         return featureId;
     }
     
-    // Fall back to sequential for now (should not happen with MapLibre demo tiles)
+    // If we have a large numeric ID (like OSM IDs), use modulo to map into 16-bit range
+    // This ensures the SAME feature across tiles gets the SAME ID
+    if (typeof featureId === 'number' && featureId > 65534) {
+        // Use modulo with prime number to reduce collisions, then ensure in valid range (1-65534)
+        const mappedId = (featureId % 65521) + 1; // 65521 is largest prime < 65535
+        return Math.min(mappedId, 65534);
+    }
+    
+    // Fall back to sequential for features without IDs
     const seqId = getNextFeatureId();
     //console.log(`⚠️ No valid feature.id for ${name || 'unknown'}, using sequential: ${seqId}`);
     return seqId;
