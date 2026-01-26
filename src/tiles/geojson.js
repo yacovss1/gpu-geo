@@ -190,6 +190,7 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
     const hiddenfillIndices = [];
     const lineSegments = []; // For line-extrusion 3D tube rendering
     const lineCenterlines = []; // For GPU compute terrain projection
+    const terrainPolygons = []; // For terrain-based polygon rendering (flat polygons that follow terrain)
     let isFilled = true;
     let isLine = true;
 
@@ -611,6 +612,15 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                     fillIndices.push(fillStartIndex + index);
                 });
                 
+                // Collect polygon data for terrain-based rendering
+                // This allows flat polygons to follow terrain mesh
+                console.log(`🔷 Collecting terrain polygon: ${layerId} with ${outerRing.length} points, color:`, _fillColor);
+                terrainPolygons.push({
+                    coords: [outerRing, ...holes], // Outer ring + holes
+                    color: _fillColor.slice(), // Copy color array
+                    type: layerId
+                });
+                
                 // Hidden buffer (for picking) - flat at z=0
                 const hiddenStartIndex = coordsToIdVertices(allCoords, 
                     clampedFeatureId,
@@ -729,6 +739,13 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
                     triangles.forEach(index => {
                         fillIndices.push(fillStartIndex + index);
                         hiddenfillIndices.push(hiddenStartIndex + index);
+                    });
+                    
+                    // Collect polygon data for terrain-based rendering
+                    terrainPolygons.push({
+                        coords: [outerRing, ...holes],
+                        color: _fillColor.slice(),
+                        type: layerId
                     });
                 }
             });
@@ -1636,6 +1653,7 @@ export function parseGeoJSONFeature(feature, fillColor = [0.0, 0.0, 0.0, 1.0], s
         hiddenfillIndices: new Uint32Array(hiddenfillIndices),
         lineSegments: lineSegments.length > 0 ? lineSegments : null, // For 3D tube rendering
         lineCenterlines: lineCenterlines.length > 0 ? lineCenterlines : null, // For GPU compute terrain projection
+        terrainPolygons: terrainPolygons.length > 0 ? terrainPolygons : null, // For terrain-based polygon rendering
         isFilled,
         isLine,
         layerId,  // Add layerId to return object

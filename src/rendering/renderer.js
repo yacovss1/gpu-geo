@@ -579,6 +579,18 @@ export class MapRenderer {
         // Get visible terrain tiles and build atlas
         // Always do this regardless of terrainLayer.enabled - vectors need heights
         const visibleTiles = this.terrainLayer.getVisibleTerrainTiles(camera, zoom);
+        
+        // IMPORTANT: Trigger terrain tile loading even when overlay is disabled
+        // Without this, tiles never load if enabled=false, so GPU can't sample heights
+        for (const tile of visibleTiles) {
+            const key = `${tile.z}/${tile.x}/${tile.y}`;
+            if (!this.terrainLayer.terrainTiles.has(key) && 
+                !this.terrainLayer.loadingTiles.has(key) &&
+                !this.terrainLayer.failedTiles.has(key)) {
+                this.terrainLayer.loadTerrainTile(tile.z, tile.x, tile.y);
+            }
+        }
+        
         const atlas = this.terrainLayer.buildTerrainAtlas(visibleTiles);
         
         if (!atlas) {
@@ -592,7 +604,7 @@ export class MapRenderer {
         
         // Update bounds uniform with atlas bounds and tile count
         const exagg = this.terrainLayer.exaggeration;
-        console.log(`🏔️ Writing exaggeration to GPU: ${exagg}`);
+        //console.log(`🏔️ Writing exaggeration to GPU: ${exagg}`);
         this.device.queue.writeBuffer(this.buffers.terrainBounds, 0, new Float32Array([
             atlas.bounds.minX, atlas.bounds.minY, atlas.bounds.maxX, atlas.bounds.maxY,
             exagg,

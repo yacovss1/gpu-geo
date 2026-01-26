@@ -148,10 +148,11 @@ export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, text
     
     // fillsWithExtrusions already computed above for hidden pass
     
-    // TERRAIN DISABLED: The terrain mesh approach causes visible seams at tile boundaries
-    // due to height mismatches in the terrain tile data (known issue in MapLibre too).
-    // Features still get terrain height projection via GPU texture sampling.
-    // TODO: Implement proper terrain stitching or use pre-stitched terrain tiles.
+    // TERRAIN MESH DISABLED: Polygons now extract terrain vertices directly
+    // They have the 3D terrain shape baked into their geometry
+    // if (terrainLayer && terrainLayer.enabled) {
+    //     terrainLayer.render(colorPass, null, camera, renderZoom);
+    // }
     
     // Render geometry in two passes: opaque first, transparent last
     // This ensures transparent layers don't block opaque layers with depth buffer

@@ -13,6 +13,7 @@ import { getVisibleTiles } from '../tiles/tile-utils.js';
 import { transformTileCoords } from '../tiles/vectorTileParser.js';
 import { terrainShaderCode } from '../shaders/terrainShaders.js';
 import { TERRAIN_CONFIG } from '../core/terrainConfig.js';
+import { PolygonRasterizer } from './polygonRasterizer.js';
 
 // Terrain tile sources
 const TERRAIN_SOURCES = {
@@ -59,6 +60,10 @@ export class TerrainLayer {
         this.atlasTexture = null;
         this.atlasBounds = null; // { minX, minY, maxX, maxY } in clip space
         this.atlasSize = 1024; // Atlas texture size (covers multiple tiles)
+        
+        // Polygon rasterizer for terrain-based polygon rendering
+        this.polygonRasterizer = null;
+        this.polygonTextures = new Map(); // "z/x/y" -> GPUTexture
     }
 
     /**
@@ -68,7 +73,9 @@ export class TerrainLayer {
         this.cameraBuffer = buffer;
         // Recreate bind groups for all cached tiles
         for (const [key, tile] of this.terrainTiles) {
-            tile.bindGroup = this.createTileBindGroup(tile);
+            const [z, x, y] = key.split('/').map(Number);
+            const polygonTex = this.getPolygonTexture(z, x, y);
+            tile.bindGroup = this.createTileBindGroup(tile, polygonTex);
         }
     }
 
@@ -92,8 +99,25 @@ export class TerrainLayer {
                 { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } },
                 { binding: 1, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
                 { binding: 2, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
-                { binding: 3, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } } // Tile info
+                { binding: 3, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } }, // Tile info
+                { binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } }, // Polygon texture
+                { binding: 5, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } }    // Polygon sampler
             ]
+        });
+        
+        // Create a default empty polygon texture (1x1 transparent)
+        this.emptyPolygonTexture = this.device.createTexture({
+            size: [1, 1, 1],
+            format: 'rgba8unorm',
+            usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
+        });
+        
+        // Polygon sampler for texture lookup
+        this.polygonSampler = this.device.createSampler({
+            magFilter: 'linear',
+            minFilter: 'linear',
+            addressModeU: 'clamp-to-edge',
+            addressModeV: 'clamp-to-edge'
         });
         
         const pipelineLayout = this.device.createPipelineLayout({
@@ -178,6 +202,10 @@ export class TerrainLayer {
         // Grid mesh will be created per-tile with transformed coordinates
         this.gridSize = 128; // Higher resolution for better edge alignment
         this.gridIndices = this.createGridIndices();
+        
+        // Initialize polygon rasterizer
+        this.polygonRasterizer = new PolygonRasterizer(this.device);
+        
         this.initialized = true;
         console.log('🏔️ TerrainLayer initialized');
     }
@@ -311,7 +339,9 @@ export class TerrainLayer {
             
             // Create bind group if camera buffer is available
             if (this.cameraBuffer) {
-                tileData.bindGroup = this.createTileBindGroup(tileData);
+                // Check for existing polygon texture
+                const polygonTex = this.getPolygonTexture(z, x, y);
+                tileData.bindGroup = this.createTileBindGroup(tileData, polygonTex);
             }
             
             this.terrainTiles.set(key, tileData);
@@ -448,7 +478,8 @@ export class TerrainLayer {
             
             // Ensure bind group exists (may have been created before camera buffer was set)
             if (!tileData.bindGroup) {
-                tileData.bindGroup = this.createTileBindGroup(tileData);
+                const polygonTex = this.getPolygonTexture(tile.z, tile.x, tile.y);
+                tileData.bindGroup = this.createTileBindGroup(tileData, polygonTex);
             }
             if (!tileData.bindGroup) continue;
             if (!tileData.vertexBuffer) continue;
@@ -500,7 +531,8 @@ export class TerrainLayer {
             }
             
             if (!tileData.bindGroup) {
-                tileData.bindGroup = this.createTileBindGroup(tileData);
+                const polygonTex = this.getPolygonTexture(tile.z, tile.x, tile.y);
+                tileData.bindGroup = this.createTileBindGroup(tileData, polygonTex);
             }
             if (!tileData.bindGroup) continue;
             if (!tileData.vertexBuffer) continue;
@@ -623,10 +655,62 @@ export class TerrainLayer {
     }
 
     /**
-     * Create a bind group for a terrain tile
+     * Set polygon data for a tile to be rendered on terrain mesh
+     * This rasterizes polygon features to a texture that the terrain shader samples
+     * @param {number} z - Zoom level
+     * @param {number} x - Tile X
+     * @param {number} y - Tile Y
+     * @param {Array} polygons - Array of polygon data: { rings: [[x,y],...], color: [r,g,b,a] }
+     * @param {Object} bounds - Tile bounds in clip space: { minX, minY, maxX, maxY }
      */
-    createTileBindGroup(tileData) {
+    setPolygonData(z, x, y, polygons, bounds) {
+        if (!this.polygonRasterizer) {
+            console.warn('🎨 No polygon rasterizer!');
+            return;
+        }
+        
+        const key = `${z}/${x}/${y}`;
+        console.log(`🎨 setPolygonData called for ${key} with ${polygons.length} polygons`);
+        
+        // Clean up old texture if exists
+        if (this.polygonTextures.has(key)) {
+            this.polygonTextures.get(key).destroy();
+        }
+        
+        // Rasterize polygons to texture
+        const texture = this.polygonRasterizer.rasterizeTile(z, x, y, polygons, bounds);
+        if (texture) {
+            this.polygonTextures.set(key, texture);
+            console.log(`🎨 Polygon texture created for ${key}`);
+            
+            // Update bind group for this terrain tile if it exists
+            const tileData = this.terrainTiles.get(key);
+            if (tileData && this.cameraBuffer) {
+                tileData.bindGroup = this.createTileBindGroup(tileData, texture);
+                console.log(`🎨 Bind group updated with polygon texture for ${key}`);
+            } else {
+                console.log(`🎨 Terrain tile not loaded yet for ${key}`);
+            }
+        }
+    }
+    
+    /**
+     * Get polygon texture for a tile
+     */
+    getPolygonTexture(z, x, y) {
+        return this.polygonTextures.get(`${z}/${x}/${y}`) || null;
+    }
+
+    /**
+     * Create a bind group for a terrain tile
+     * @param {Object} tileData - The terrain tile data
+     * @param {GPUTexture} polygonTexture - Optional polygon texture for this tile
+     */
+    createTileBindGroup(tileData, polygonTexture = null) {
         if (!this.cameraBuffer) return null;
+        
+        // Use provided polygon texture or fallback to empty texture
+        const polyTex = polygonTexture || this.emptyPolygonTexture;
         
         return this.device.createBindGroup({
             layout: this.bindGroupLayout,
@@ -634,7 +718,9 @@ export class TerrainLayer {
                 { binding: 0, resource: { buffer: this.cameraBuffer } },
                 { binding: 1, resource: tileData.texture.createView() },
                 { binding: 2, resource: this.sampler },
-                { binding: 3, resource: { buffer: tileData.tileInfoBuffer } }
+                { binding: 3, resource: { buffer: tileData.tileInfoBuffer } },
+                { binding: 4, resource: polyTex.createView() },
+                { binding: 5, resource: this.polygonSampler }
             ]
         });
     }
@@ -645,6 +731,13 @@ export class TerrainLayer {
             if (tile.vertexBuffer) tile.vertexBuffer.destroy();
         }
         this.terrainTiles.clear();
+        
+        // Clean up polygon textures
+        for (const [key, texture] of this.polygonTextures) {
+            texture.destroy();
+        }
+        this.polygonTextures.clear();
+        
         if (this.gridIndices) {
             this.gridIndices.buffer.destroy();
         }

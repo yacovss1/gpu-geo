@@ -13,6 +13,7 @@
 import { fetchVectorTile, clearTileCache, resetNotFoundTiles, parseGeoJSONFeature } from './geojson.js';
 import { getVisibleTiles } from './tile-utils.js';
 import { getTileCoordinator } from './TileCoordinator.js';
+import { TerrainPolygonBuilder } from '../rendering/terrainPolygonBuilder.js';
 
 export class TileManager {
     constructor(device, performanceStats) {
@@ -21,6 +22,13 @@ export class TileManager {
         
         // Tile coordinator for terrain sync
         this.tileCoordinator = getTileCoordinator();
+        
+        // Terrain layer reference for terrain-based polygon rendering
+        this.terrainLayer = null;
+        
+        // Terrain polygon builder - extracts terrain mesh vertices for polygons
+        // Pass device for GPU compute acceleration
+        this.terrainPolygonBuilder = new TerrainPolygonBuilder(device, 32);
         
         // Tile storage: Map<layerId, Array<tileBuffer>>
         this.visibleTileBuffers = new Map();
@@ -38,6 +46,13 @@ export class TileManager {
         this.maxTilesPerLayer = 100; // Configurable limit
         this.totalBuffersCreated = 0;
         this.totalBuffersDestroyed = 0;
+    }
+    
+    /**
+     * Set terrain layer for polygon rasterization
+     */
+    setTerrainLayer(terrainLayer) {
+        this.terrainLayer = terrainLayer;
     }
     
     /**
@@ -159,15 +174,41 @@ export class TileManager {
                 // Collect centerlines for GPU terrain compute
                 const tileKey = `${z}/${x}/${y}`;
                 const tileCenterlines = [];
+                const tileTerrainPolygons = []; // Collect flat polygons for terrain-based geometry
+                
+                // Determine if we should build terrain-based polygon geometry
+                // Only active at zoom 13+ where terrain detail is meaningful
+                const minTerrainPolygonZoom = 13;
+                const useTerrainPolygons = this.terrainLayer && 
+                    this.terrainLayer.enabled && 
+                    terrainData && 
+                    z >= minTerrainPolygonZoom;
                 
                 // Create GPU buffers for each feature
                 parsedFeatures.forEach(feature => {
-                    this.createBuffersForFeature(
-                        feature,
-                        z, x, y,
-                        newTileBuffers,
-                        newHiddenTileBuffers
-                    );
+                    // Collect terrain polygons BEFORE creating buffers
+                    if (feature.terrainPolygons && feature.terrainPolygons.length > 0) {
+                        tileTerrainPolygons.push(...feature.terrainPolygons.map(p => ({
+                            ...p,
+                            layerId: feature.layerId,
+                            featureId: feature.featureId
+                        })));
+                    }
+                    
+                    // Skip flat polygon buffer creation if using terrain-based geometry
+                    const skipThisPolygon = useTerrainPolygons && 
+                        feature.terrainPolygons && 
+                        feature.terrainPolygons.length > 0;
+                    
+                    if (!skipThisPolygon) {
+                        this.createBuffersForFeature(
+                            feature,
+                            z, x, y,
+                            newTileBuffers,
+                            newHiddenTileBuffers,
+                            false
+                        );
+                    }
                     
                     // Collect centerlines from line features
                     if (feature.lineCenterlines && feature.lineCenterlines.length > 0) {
@@ -178,6 +219,33 @@ export class TileManager {
                 // Store centerlines for this tile (for GPU compute pipeline)
                 if (tileCenterlines.length > 0) {
                     this.tileCenterlines.set(tileKey, tileCenterlines);
+                }
+                
+                // Build terrain-based polygon geometry
+                if (tileTerrainPolygons.length > 0 && useTerrainPolygons) {
+                    console.log(`🏔️ Building ${tileTerrainPolygons.length} terrain polygons for tile ${tileKey}`);
+                    
+                    // Update exaggeration from terrain layer
+                    if (this.terrainLayer) {
+                        this.terrainPolygonBuilder.setExaggeration(this.terrainLayer.exaggeration);
+                    }
+                    
+                    // Use CPU - GPU compute has too much readback overhead
+                    for (const polygon of tileTerrainPolygons) {
+                        const geometry = this.terrainPolygonBuilder.buildPolygonFromTerrain(
+                            polygon, terrainData, z, x, y
+                        );
+                        
+                        if (geometry && geometry.vertices.length > 0 && geometry.indices.length > 0) {
+                            // Create GPU buffers for terrain-based polygon
+                            this.createTerrainPolygonBuffers(
+                                geometry,
+                                polygon.layerId,
+                                z, x, y,
+                                newTileBuffers
+                            );
+                        }
+                    }
                 }
                 
             } catch (err) {
@@ -221,12 +289,19 @@ export class TileManager {
     
     /**
      * Create GPU buffers for a single feature
+     * @param {boolean} skipFlatPolygons - If true, skip flat polygons (rendered via terrain mesh)
      */
-    createBuffersForFeature(parsedFeature, z, x, y, newTileBuffers, newHiddenTileBuffers) {
+    createBuffersForFeature(parsedFeature, z, x, y, newTileBuffers, newHiddenTileBuffers, skipFlatPolygons = false) {
         const {
             vertices, hiddenVertices, fillIndices, hiddenfillIndices,
-            isFilled, isLine, properties, layerId
+            isFilled, isLine, properties, layerId, terrainPolygons
         } = parsedFeature;
+        
+        // Skip flat polygons if they're being rendered via terrain mesh
+        if (skipFlatPolygons && terrainPolygons && terrainPolygons.length > 0) {
+            // This polygon will be rendered via terrain mesh texture sampling
+            return;
+        }
         
         if (vertices.length === 0 || fillIndices.length === 0) {
             return; // Skip empty geometry
@@ -306,6 +381,55 @@ export class TileManager {
             isFilled,
             layerId: layerId
         });
+    }
+    
+    /**
+     * Create GPU buffers for terrain-based polygon geometry
+     * These polygons use vertices extracted from the terrain mesh
+     */
+    createTerrainPolygonBuffers(geometry, layerId, z, x, y, newTileBuffers) {
+        const { vertices, indices } = geometry;
+        
+        if (vertices.length === 0 || indices.length === 0) {
+            return;
+        }
+        
+        // Create vertex buffer
+        const vertexBuffer = this.device.createBuffer({
+            size: this.alignBufferSize(vertices.byteLength),
+            usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+        });
+        this.device.queue.writeBuffer(vertexBuffer, 0, this.padToAlignment(vertices));
+        this.totalBuffersCreated++;
+        
+        // Create index buffer
+        const fillIndexBuffer = this.device.createBuffer({
+            size: this.alignBufferSize(indices.byteLength),
+            usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
+        });
+        this.device.queue.writeBuffer(fillIndexBuffer, 0, this.padToAlignment(indices));
+        this.totalBuffersCreated++;
+        
+        // Add to tile buffers
+        if (!newTileBuffers.has(layerId)) {
+            newTileBuffers.set(layerId, []);
+        }
+        
+        newTileBuffers.get(layerId).push({
+            vertexBuffer,
+            fillIndexBuffer,
+            fillIndexCount: indices.length,
+            isFilled: true,
+            isLine: false,
+            properties: {},
+            zoomLevel: z,
+            tileX: x,
+            tileY: y,
+            isTerrainPolygon: true, // Mark as terrain-based
+            layerId: layerId
+        });
+        
+        console.log(`🏔️ Created terrain polygon buffer: ${indices.length / 3} triangles for ${layerId}`);
     }
     
     /**

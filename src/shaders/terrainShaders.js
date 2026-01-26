@@ -54,8 +54,8 @@ fn vs_main(
     let height = max(rawHeight, 0.0);
     
     // Scale height - use smaller divisor for more subtle terrain
-    // Push terrain slightly BELOW Z=0 so features render on top
-    let scaledHeight = (height / 50000000.0) * tileInfo.exaggeration - 0.0001;
+    // Terrain mesh should be at same height as vector features
+    let scaledHeight = (height / 50000000.0) * tileInfo.exaggeration;
     
     output.height = scaledHeight;
     output.normal = vec3<f32>(0.0, 0.0, 1.0);
@@ -69,7 +69,9 @@ fn vs_main(
 `;
 
 export const terrainFragmentShader = `
-// terrainTexture and terrainSampler already declared in vertex shader
+// Polygon texture for terrain-based polygon rendering
+@group(0) @binding(4) var polygonTexture: texture_2d<f32>;
+@group(0) @binding(5) var polygonSampler: sampler;
 
 fn decodeHeightFrag(pixel: vec4<f32>) -> f32 {
     // Terrarium encoding: height = (R * 256 + G + B / 256) - 32768
@@ -86,6 +88,12 @@ fn fs_main(
     @location(2) normal: vec3<f32>,
     @location(3) skirtFlag: f32
 ) -> @location(0) vec4<f32> {
+    // Sample polygon texture at this UV
+    let polygonColor = textureSample(polygonTexture, polygonSampler, uv);
+    
+    // If polygon alpha > 0, use polygon color, otherwise use terrain color
+    let hasPolygon = polygonColor.a > 0.01;
+    
     // Solid land color - light tan/beige like traditional topo maps
     let landColor = vec3<f32>(0.96, 0.94, 0.90);
     
@@ -110,8 +118,14 @@ fn fs_main(
     let diffuse = 0.4;
     let lighting = ambient + diffuse * ndotl;
     
-    // Apply lighting to land color
-    let finalColor = landColor * lighting;
+    // Choose base color: polygon or terrain
+    var baseColor = landColor;
+    if (hasPolygon) {
+        baseColor = polygonColor.rgb;
+    }
+    
+    // Apply lighting
+    let finalColor = baseColor * lighting;
     
     return vec4<f32>(finalColor, 1.0);
 }

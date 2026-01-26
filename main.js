@@ -83,6 +83,7 @@ async function main() {
     // Initialize TileCoordinator for terrain-synced vector loading
     await initializeTileCoordinator();
     const tileManager = new TileManager(device, performanceManager.stats);
+    tileManager.setTerrainLayer(terrainLayer);  // Connect for polygon rasterization
     
     // ===== Initialize Marker Resources =====
     const markerResources = initMarkerResources(
