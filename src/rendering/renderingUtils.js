@@ -50,6 +50,9 @@ export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, text
     
     const renderZoom = camera.zoom;
     
+    // NOTE: Base terrain mesh is NOT rendered to hidden/picking buffer
+    // It should not be pickable - only actual features should be pickable
+    
     // Check for fills with extrusions (need depth bias) - same logic as color pass
     const fillsWithExtrusions = new Set();
     if (style?.layers) {
@@ -147,6 +150,27 @@ export function renderMap(device, renderer, tileBuffers, hiddenTileBuffers, text
     });
     
     // fillsWithExtrusions already computed above for hidden pass
+    
+    // RENDER BASE TERRAIN MESH FIRST (background layer, always rendered first)
+    // Uses baseTerrain pipeline with large negative depth bias to stay behind all features
+    const baseTerrainBuffersColor = tileBuffers.get('base-terrain');
+    if (baseTerrainBuffersColor && baseTerrainBuffersColor.length > 0) {
+        baseTerrainBuffersColor.forEach(({ vertexBuffer, fillIndexBuffer, fillIndexCount }) => {
+            if (fillIndexCount > 0) {
+                colorPass.setPipeline(renderer.pipelines.baseTerrain);
+                colorPass.setVertexBuffer(0, vertexBuffer);
+                colorPass.setIndexBuffer(fillIndexBuffer, "uint32");
+                colorPass.setBindGroup(0, renderer.bindGroups.main);
+                if (renderer.bindGroups.terrain) {
+                    colorPass.setBindGroup(1, renderer.bindGroups.terrain);
+                }
+                if (renderer.bindGroups.shadow) {
+                    colorPass.setBindGroup(2, renderer.bindGroups.shadow);
+                }
+                colorPass.drawIndexed(fillIndexCount);
+            }
+        });
+    }
     
     // TERRAIN MESH DISABLED: Polygons now extract terrain vertices directly
     // They have the 3D terrain shape baked into their geometry

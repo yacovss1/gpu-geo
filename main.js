@@ -144,7 +144,19 @@ async function main() {
         const textureView = currentTexture.createView();
 
         // Update terrain for GPU-based vector projection
+        // First update terrain (this sets atlasBounds)
         renderer.updateTerrainForProjection(camera, camera.zoom);
+        
+        // Build splatmap atlas at zoom 14+ if we have terrain atlas bounds
+        let splatmapAtlasResult = null;
+        if (camera.zoom >= 14 && terrainLayer && terrainLayer.atlasBounds) {
+            const visibleTiles = terrainLayer.getVisibleTerrainTiles(camera, camera.zoom);
+            splatmapAtlasResult = tileManager.buildSplatmapAtlas(visibleTiles, terrainLayer.atlasBounds);
+            if (splatmapAtlasResult && splatmapAtlasResult.texture) {
+                // Re-update terrain with splatmap atlas and its bounds
+                renderer.updateTerrainForProjection(camera, camera.zoom, splatmapAtlasResult.texture, splatmapAtlasResult.bounds);
+            }
+        }
 
         // Render map geometry
         const mapEncoder = renderMap(

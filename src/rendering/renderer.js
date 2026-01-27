@@ -66,6 +66,7 @@ export function createRenderPipeline(device, format, topology, isHidden = false,
     }
     
     // Group 1: Terrain data (optional - for GPU terrain projection)
+    // Also includes splatmap for terrain polygon rendering
     if (!cachedLayouts.terrain) {
         cachedLayouts.terrain = device.createBindGroupLayout({
             entries: [
@@ -83,6 +84,18 @@ export function createRenderPipeline(device, format, topology, isHidden = false,
                     binding: 2,
                     visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
                     buffer: { type: "uniform" }
+                },
+                // Splatmap color texture (binding 3)
+                {
+                    binding: 3,
+                    visibility: GPUShaderStage.FRAGMENT,
+                    texture: { sampleType: 'float' }
+                },
+                // Splatmap sampler (binding 4)
+                {
+                    binding: 4,
+                    visibility: GPUShaderStage.FRAGMENT,
+                    sampler: { type: 'filtering' }
                 }
             ]
         });
@@ -157,8 +170,8 @@ export function createRenderPipeline(device, format, topology, isHidden = false,
             depthCompare: disableDepthTest ? 'always' : 'less-equal',
             ...(depthBias !== 0 && topology !== 'line-list' && !disableDepthTest ? {
                 depthBias: depthBias,
-                depthBiasSlopeScale: 2.0,
-                depthBiasClamp: 0.01
+                depthBiasSlopeScale: depthBias < 0 ? -2.0 : 2.0,
+                depthBiasClamp: depthBias < 0 ? -0.1 : 0.01  // Larger clamp for negative bias (base terrain)
             } : {})
         },
         multisample: { count: isHidden ? 1 : 4 }
@@ -375,6 +388,8 @@ export class MapRenderer {
         this.pipelines.flat = createRenderPipeline(this.device, this.format, "triangle-list", false, 0, false);
         // Fill with depth bias - for fills that have a corresponding extrusion
         this.pipelines.fillWithBias = createRenderPipeline(this.device, this.format, "triangle-list", false, 100);
+        // Base terrain pipeline - small negative bias to render just behind other content
+        this.pipelines.baseTerrain = createRenderPipeline(this.device, this.format, "triangle-list", false, -50);
         // Extrusion pipeline - small depth bias to reduce z-fighting between adjacent walls
         this.pipelines.extrusion = createRenderPipeline(this.device, this.format, "triangle-list", false, 2);
         this.pipelines.outline = createRenderPipeline(this.device, this.format, "line-list", false, 0);
@@ -471,10 +486,32 @@ export class MapRenderer {
             [1, 1]
         );
         
-        // Create terrain bounds uniform buffer (64 bytes = 16 floats)
-        // Layout: terrainBounds (8 floats) + lighting (8 floats)
+        // Create dummy 1x1 splatmap texture (transparent - no polygon color)
+        this.dummySplatmapTexture = this.device.createTexture({
+            size: [1, 1],
+            format: 'rgba8unorm',
+            usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
+        });
+        // Initialize with transparent (alpha = 0 means use vertex color)
+        this.device.queue.writeTexture(
+            { texture: this.dummySplatmapTexture },
+            new Uint8Array([0, 0, 0, 0]),
+            { bytesPerRow: 4 },
+            [1, 1]
+        );
+        
+        // Splatmap sampler
+        this.splatmapSampler = this.device.createSampler({
+            magFilter: 'linear',
+            minFilter: 'linear',
+            addressModeU: 'clamp-to-edge',
+            addressModeV: 'clamp-to-edge'
+        });
+        
+        // Create terrain bounds uniform buffer (80 bytes = 20 floats)
+        // Layout: terrainBounds (8 floats) + lighting (8 floats) + splatmapBounds (4 floats)
         this.buffers.terrainBounds = this.device.createBuffer({
-            size: 64,
+            size: 80,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
         });
         // Initialize with disabled terrain and default lighting
@@ -483,10 +520,12 @@ export class MapRenderer {
             -1, -1, 1, 1,  // minX, minY, maxX, maxY
             30,            // exaggeration - match terrainLayer default
             0,             // enabled (0 = disabled)
-            0, 0,          // padding
+            0, 0,          // tilesX, tilesY
             // Lighting data (8 floats)
             0.5, 0.5, 0.7, 1.0,    // sunDirection.xyz, intensity
             0.3, 0.35, 0.45, 0.0,  // ambientColor.rgb, isNight (0 = day)
+            // Splatmap bounds (4 floats) - defaults to full range
+            -1, -1, 1, 1,  // splatMinX, splatMinY, splatMaxX, splatMaxY
         ]));
         
         // Create bind groups - separate camera (group 0) and terrain (group 1)
@@ -502,7 +541,9 @@ export class MapRenderer {
             entries: [
                 { binding: 0, resource: this.dummyTerrainTexture.createView() },
                 { binding: 1, resource: this.terrainSampler },
-                { binding: 2, resource: { buffer: this.buffers.terrainBounds } }
+                { binding: 2, resource: { buffer: this.buffers.terrainBounds } },
+                { binding: 3, resource: this.dummySplatmapTexture.createView() },
+                { binding: 4, resource: this.splatmapSampler }
             ],
         });
         
@@ -529,7 +570,9 @@ export class MapRenderer {
             entries: [
                 { binding: 0, resource: this.dummyTerrainTexture.createView() },
                 { binding: 1, resource: this.terrainSampler },
-                { binding: 2, resource: { buffer: this.buffers.terrainBounds } }
+                { binding: 2, resource: { buffer: this.buffers.terrainBounds } },
+                { binding: 3, resource: this.dummySplatmapTexture.createView() },
+                { binding: 4, resource: this.splatmapSampler }
             ],
         });
         
@@ -565,8 +608,12 @@ export class MapRenderer {
      * Note: Always update terrain for vector Z heights, regardless of whether
      * the terrain overlay layer is rendered. The 'enabled' flag on terrainLayer
      * controls overlay rendering, not height projection.
+     * @param {Camera} camera - The camera object
+     * @param {number} zoom - Current zoom level
+     * @param {GPUTexture} splatmapAtlas - Optional splatmap atlas texture for polygon rendering
+     * @param {Object} splatmapBounds - Optional splatmap bounds { minX, minY, maxX, maxY }
      */
-    updateTerrainForProjection(camera, zoom) {
+    updateTerrainForProjection(camera, zoom, splatmapAtlas = null, splatmapBounds = null) {
         if (!this.terrainLayer) {
             // No terrain layer at all - disable terrain in shader
             this.device.queue.writeBuffer(this.buffers.terrainBounds, 0, new Float32Array([
@@ -604,7 +651,16 @@ export class MapRenderer {
         
         // Update bounds uniform with atlas bounds and tile count
         const exagg = this.terrainLayer.exaggeration;
-        //console.log(`🏔️ Writing exaggeration to GPU: ${exagg}`);
+        
+        // Use splatmap bounds if provided, otherwise use terrain bounds as fallback
+        const splatBounds = splatmapBounds || atlas.bounds;
+        
+        // Debug: log bounds comparison
+        if (splatmapBounds) {
+            console.log(`🗺️ Terrain bounds: ${JSON.stringify(atlas.bounds)}`);
+            console.log(`🗺️ Splatmap bounds: ${JSON.stringify(splatBounds)}`);
+        }
+        
         this.device.queue.writeBuffer(this.buffers.terrainBounds, 0, new Float32Array([
             atlas.bounds.minX, atlas.bounds.minY, atlas.bounds.maxX, atlas.bounds.maxY,
             exagg,
@@ -613,13 +669,25 @@ export class MapRenderer {
             atlas.tilesY || 1   // number of tiles in Y
         ]));
         
+        // Write splatmap bounds at offset 64 (after terrain + lighting data)
+        this.device.queue.writeBuffer(this.buffers.terrainBounds, 64, new Float32Array([
+            splatBounds.minX, splatBounds.minY, splatBounds.maxX, splatBounds.maxY
+        ]));
+        
         // Recreate terrain bind groups with atlas texture
+        // Use splatmap atlas if provided, otherwise use dummy
+        const splatmapView = splatmapAtlas 
+            ? splatmapAtlas.createView() 
+            : this.dummySplatmapTexture.createView();
+        
         this.bindGroups.terrain = this.device.createBindGroup({
             layout: this.pipelines.fill.getBindGroupLayout(1),
             entries: [
                 { binding: 0, resource: atlas.texture.createView() },
                 { binding: 1, resource: this.terrainSampler },
-                { binding: 2, resource: { buffer: this.buffers.terrainBounds } }
+                { binding: 2, resource: { buffer: this.buffers.terrainBounds } },
+                { binding: 3, resource: splatmapView },
+                { binding: 4, resource: this.splatmapSampler }
             ],
         });
         
@@ -628,7 +696,9 @@ export class MapRenderer {
             entries: [
                 { binding: 0, resource: atlas.texture.createView() },
                 { binding: 1, resource: this.terrainSampler },
-                { binding: 2, resource: { buffer: this.buffers.terrainBounds } }
+                { binding: 2, resource: { buffer: this.buffers.terrainBounds } },
+                { binding: 3, resource: splatmapView },
+                { binding: 4, resource: this.splatmapSampler }
             ],
         });
     }

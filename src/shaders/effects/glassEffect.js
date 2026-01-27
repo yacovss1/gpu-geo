@@ -15,6 +15,9 @@ struct TerrainAndLighting {
 };
 
 @group(1) @binding(2) var<uniform> terrainData: TerrainAndLighting;
+// Splatmap bindings (must match main shader layout)
+@group(1) @binding(3) var splatmapTexture_gl: texture_2d<f32>;
+@group(1) @binding(4) var splatmapSampler_gl: sampler;
 
 // Shadow map bindings (group 2)
 @group(2) @binding(1) var shadowMap: texture_depth_2d;

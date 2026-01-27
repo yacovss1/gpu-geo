@@ -32,6 +32,9 @@ struct TerrainBounds {
 @group(1) @binding(0) var terrainTexture: texture_2d<f32>;
 @group(1) @binding(1) var terrainSampler: sampler;
 @group(1) @binding(2) var<uniform> terrainBounds: TerrainBounds;
+// Splatmap bindings (must match main shader layout)
+@group(1) @binding(3) var splatmapTexture_g: texture_2d<f32>;
+@group(1) @binding(4) var splatmapSampler_g: sampler;
 
 fn sampleTerrainHeight(clipX: f32, clipY: f32) -> f32 {
     if (terrainBounds.enabled < 0.5) {

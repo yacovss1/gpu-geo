@@ -83,7 +83,7 @@ export class ShaderEffectManager {
             ]
         });
         
-        // Terrain bind group layout (same as main shaders)
+        // Terrain bind group layout (must match main shaders with splatmap)
         const terrainBindGroupLayout = this.device.createBindGroupLayout({
             entries: [
                 {
@@ -100,6 +100,16 @@ export class ShaderEffectManager {
                     binding: 2,
                     visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
                     buffer: { type: "uniform" }
+                },
+                {
+                    binding: 3,
+                    visibility: GPUShaderStage.FRAGMENT,
+                    texture: { sampleType: 'float' }
+                },
+                {
+                    binding: 4,
+                    visibility: GPUShaderStage.FRAGMENT,
+                    sampler: { type: 'filtering' }
                 }
             ]
         });
@@ -165,7 +175,7 @@ export class ShaderEffectManager {
             }]
         });
         
-        // Group 1: Terrain data (must match main shader bindings)
+        // Group 1: Terrain data (must match main shader bindings with splatmap)
         const terrainBindGroupLayout = this.device.createBindGroupLayout({
             entries: [
                 {
@@ -182,6 +192,16 @@ export class ShaderEffectManager {
                     binding: 2,
                     visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
                     buffer: { type: "uniform" }
+                },
+                {
+                    binding: 3,
+                    visibility: GPUShaderStage.FRAGMENT,
+                    texture: { sampleType: 'float' }
+                },
+                {
+                    binding: 4,
+                    visibility: GPUShaderStage.FRAGMENT,
+                    sampler: { type: 'filtering' }
                 }
             ]
         });
@@ -273,7 +293,7 @@ export class ShaderEffectManager {
             ]
         });
         
-        // Terrain bind group layout (same as main shaders)
+        // Terrain bind group layout (same as main shaders with splatmap)
         const terrainBindGroupLayout = this.device.createBindGroupLayout({
             entries: [
                 {
@@ -290,6 +310,16 @@ export class ShaderEffectManager {
                     binding: 2,
                     visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
                     buffer: { type: "uniform" }
+                },
+                {
+                    binding: 3,
+                    visibility: GPUShaderStage.FRAGMENT,
+                    texture: { sampleType: 'float' }
+                },
+                {
+                    binding: 4,
+                    visibility: GPUShaderStage.FRAGMENT,
+                    sampler: { type: 'filtering' }
                 }
             ]
         });

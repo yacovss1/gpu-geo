@@ -35,6 +35,37 @@ export class TerrainPolygonBuilder {
     }
 
     /**
+     * Calculate terrain normal from neighboring heights
+     */
+    calculateNormal(gx, gy, n, results) {
+        const getHeight = (x, y) => {
+            if (x < 0 || x > n || y < 0 || y > n) return 0;
+            const idx = y * (n + 1) + x;
+            return results[idx]?.height || 0;
+        };
+
+        const hCenter = getHeight(gx, gy);
+        const hRight = getHeight(gx + 1, gy);
+        const hLeft = getHeight(gx - 1, gy);
+        const hUp = getHeight(gx, gy + 1);
+        const hDown = getHeight(gx, gy - 1);
+
+        // Calculate gradient using central differences
+        const dx = (hRight - hLeft) / 2.0;
+        const dy = (hUp - hDown) / 2.0;
+
+        // Normal is perpendicular to surface tangents
+        // Tangent X: (1, 0, dx)
+        // Tangent Y: (0, 1, dy)
+        // Normal = cross product
+        const normal = [-dx, -dy, 1.0];
+
+        // Normalize
+        const len = Math.sqrt(normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]);
+        return [normal[0] / len, normal[1] / len, normal[2] / len];
+    }
+
+    /**
      * Build polygon geometry using terrain mesh vertices (GPU-accelerated)
      */
     async buildPolygonFromTerrainGPU(polygon, terrainData, z, x, y) {
@@ -45,7 +76,6 @@ export class TerrainPolygonBuilder {
         if (outerRing.length < 3) return null;
 
         const n = this.gridSize;
-        const UP_NORMAL = [0, 0, 1];
 
         // Run GPU compute for point-in-polygon
         const results = await this.gpuCompute.computePolygonGrid(
@@ -108,12 +138,13 @@ export class TerrainPolygonBuilder {
             return null;
         }
 
-        // Build vertex buffer
+        // Build vertex buffer with calculated normals
         const vertices = [];
         for (const v of gridVertices) {
+            const normal = this.calculateNormal(v.gx, v.gy, n, results);
             vertices.push(
                 v.clipX, v.clipY, v.height,
-                ...UP_NORMAL,
+                ...normal,
                 ...color
             );
         }
@@ -122,6 +153,37 @@ export class TerrainPolygonBuilder {
             vertices: new Float32Array(vertices),
             indices: new Uint32Array(indices)
         };
+    }
+
+    /**
+     * Calculate terrain normal from neighboring heights (CPU version)
+     */
+    calculateNormalCPU(gx, gy, n, gridVertices, vertexIndexMap) {
+        const getHeight = (x, y) => {
+            const key = `${x},${y}`;
+            if (vertexIndexMap.has(key)) {
+                const idx = vertexIndexMap.get(key);
+                return gridVertices[idx].height;
+            }
+            return 0;
+        };
+
+        const hCenter = getHeight(gx, gy);
+        const hRight = getHeight(gx + 1, gy);
+        const hLeft = getHeight(gx - 1, gy);
+        const hUp = getHeight(gx, gy + 1);
+        const hDown = getHeight(gx, gy - 1);
+
+        // Calculate gradient using central differences
+        const dx = (hRight - hLeft) / 2.0;
+        const dy = (hUp - hDown) / 2.0;
+
+        // Normal is perpendicular to surface tangents
+        const normal = [-dx, -dy, 1.0];
+
+        // Normalize
+        const len = Math.sqrt(normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]);
+        return [normal[0] / len, normal[1] / len, normal[2] / len];
     }
 
     /**
@@ -138,7 +200,6 @@ export class TerrainPolygonBuilder {
 
         const n = this.gridSize;
         const extent = 4096;
-        const UP_NORMAL = [0, 0, 1];
 
         // Calculate bounding box in clip space for faster culling
         let minX = Infinity, maxX = -Infinity;
@@ -210,12 +271,13 @@ export class TerrainPolygonBuilder {
             return null;
         }
 
-        // Build vertex buffer
+        // Build vertex buffer with calculated normals
         const vertices = [];
         for (const v of gridVertices) {
+            const normal = this.calculateNormalCPU(v.gx, v.gy, n, gridVertices, vertexIndexMap);
             vertices.push(
                 v.clipX, v.clipY, v.height,
-                ...UP_NORMAL,
+                ...normal,
                 ...color
             );
         }

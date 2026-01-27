@@ -9,7 +9,8 @@ struct VertexOutput {
     @location(2) worldZ: f32,
     @location(3) normal: vec3<f32>,
     @location(4) shadowCoord: vec3<f32>,  // Position in light space for shadow lookup
-    @location(5) terrainNormal: vec3<f32> // Terrain surface normal for shading flat features
+    @location(5) terrainNormal: vec3<f32>, // Terrain surface normal for shading flat features
+    @location(6) clipPos: vec2<f32>       // Original clip position for splatmap lookup
 };
 
 struct TerrainAndLighting {
@@ -30,7 +31,12 @@ struct TerrainAndLighting {
     ambientR: f32,
     ambientG: f32,
     ambientB: f32,
-    isNight: f32
+    isNight: f32,
+    // Splatmap bounds (4 floats) - may differ from terrain bounds
+    splatMinX: f32,
+    splatMinY: f32,
+    splatMaxX: f32,
+    splatMaxY: f32
 };
 
 @group(0) @binding(0) var<uniform> uniforms: mat4x4<f32>;
@@ -146,6 +152,7 @@ fn main(@location(0) inPosition: vec3<f32>, @location(1) inNormal: vec3<f32>, @l
     output.fragCoord = output.position.xy;
     output.color = inColor;
     output.worldZ = inPosition.z + terrainHeight;
+    output.clipPos = inPosition.xy;  // Original clip position for splatmap lookup
     
     // Pass normal to fragment shader for lighting calculation
     output.normal = inNormal;
@@ -170,12 +177,17 @@ fn main(@location(0) inPosition: vec3<f32>, @location(1) inNormal: vec3<f32>, @l
 export const fragmentShaderCode = `
 struct TerrainAndLighting {
     minX: f32, minY: f32, maxX: f32, maxY: f32,
-    exaggeration: f32, enabled: f32, _pad1: f32, _pad2: f32,
+    exaggeration: f32, enabled: f32, tilesX: f32, tilesY: f32,
     sunDirX: f32, sunDirY: f32, sunDirZ: f32, intensity: f32,
-    ambientR: f32, ambientG: f32, ambientB: f32, isNight: f32
+    ambientR: f32, ambientG: f32, ambientB: f32, isNight: f32,
+    splatMinX: f32, splatMinY: f32, splatMaxX: f32, splatMaxY: f32
 };
 
 @group(1) @binding(2) var<uniform> terrainData: TerrainAndLighting;
+
+// Splatmap for terrain polygon colors (bind group 1)
+@group(1) @binding(3) var splatmapTexture: texture_2d<f32>;
+@group(1) @binding(4) var splatmapSampler: sampler;
 
 // Shadow map in bind group 2
 @group(2) @binding(1) var shadowMap: texture_depth_2d;
@@ -184,13 +196,41 @@ struct TerrainAndLighting {
 // Debug flag: set to true to visualize shadows
 const DEBUG_SHADOWS: bool = false;
 
+// Calculate UV for splatmap from clip coordinates (uses splatmap-specific bounds)
+fn clipToSplatmapUV(clipX: f32, clipY: f32) -> vec2<f32> {
+    let u = (clipX - terrainData.splatMinX) / (terrainData.splatMaxX - terrainData.splatMinX);
+    let v = 1.0 - (clipY - terrainData.splatMinY) / (terrainData.splatMaxY - terrainData.splatMinY);
+    return vec2<f32>(clamp(u, 0.0, 1.0), clamp(v, 0.0, 1.0));
+}
+
 @fragment
-fn main(@location(0) fragCoord: vec2<f32>, @location(1) color: vec4<f32>, @location(2) worldZ: f32, @location(3) normal: vec3<f32>, @location(4) shadowCoord: vec3<f32>, @location(5) terrainNormal: vec3<f32>) -> @location(0) vec4<f32> {
+fn main(@location(0) fragCoord: vec2<f32>, @location(1) color: vec4<f32>, @location(2) worldZ: f32, @location(3) normal: vec3<f32>, @location(4) shadowCoord: vec3<f32>, @location(5) terrainNormal: vec3<f32>, @location(6) clipPos: vec2<f32>) -> @location(0) vec4<f32> {
     var fixedColor = color;
+    
+    // Sample splatmap at this fragment's original clip position
+    // Always sample (required for uniform control flow), but only use if in bounds
+    let splatUV = clipToSplatmapUV(clipPos.x, clipPos.y);
+    let splatColor = textureSample(splatmapTexture, splatmapSampler, splatUV);
+    
+    // Check if within splatmap bounds to prevent smearing
+    let inBoundsX = clipPos.x >= terrainData.splatMinX && clipPos.x <= terrainData.splatMaxX;
+    let inBoundsY = clipPos.y >= terrainData.splatMinY && clipPos.y <= terrainData.splatMaxY;
+    let inBounds = inBoundsX && inBoundsY;
+    
+    // Only apply splatmap color if in bounds and has alpha
+    let useSplatmap = inBounds && splatColor.a > 0.01;
+    if (useSplatmap) {
+        fixedColor = vec4<f32>(
+            mix(fixedColor.rgb, splatColor.rgb, splatColor.a),
+            fixedColor.a
+        );
+    }
     
     // Normalize the interpolated normals
     let geomNormal = normalize(normal);
     let terrNormal = normalize(terrainNormal);
+    
+    // For flat features (normal pointing straight up), use terrain normal for shading
     
     // For flat features (normal pointing straight up), use terrain normal for shading
     // This gives roads and polygons proper terrain-based lighting
@@ -287,6 +327,9 @@ struct TerrainAndLighting {
 @group(1) @binding(0) var terrainTexture: texture_2d<f32>;
 @group(1) @binding(1) var terrainSampler: sampler;
 @group(1) @binding(2) var<uniform> terrainData: TerrainAndLighting;
+// Splatmap bindings (must match fill shader layout, even if not used)
+@group(1) @binding(3) var splatmapTexture_h: texture_2d<f32>;
+@group(1) @binding(4) var splatmapSampler_h: sampler;
 
 fn sampleTerrainHeight(clipX: f32, clipY: f32) -> f32 {
     if (terrainData.enabled < 0.5) {

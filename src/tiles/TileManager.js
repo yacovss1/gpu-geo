@@ -14,6 +14,9 @@ import { fetchVectorTile, clearTileCache, resetNotFoundTiles, parseGeoJSONFeatur
 import { getVisibleTiles } from './tile-utils.js';
 import { getTileCoordinator } from './TileCoordinator.js';
 import { TerrainPolygonBuilder } from '../rendering/terrainPolygonBuilder.js';
+import { BaseTerrainMeshGenerator } from '../rendering/baseTerrainMesh.js';
+import { SplatmapGenerator } from '../rendering/splatmapGenerator.js';
+import { transformTileCoords } from './vectorTileParser.js';
 
 export class TileManager {
     constructor(device, performanceStats) {
@@ -28,11 +31,27 @@ export class TileManager {
         
         // Terrain polygon builder - extracts terrain mesh vertices for polygons
         // Pass device for GPU compute acceleration
-        this.terrainPolygonBuilder = new TerrainPolygonBuilder(device, 32);
+        this.terrainPolygonBuilder = new TerrainPolygonBuilder(device,16);
+        
+        // Base terrain mesh generator - fills negative space with terrain
+        this.baseTerrainMeshGenerator = new BaseTerrainMeshGenerator(32);
+        
+        // Splatmap generator - rasterizes polygons to texture for terrain rendering
+        // Using 1024x1024 for better edge quality
+        this.splatmapGenerator = new SplatmapGenerator(1024);
+        
+        // Splatmap storage: Map<tileKey, { colorTexture, featureIdTexture }>
+        this.tileSplatmaps = new Map();
+        
+        // Splatmap atlas texture for combining multiple tile splatmaps
+        this.splatmapAtlasTexture = null;
         
         // Tile storage: Map<layerId, Array<tileBuffer>>
         this.visibleTileBuffers = new Map();
         this.hiddenTileBuffers = new Map();
+        
+        // Base terrain tile storage (background layer)
+        this.baseTerrainBuffers = [];
         
         // Centerline storage for GPU terrain compute: Map<tileKey, Array<centerline>>
         this.tileCenterlines = new Map();
@@ -171,6 +190,39 @@ export class TileManager {
                 
                 if (abortSignal?.aborted) return;
                 
+                // Generate base terrain mesh if terrain data is available
+                // This fills "negative space" so features don't float
+                // Only generate at zoom 6+ where terrain is meaningful
+                // At lower zooms, flat map with country boundaries should be visible
+                const minBaseTerrainZoom = 6;
+                if (terrainData && z >= minBaseTerrainZoom) {
+                    // Get background color from style or use default
+                    const { getStyle, parseColor } = await import('../core/style.js');
+                    const style = getStyle();
+                    let baseColor = [0.6, 0.5, 0.4, 1.0];  // Default brown
+                    if (style?.layers) {
+                        const bgLayer = style.layers.find(l => l.type === 'background');
+                        if (bgLayer?.paint?.['background-color']) {
+                            const parsed = parseColor(bgLayer.paint['background-color']);
+                            if (parsed) baseColor = parsed;
+                        }
+                    }
+                    
+                    // Update exaggeration from terrain layer
+                    if (this.terrainLayer) {
+                        this.baseTerrainMeshGenerator.setExaggeration(this.terrainLayer.exaggeration);
+                    }
+                    
+                    const baseMesh = this.baseTerrainMeshGenerator.generateTileMesh(
+                        terrainData, z, x, y,
+                        baseColor
+                    );
+                    
+                    if (baseMesh && baseMesh.vertices.length > 0) {
+                        this.createBaseTerrainBuffers(baseMesh, z, x, y, newTileBuffers);
+                    }
+                }
+                
                 // Collect centerlines for GPU terrain compute
                 const tileKey = `${z}/${x}/${y}`;
                 const tileCenterlines = [];
@@ -221,31 +273,53 @@ export class TileManager {
                     this.tileCenterlines.set(tileKey, tileCenterlines);
                 }
                 
-                // Build terrain-based polygon geometry
+                // Build splatmap for terrain polygon rendering
+                // This rasterizes flat polygons to a texture for the terrain mesh
                 if (tileTerrainPolygons.length > 0 && useTerrainPolygons) {
-                    console.log(`🏔️ Building ${tileTerrainPolygons.length} terrain polygons for tile ${tileKey}`);
+                    console.log(`� Generating splatmap with ${tileTerrainPolygons.length} polygons for tile ${tileKey}`);
                     
-                    // Update exaggeration from terrain layer
-                    if (this.terrainLayer) {
-                        this.terrainPolygonBuilder.setExaggeration(this.terrainLayer.exaggeration);
+                    // Calculate tile bounds in clip space
+                    const [minX, minY] = transformTileCoords(0, 0, x, y, z, 4096);
+                    const [maxX, maxY] = transformTileCoords(4096, 4096, x, y, z, 4096);
+                    const tileBounds = { minX, minY, maxX, maxY };
+                    
+                    // Get layer ordering from style
+                    const { getStyle } = await import('../core/style.js');
+                    const style = getStyle();
+                    const layerOrder = new Map();
+                    if (style?.layers) {
+                        style.layers.forEach((layer, index) => {
+                            layerOrder.set(layer.id, index);
+                        });
                     }
                     
-                    // Use CPU - GPU compute has too much readback overhead
-                    for (const polygon of tileTerrainPolygons) {
-                        const geometry = this.terrainPolygonBuilder.buildPolygonFromTerrain(
-                            polygon, terrainData, z, x, y
-                        );
-                        
-                        if (geometry && geometry.vertices.length > 0 && geometry.indices.length > 0) {
-                            // Create GPU buffers for terrain-based polygon
-                            this.createTerrainPolygonBuffers(
-                                geometry,
-                                polygon.layerId,
-                                z, x, y,
-                                newTileBuffers
-                            );
-                        }
-                    }
+                    // Prepare polygons with layer index for sorting
+                    const polygonsForSplatmap = tileTerrainPolygons.map(p => ({
+                        coords: p.coords,
+                        color: p.color,
+                        featureId: p.featureId || 0,
+                        layerIndex: layerOrder.get(p.layerId) || 0
+                    }));
+                    
+                    // Generate splatmap
+                    const splatmapData = this.splatmapGenerator.generateSplatmap(
+                        polygonsForSplatmap,
+                        tileBounds
+                    );
+                    
+                    // Create GPU textures
+                    const textures = this.splatmapGenerator.createGPUTextures(
+                        this.device,
+                        splatmapData
+                    );
+                    
+                    // Store splatmap for this tile
+                    this.tileSplatmaps.set(tileKey, {
+                        ...textures,
+                        bounds: tileBounds
+                    });
+                    
+                    console.log(`✅ Splatmap generated for tile ${tileKey}: ${splatmapData.resolution}x${splatmapData.resolution}`);
                 }
                 
             } catch (err) {
@@ -432,6 +506,192 @@ export class TileManager {
         console.log(`🏔️ Created terrain polygon buffer: ${indices.length / 3} triangles for ${layerId}`);
     }
     
+    /**
+     * Create GPU buffers for base terrain mesh (background layer)
+     */
+    createBaseTerrainBuffers(geometry, z, x, y, newTileBuffers) {
+        const { vertices, indices } = geometry;
+        
+        if (vertices.length === 0 || indices.length === 0) {
+            return;
+        }
+        
+        // Create vertex buffer
+        const vertexBuffer = this.device.createBuffer({
+            size: this.alignBufferSize(vertices.byteLength),
+            usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+        });
+        this.device.queue.writeBuffer(vertexBuffer, 0, this.padToAlignment(vertices));
+        this.totalBuffersCreated++;
+        
+        // Create index buffer
+        const fillIndexBuffer = this.device.createBuffer({
+            size: this.alignBufferSize(indices.byteLength),
+            usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
+        });
+        this.device.queue.writeBuffer(fillIndexBuffer, 0, this.padToAlignment(indices));
+        this.totalBuffersCreated++;
+        
+        // Add to base terrain buffers (special layer "base-terrain")
+        const layerId = 'base-terrain';
+        const tileKey = `${z}/${x}/${y}`;
+        
+        if (!newTileBuffers.has(layerId)) {
+            newTileBuffers.set(layerId, []);
+        }
+        
+        newTileBuffers.get(layerId).push({
+            vertexBuffer,
+            fillIndexBuffer,
+            fillIndexCount: indices.length,
+            isFilled: true,
+            isLine: false,
+            properties: {},
+            zoomLevel: z,
+            tileX: x,
+            tileY: y,
+            tileKey: tileKey, // Store tile key for splatmap lookup
+            isBaseTerrain: true, // Mark as base terrain
+            layerId: layerId
+        });
+        
+        console.log(`🌍 Created base terrain mesh: ${indices.length / 3} triangles for tile ${z}/${x}/${y}`);
+    }
+    
+    /**
+     * Get splatmap for a tile
+     * @param {string} tileKey - e.g., "14/2835/6456"
+     * @returns {Object|null} - { colorTexture, featureIdTexture, bounds } or null
+     */
+    getSplatmap(tileKey) {
+        return this.tileSplatmaps.get(tileKey) || null;
+    }
+    
+    /**
+     * Build a splatmap atlas from visible tiles
+     * Combines multiple tile splatmaps into one texture matching terrain atlas layout
+     * @param {Array} visibleTiles - Array of { x, y, z } tile coordinates
+     * @param {Object} atlasBounds - { minX, minY, maxX, maxY } from terrain atlas
+     * @returns {Object|null} - { texture, bounds } or null if no splatmaps
+     */
+    buildSplatmapAtlas(visibleTiles, atlasBounds) {
+        // Don't filter by atlasBounds - include ALL splatmaps we have
+        // The terrain atlas bounds are often smaller than splatmap coverage
+        const tilesWithSplatmaps = [];
+        for (const [key, splatmap] of this.tileSplatmaps) {
+            if (splatmap && splatmap.colorTexture) {
+                const parts = key.split('/');
+                tilesWithSplatmaps.push({
+                    ...splatmap,
+                    z: parseInt(parts[0]),
+                    x: parseInt(parts[1]),
+                    y: parseInt(parts[2]),
+                    key
+                });
+            }
+        }
+        
+        console.log(`🗺️ Splatmap atlas: ${tilesWithSplatmaps.length} tiles total`);
+        
+        if (tilesWithSplatmaps.length === 0) return null;
+        
+        // Calculate combined bounds from all splatmap tiles
+        let splatMinX = Infinity, splatMinY = Infinity;
+        let splatMaxX = -Infinity, splatMaxY = -Infinity;
+        for (const tile of tilesWithSplatmaps) {
+            splatMinX = Math.min(splatMinX, tile.bounds.minX);
+            splatMinY = Math.min(splatMinY, tile.bounds.minY);
+            splatMaxX = Math.max(splatMaxX, tile.bounds.maxX);
+            splatMaxY = Math.max(splatMaxY, tile.bounds.maxY);
+        }
+        
+        // Use the splatmap bounds for the atlas (not terrain bounds)
+        const boundsWidth = splatMaxX - splatMinX;
+        const boundsHeight = splatMaxY - splatMinY;
+        
+        if (boundsWidth <= 0 || boundsHeight <= 0) return null;
+        
+        // Store the actual splatmap atlas bounds for shader use
+        this.splatmapAtlasBounds = { minX: splatMinX, minY: splatMinY, maxX: splatMaxX, maxY: splatMaxY };
+        
+        // Calculate tile size in clip space from first splatmap's bounds
+        const firstTile = tilesWithSplatmaps[0];
+        const tileClipWidth = firstTile.bounds.maxX - firstTile.bounds.minX;
+        const tileClipHeight = firstTile.bounds.maxY - firstTile.bounds.minY;
+        
+        if (tileClipWidth <= 0 || tileClipHeight <= 0) return null;
+        
+        const tilePixelSize = this.splatmapGenerator.resolution; // Usually 256
+        const tilesX = Math.round(boundsWidth / tileClipWidth);
+        const tilesY = Math.round(boundsHeight / tileClipHeight);
+        
+        // Ensure at least 1 tile
+        const atlasWidth = Math.max(1, tilesX) * tilePixelSize;
+        const atlasHeight = Math.max(1, tilesY) * tilePixelSize;
+        
+        // Create or resize atlas texture
+        if (!this.splatmapAtlasTexture || 
+            this.splatmapAtlasTexture.width !== atlasWidth || 
+            this.splatmapAtlasTexture.height !== atlasHeight) {
+            
+            if (this.splatmapAtlasTexture) {
+                this.splatmapAtlasTexture.destroy();
+            }
+            
+            this.splatmapAtlasTexture = this.device.createTexture({
+                size: [atlasWidth, atlasHeight],
+                format: 'rgba8unorm',
+                usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT
+            });
+        }
+        
+        // ALWAYS clear to transparent before copying new tiles
+        // This ensures tiles that are no longer in view don't persist
+        const clearData = new Uint8Array(atlasWidth * atlasHeight * 4);
+        this.device.queue.writeTexture(
+            { texture: this.splatmapAtlasTexture },
+            clearData,
+            { bytesPerRow: atlasWidth * 4 },
+            { width: atlasWidth, height: atlasHeight }
+        );
+        
+        // Copy each tile splatmap into the atlas
+        const commandEncoder = this.device.createCommandEncoder();
+        
+        for (const tile of tilesWithSplatmaps) {
+            // Calculate position in atlas using tile grid coordinates
+            // Each tile should be at an exact pixel boundary based on its tile coords
+            const tileOffsetX = (tile.bounds.minX - splatMinX) / tileClipWidth;
+            const tileOffsetY = (splatMaxY - tile.bounds.maxY) / tileClipHeight;
+            
+            // Use floor to get exact tile index, then multiply by pixel size
+            const atlasX = Math.floor(tileOffsetX + 0.5) * tilePixelSize;
+            const atlasY = Math.floor(tileOffsetY + 0.5) * tilePixelSize;
+            
+            // Bounds check - skip tiles that would go outside atlas
+            if (atlasX < 0 || atlasY < 0 || 
+                atlasX + tilePixelSize > atlasWidth || 
+                atlasY + tilePixelSize > atlasHeight) {
+                console.warn(`Skipping splatmap tile ${tile.z}/${tile.x}/${tile.y} - outside atlas bounds (${atlasX}, ${atlasY}) atlas size (${atlasWidth}x${atlasHeight})`);
+                continue;
+            }
+            
+            commandEncoder.copyTextureToTexture(
+                { texture: tile.colorTexture },
+                { texture: this.splatmapAtlasTexture, origin: { x: atlasX, y: atlasY, z: 0 } },
+                { width: tilePixelSize, height: tilePixelSize, depthOrArrayLayers: 1 }
+            );
+        }
+        
+        this.device.queue.submit([commandEncoder.finish()]);
+        
+        // Return atlas with its bounds for proper UV calculation
+        return {
+            texture: this.splatmapAtlasTexture,
+            bounds: this.splatmapAtlasBounds
+        };
+    }
+
     /**
      * Merge new tile buffers into existing
      */
