@@ -53,13 +53,28 @@ fn sampleTerrainHeight(clipX: f32, clipY: f32) -> f32 {
     
     let pixel = textureSampleLevel(terrainTexture, terrainSampler, vec2<f32>(u, v), 0.0);
     
+    // Check for invalid/transparent pixels
+    if (pixel.a < 0.01) {
+        return 0.0;
+    }
+    
+    // Check for NoData sentinel values
+    if ((pixel.r > 0.99 && pixel.g > 0.99 && pixel.b > 0.99) ||
+        (pixel.r < 0.01 && pixel.g < 0.01 && pixel.b < 0.01)) {
+        return 0.0;
+    }
+    
     let r = pixel.r * 255.0;
     let g = pixel.g * 255.0;
     let b = pixel.b * 255.0;
     let rawHeight = (r * 256.0 + g + b / 256.0) - 32768.0;
-    let height = clamp(rawHeight, 0.0, 9000.0);
     
-    return (height / 50000000.0) * terrainBounds.exaggeration;
+    // Below sea level or above max = treat as 0
+    if (rawHeight < 0.0 || rawHeight > 9000.0) {
+        return 0.0;
+    }
+    
+    return (rawHeight / 50000000.0) * terrainBounds.exaggeration;
 }
 
 @vertex

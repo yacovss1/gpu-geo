@@ -108,10 +108,28 @@ struct TerrainAndLighting {
 @group(2) @binding(2) var shadowSampler: sampler_comparison;
 
 fn decodeTerrainHeight(pixel: vec4<f32>) -> f32 {
+    // Check for invalid/transparent pixels (common at ocean edges)
+    if (pixel.a < 0.01) {
+        return 0.0;
+    }
+    
+    // Check for NoData sentinel values (often white, black, or specific colors)
+    if ((pixel.r > 0.99 && pixel.g > 0.99 && pixel.b > 0.99) ||
+        (pixel.r < 0.01 && pixel.g < 0.01 && pixel.b < 0.01)) {
+        return 0.0;
+    }
+    
     let r = pixel.r * 255.0;
     let g = pixel.g * 255.0;
     let b = pixel.b * 255.0;
-    return (r * 256.0 + g + b / 256.0) - 32768.0;
+    let height = (r * 256.0 + g + b / 256.0) - 32768.0;
+    
+    // Below sea level or above max = treat as 0
+    if (height < 0.0 || height > 9000.0) {
+        return 0.0;
+    }
+    
+    return height;
 }
 
 // Sample terrain normal from height texture

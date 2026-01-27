@@ -50,10 +50,31 @@ struct TerrainAndLighting {
 @group(2) @binding(0) var<uniform> lightSpaceMatrix: mat4x4<f32>;
 
 fn decodeTerrainHeight(pixel: vec4<f32>) -> f32 {
+    // Check for invalid/transparent pixels (common at ocean edges)
+    if (pixel.a < 0.01) {
+        return 0.0;
+    }
+    
+    // Check for NoData sentinel values (often white, black, or specific colors)
+    // Pure white (255,255,255) or near-black often indicates no data
+    if ((pixel.r > 0.99 && pixel.g > 0.99 && pixel.b > 0.99) ||
+        (pixel.r < 0.01 && pixel.g < 0.01 && pixel.b < 0.01)) {
+        return 0.0;
+    }
+    
     let r = pixel.r * 255.0;
     let g = pixel.g * 255.0;
     let b = pixel.b * 255.0;
-    return (r * 256.0 + g + b / 256.0) - 32768.0;
+    let height = (r * 256.0 + g + b / 256.0) - 32768.0;
+    
+    // Clamp to valid Earth elevation range
+    // Anything below sea level (negative) = treat as 0 (we don't render ocean trenches)
+    // Anything above 9000m = corrupted data
+    if (height < 0.0 || height > 9000.0) {
+        return 0.0;
+    }
+    
+    return height;
 }
 
 fn sampleTerrainHeight(clipX: f32, clipY: f32) -> f32 {
@@ -347,13 +368,28 @@ fn sampleTerrainHeight(clipX: f32, clipY: f32) -> f32 {
     
     let pixel = textureSampleLevel(terrainTexture, terrainSampler, vec2<f32>(u, v), 0.0);
     
+    // Check for invalid/transparent pixels
+    if (pixel.a < 0.01) {
+        return 0.0;
+    }
+    
+    // Check for NoData sentinel values
+    if ((pixel.r > 0.99 && pixel.g > 0.99 && pixel.b > 0.99) ||
+        (pixel.r < 0.01 && pixel.g < 0.01 && pixel.b < 0.01)) {
+        return 0.0;
+    }
+    
     let r = pixel.r * 255.0;
     let g = pixel.g * 255.0;
     let b = pixel.b * 255.0;
     let rawHeight = (r * 256.0 + g + b / 256.0) - 32768.0;
-    let height = clamp(rawHeight, 0.0, 9000.0);
     
-    return (height / 50000000.0) * terrainData.exaggeration;
+    // Below sea level or above max = treat as 0
+    if (rawHeight < 0.0 || rawHeight > 9000.0) {
+        return 0.0;
+    }
+    
+    return (rawHeight / 50000000.0) * terrainData.exaggeration;
 }
 
 @vertex

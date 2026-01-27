@@ -733,11 +733,31 @@ export class TileManager {
             ['vertexBuffer', 'hiddenFillIndexBuffer']
         );
         
-        if (destroyedCount > 0) {
-            console.log(`♻️ Freed ${destroyedCount} GPU buffers on zoom change`);
+        // Destroy splatmaps at wrong zoom
+        const splatmapsDestroyed = this.destroySplatmapsAtWrongZoom(currentZoom);
+        
+        if (destroyedCount > 0 || splatmapsDestroyed > 0) {
+            console.log(`♻️ Freed ${destroyedCount} GPU buffers, ${splatmapsDestroyed} splatmaps on zoom change`);
         }
     }
     
+    /**
+     * Destroy splatmaps not at current zoom level
+     */
+    destroySplatmapsAtWrongZoom(currentZoom) {
+        let destroyed = 0;
+        for (const [key, splatmap] of this.tileSplatmaps) {
+            const zoom = parseInt(key.split('/')[0]);
+            if (zoom !== currentZoom) {
+                if (splatmap.colorTexture) splatmap.colorTexture.destroy();
+                if (splatmap.featureIdTexture) splatmap.featureIdTexture.destroy();
+                this.tileSplatmaps.delete(key);
+                destroyed++;
+            }
+        }
+        return destroyed;
+    }
+
     /**
      * Destroy tiles outside visible viewport
      */
@@ -756,11 +776,30 @@ export class TileManager {
                 ['vertexBuffer', 'hiddenFillIndexBuffer']
             );
         
-        if (destroyedCount > 0) {
-            console.log(`♻️ Freed ${destroyedCount} off-screen tile buffers during pan`);
+        // Also destroy offscreen splatmaps
+        const splatmapsDestroyed = this.destroyOffscreenSplatmaps(visibleKeys);
+        
+        if (destroyedCount > 0 || splatmapsDestroyed > 0) {
+            console.log(`♻️ Freed ${destroyedCount} off-screen tile buffers, ${splatmapsDestroyed} splatmaps during pan`);
         }
     }
     
+    /**
+     * Destroy splatmaps outside visible viewport
+     */
+    destroyOffscreenSplatmaps(visibleKeys) {
+        let destroyed = 0;
+        for (const [key, splatmap] of this.tileSplatmaps) {
+            if (!visibleKeys.has(key)) {
+                if (splatmap.colorTexture) splatmap.colorTexture.destroy();
+                if (splatmap.featureIdTexture) splatmap.featureIdTexture.destroy();
+                this.tileSplatmaps.delete(key);
+                destroyed++;
+            }
+        }
+        return destroyed;
+    }
+
     /**
      * Generic destroy method with predicate
      */

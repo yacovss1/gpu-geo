@@ -28,10 +28,27 @@ struct TerrainParams {
 
 // Decode Terrarium format: height = (R * 256 + G + B / 256) - 32768
 fn decodeTerrarium(color: vec4<f32>) -> f32 {
+    // Check for invalid/transparent pixels
+    if (color.a < 0.01) {
+        return 0.0;
+    }
+    
+    // Check for NoData sentinel values
+    if ((color.r > 0.99 && color.g > 0.99 && color.b > 0.99) ||
+        (color.r < 0.01 && color.g < 0.01 && color.b < 0.01)) {
+        return 0.0;
+    }
+    
     let r = color.r * 255.0;
     let g = color.g * 255.0;
     let b = color.b * 255.0;
-    return (r * 256.0 + g + b / 256.0) - 32768.0;
+    let height = (r * 256.0 + g + b / 256.0) - 32768.0;
+    
+    // Below sea level or above max = treat as 0
+    if (height < 0.0 || height > 9000.0) {
+        return 0.0;
+    }
+    return height;
 }
 
 fn sampleTerrainHeight(x: f32, y: f32) -> f32 {

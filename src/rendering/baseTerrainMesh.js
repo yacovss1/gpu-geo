@@ -10,7 +10,7 @@
 import { transformTileCoords } from '../tiles/vectorTileParser.js';
 
 export class BaseTerrainMeshGenerator {
-    constructor(gridSize = 32, exaggeration = 30) {
+    constructor(gridSize = 32, exaggeration = 20) {
         this.gridSize = gridSize;
         this.exaggeration = exaggeration;
     }
